@@ -1,0 +1,11 @@
+.env
+.idea
+.venv
+.venv_bak
+.cache
+__pycache__
+.local
+data/
+logs/
+*.json
+*.log
