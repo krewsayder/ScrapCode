@@ -1,0 +1,292 @@
+import httpx
+import discord
+from discord.ext import commands, tasks
+
+from config import CAP_CHANNEL_ID, UPDATE_CHANNEL_ID
+from guilds import load_player_apis, load_capped_state, save_capped_state, load_guilds, get_guild_data_path, get_player_list, load_live_leaderboards, save_live_leaderboards
+from tracker import process_api_response
+
+TACTICUS_PLAYER_URL   = "https://api.tacticusgame.com/api/v1/player"
+TACTICUS_RAID_URL     = "https://api.tacticusgame.com/api/v1/guildRaid/{season}"
+TACTICUS_CURRENT_RAID = "https://api.tacticusgame.com/api/v1/guildRaid"
+
+
+class TasksCog(commands.Cog):
+    def __init__(self, bot: commands.Bot, file_lock):
+        self.bot       = bot
+        self.file_lock = file_lock
+        self.cap_detect.start()
+        self.auto_update.start()
+
+    def cog_unload(self):
+        self.cap_detect.cancel()
+        self.auto_update.cancel()
+
+    # ==========================================
+    # TASK: CAP DETECT (runs every hour)
+    # ==========================================
+
+    @tasks.loop(hours=1)
+    async def cap_detect(self):
+        print(f"[cap_detect] Loop fired, checking {len(load_player_apis())} players...")
+
+        channel = self.bot.get_channel(CAP_CHANNEL_ID)
+        if channel is None:
+            print(f"[cap_detect] Channel {CAP_CHANNEL_ID} not found — check CAP_CHANNEL_ID in config.py")
+            return
+
+        player_apis   = load_player_apis()
+        capped_state  = load_capped_state()
+        state_changed = False
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for discord_id, data in player_apis.items():
+                api_key = data.get("api_key") if isinstance(data, dict) else data
+                if not api_key:
+                    continue
+                headers = {"accept": "application/json", "X-API-KEY": api_key}
+
+                try:
+                    response = await client.get(TACTICUS_PLAYER_URL, headers=headers)
+                    response.raise_for_status()
+                    data = response.json()
+                except Exception as e:
+                    print(f"[cap_detect] Failed to fetch data for {discord_id}: {e}")
+                    continue
+
+                tokens    = data.get("player", {}).get("progress", {}).get("guildRaid", {}).get("tokens", {})
+                current   = tokens.get("current", 0)
+                maximum   = tokens.get("max", 3)
+                is_capped = current >= maximum
+                print(f"[cap_detect] {discord_id}: {current}/{maximum} capped={is_capped}")
+
+                was_capped = capped_state.get(discord_id, False)
+
+                if is_capped and not was_capped:
+                    try:
+                        await channel.send(
+                            f"⚔️ <@{discord_id}> your raid tokens are full ({current}/{maximum})! "
+                            f"Time to raid!"
+                        )
+                        print(f"[cap_detect] Pinged {discord_id}")
+                    except discord.Forbidden:
+                        print(f"[cap_detect] Missing permission to send in channel {CAP_CHANNEL_ID}")
+                        return
+                    capped_state[discord_id] = True
+                    state_changed = True
+
+                elif not is_capped and was_capped:
+                    print(f"[cap_detect] {discord_id} spent tokens, resetting state")
+                    capped_state[discord_id] = False
+                    state_changed = True
+
+        if state_changed:
+            save_capped_state(capped_state)
+
+    @cap_detect.before_loop
+    async def before_cap_detect(self):
+        await self.bot.wait_until_ready()
+
+    # ==========================================
+    # TASK: AUTO UPDATE (runs every hour)
+    # ==========================================
+
+    @tasks.loop(hours=1)
+    async def auto_update(self):
+        print("[auto_update] Loop fired...")
+
+        channel = self.bot.get_channel(UPDATE_CHANNEL_ID)
+        if channel is None:
+            print(f"[auto_update] Channel {UPDATE_CHANNEL_ID} not found — check UPDATE_CHANNEL_ID in config.py")
+            return
+
+        guilds = load_guilds()
+        if not guilds:
+            print("[auto_update] No guilds registered, skipping.")
+            return
+
+        # Determine current season using first guild's API key
+        season   = None
+        first_gd = next(iter(guilds.values()))
+        first_key = first_gd.get("api_key")
+        if first_key:
+            try:
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    resp = await client.get(
+                        TACTICUS_CURRENT_RAID,
+                        headers={"accept": "application/json", "X-API-KEY": first_key}
+                    )
+                    resp.raise_for_status()
+                    season = resp.json().get("season")
+            except Exception as e:
+                print(f"[auto_update] Failed to determine current season: {e}")
+
+        if season is None:
+            print("[auto_update] Could not determine current season, skipping.")
+            return
+
+        print(f"[auto_update] Updating all guilds for season {season}...")
+        results = []
+
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            for guild_id, guild_data in guilds.items():
+                guild_name = guild_data["name"]
+                api_key    = guild_data.get("api_key")
+
+                if not api_key:
+                    results.append(f"⚠️ **{guild_name}** — skipped, no API key set.")
+                    continue
+
+                headers  = {"accept": "application/json", "X-API-KEY": api_key}
+                data_dir = get_guild_data_path(guild_id)
+                url      = TACTICUS_RAID_URL.format(season=season)
+
+                try:
+                    response = await client.get(url, headers=headers)
+                    response.raise_for_status()
+                    api_data = response.json()
+
+                    async with self.file_lock:
+                        process_api_response(api_data, season, data_dir)
+
+                    results.append(f"✅ **{guild_name}** — updated successfully.")
+                    print(f"[auto_update] {guild_name} updated.")
+
+                except httpx.HTTPStatusError as e:
+                    results.append(f"❌ **{guild_name}** — HTTP {e.response.status_code}")
+                    print(f"[auto_update] {guild_name} failed: HTTP {e.response.status_code}")
+                except Exception as e:
+                    results.append(f"❌ **{guild_name}** — {str(e)[:80]}")
+                    print(f"[auto_update] {guild_name} failed: {e}")
+
+        try:
+            await channel.send(
+                f"🔄 **Auto-update complete — Season {season}**\n" + "\n".join(results)
+            )
+        except discord.Forbidden:
+            print(f"[auto_update] Missing permission to send in channel {UPDATE_CHANNEL_ID}")
+
+        # Refresh live leaderboards
+        await self._refresh_live_leaderboards(season, guilds)
+
+    async def _refresh_live_leaderboards(self, season: int, guilds: dict):
+        """Edit all live leaderboard messages with fresh data."""
+        from config import TIER_CHOICES
+        from embeds import build_battle_messages, build_cluster_messages, load_leaderboard_file
+
+        live = load_live_leaderboards()
+        if not live:
+            return
+
+        to_remove = []
+
+        for key, config in live.items():
+            channel_id = config.get("channel_id")
+            message_ids = config.get("messages", {})
+            channel = self.bot.get_channel(channel_id)
+
+            if channel is None:
+                print(f"[live_leaderboard] Channel {channel_id} not found, removing {key}")
+                to_remove.append(key)
+                continue
+
+            if key.startswith("guild:"):
+                guild_id   = config.get("guild_id")
+                guild_data = guilds.get(guild_id)
+                if not guild_data:
+                    to_remove.append(key)
+                    continue
+
+                guild_name = guild_data["name"]
+                data_dir   = get_guild_data_path(guild_id)
+                data, err  = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
+
+                for tier in TIER_CHOICES:
+                    msg_id = message_ids.get(tier.value)
+                    if not msg_id:
+                        continue
+                    try:
+                        msg = await channel.fetch_message(msg_id)
+                        if err or not data:
+                            new_content = f"📊 **{guild_name} — {tier.name} — No data yet**"
+                        else:
+                            messages = build_battle_messages(data, season, tier, guild_id, guild_name)
+                            new_content = "\n\n".join(messages) if messages else f"📊 **{guild_name} — {tier.name} — No data yet**"
+                        await msg.edit(content=new_content)
+                    except discord.NotFound:
+                        print(f"[live_leaderboard] Message {msg_id} not found, removing {key}")
+                        to_remove.append(key)
+                        break
+                    except discord.Forbidden:
+                        print(f"[live_leaderboard] No permission to edit message in channel {channel_id}")
+                        break
+                    except Exception as e:
+                        print(f"[live_leaderboard] Error editing message {msg_id}: {e}")
+
+            elif key == "cluster":
+                # Build merged cluster data
+                merged = {}
+                for gid, gdata in guilds.items():
+                    data_dir   = get_guild_data_path(gid)
+                    data, err  = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
+                    if err or not data:
+                        continue
+                    id_to_name = get_player_list(gid)
+                    guild_name = gdata["name"]
+                    for boss_id, encounter_dict in data.get("boss_hits", {}).items():
+                        for e_index, tiers in encounter_dict.items():
+                            for tier_key, entries in tiers.items():
+                                bucket = merged.setdefault(boss_id, {}).setdefault(e_index, {}).setdefault(tier_key, [])
+                                for entry in entries:
+                                    user_id      = entry.get("user_id", "Unknown")
+                                    user_display = id_to_name.get(user_id, str(user_id)[:8])
+                                    bucket.append({**entry, "_display": user_display, "_guild": guild_name})
+
+                # Sort and trim
+                for boss_id, encounter_dict in merged.items():
+                    for e_index, tiers in encounter_dict.items():
+                        for tier_key in tiers:
+                            limit = 5 if e_index == "0" else 1
+                            tiers[tier_key] = sorted(tiers[tier_key], key=lambda e: e["damage"], reverse=True)[:limit]
+
+                for tier in TIER_CHOICES:
+                    msg_id = message_ids.get(tier.value)
+                    if not msg_id:
+                        continue
+                    try:
+                        msg = await channel.fetch_message(msg_id)
+                        tier_merged = {
+                            boss_id: {
+                                e_index: tiers[tier.value]
+                                for e_index, tiers in encounter_dict.items()
+                                if tier.value in tiers
+                            }
+                            for boss_id, encounter_dict in merged.items()
+                        }
+                        messages = build_cluster_messages(tier_merged, season, tier)
+                        new_content = "\n\n".join(messages) if messages else f"🌐 **Cluster — {tier.name} — No data yet**"
+                        await msg.edit(content=new_content)
+                    except discord.NotFound:
+                        print(f"[live_leaderboard] Cluster message {msg_id} not found, removing cluster config")
+                        to_remove.append(key)
+                        break
+                    except discord.Forbidden:
+                        print(f"[live_leaderboard] No permission to edit cluster message in channel {channel_id}")
+                        break
+                    except Exception as e:
+                        print(f"[live_leaderboard] Error editing cluster message {msg_id}: {e}")
+
+        # Clean up any broken configs
+        if to_remove:
+            for key in to_remove:
+                live.pop(key, None)
+            save_live_leaderboards(live)
+            print(f"[live_leaderboard] Removed broken configs: {to_remove}")
+
+    @auto_update.before_loop
+    async def before_auto_update(self):
+        await self.bot.wait_until_ready()
+
+
+async def setup_tasks(bot: commands.Bot, file_lock):
+    await bot.add_cog(TasksCog(bot, file_lock))
