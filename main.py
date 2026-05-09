@@ -43,7 +43,7 @@ async def on_ready():
     # await bot.tree.sync()
     # print("Slash commands synced.")
 
-    GUILD_IDS = [1159970457496326154, 1458181638453203099]  # add as many as needed
+    GUILD_IDS = [1159970457496326154, 1458181638453203099]
     for guild_id in GUILD_IDS:
         guild = discord.Object(id=guild_id)
         bot.tree.copy_global_to(guild=guild)
@@ -83,6 +83,7 @@ async def load_cogs():
 
 async def main():
     async with bot:
+        discord.utils.setup_logging(handler=handler)
         await load_cogs()
         await bot.start(token)
 
