@@ -43,11 +43,12 @@ async def on_ready():
     # await bot.tree.sync()
     # print("Slash commands synced.")
 
-    # This is for testing, remove before launching
-    guild = discord.Object(id=1159970457496326154)
-    bot.tree.copy_global_to(guild=guild)
-    synced = await bot.tree.sync(guild=guild)
-    print(f"Synced {len(synced)} slash commands to guild.")
+    GUILD_IDS = [1159970457496326154, 1458181638453203099]  # add as many as needed
+    for guild_id in GUILD_IDS:
+        guild = discord.Object(id=guild_id)
+        bot.tree.copy_global_to(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+        print(f"Synced {len(synced)} commands to guild {guild_id}")
 
 
 @bot.tree.error
