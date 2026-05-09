@@ -44,16 +44,16 @@ load_dotenv()
 
 # The Discord channel ID where cap_detect will post token cap pings.
 
-CAP_CHANNEL_ID = os.get_env("CAP_CHANNEL_ID")
+CAP_CHANNEL_ID = os.getenv("CAP_CHANNEL_ID")
 
 # ==========================================
 # AUTO UPDATE CHANNEL
 # ==========================================
 
-UPDATE_CHANNEL_ID = os.get_env("CAP_CHANNEL_ID")
+UPDATE_CHANNEL_ID = os.getenv("CAP_CHANNEL_ID")
 
 # ==========================================
 # REPLAY INDEX CHANNEL
 # ==========================================
 
-REPLAY_INDEX_CHANNEL_ID = os.get_env("CAP_CHANNEL_ID")
+REPLAY_INDEX_CHANNEL_ID = os.getenv("CAP_CHANNEL_ID")
