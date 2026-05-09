@@ -33,6 +33,7 @@ file_lock = asyncio.Lock()
 # ==========================================
 # BOT EVENTS
 # ==========================================
+GUILD_IDS = [1159970457496326154, 1458181638453203099]
 
 @bot.event
 async def on_ready():
@@ -43,7 +44,6 @@ async def on_ready():
     # await bot.tree.sync()
     # print("Slash commands synced.")
 
-    GUILD_IDS = [1159970457496326154, 1458181638453203099]
     for guild_id in GUILD_IDS:
         guild = discord.Object(id=guild_id)
         bot.tree.copy_global_to(guild=guild)
