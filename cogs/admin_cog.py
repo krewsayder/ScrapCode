@@ -91,7 +91,11 @@ class AdminCog(commands.Cog):
         name="deregister_guild",
         description="Remove a guild from the cluster registry.",
     )
-    @app_commands.checks.has_any_role("Guild Leader", "Dark Tech", "Tech-Priest")
+    @app_commands.checks.has_any_role(
+        "Guild Leader", 
+        "Dark Tech",
+        "Tech-Priest"
+    )
     @app_commands.describe(guild_id="The guild to deregister")
     @app_commands.autocomplete(guild_id=guild_autocomplete)
     async def deregister_guild(self, interaction: discord.Interaction, guild_id: str):
@@ -194,7 +198,7 @@ class AdminCog(commands.Cog):
         name="upload_member_list",
         description="Upload your guild's filled player list.",
     )
-    @app_commands.checks.has_any_role("Guild Leader", "Dark Tech", "Tech-Priest")
+    @app_commands.checks.has_any_role("Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
     @app_commands.describe(file="The filled player_list.json file")
     async def upload_member_list(self, interaction: discord.Interaction, file: discord.Attachment):
         await interaction.response.defer(ephemeral=True)
