@@ -1,4 +1,6 @@
 from discord import app_commands
+from dotenv import load_dotenv
+import os
 
 # ==========================================
 # EMBED LIMITS
@@ -33,22 +35,25 @@ TIER_CHOICES = [
 
 REQUIRED_ROLES = ("Dark Tech", "Tech-Priest", "Captain","Guild Leader")
 
+
+# Load environment variables from .env file
+load_dotenv()
 # ==========================================
 # CAP DETECT CHANNEL
 # ==========================================
 
 # The Discord channel ID where cap_detect will post token cap pings.
 
-CAP_CHANNEL_ID = REDACTED
+CAP_CHANNEL_ID = os.get_env("CAP_CHANNEL_ID")
 
 # ==========================================
 # AUTO UPDATE CHANNEL
 # ==========================================
 
-UPDATE_CHANNEL_ID = REDACTED
+UPDATE_CHANNEL_ID = os.get_env("CAP_CHANNEL_ID")
 
 # ==========================================
 # REPLAY INDEX CHANNEL
 # ==========================================
 
-REPLAY_INDEX_CHANNEL_ID = REDACTED
+REPLAY_INDEX_CHANNEL_ID = os.get_env("CAP_CHANNEL_ID")
