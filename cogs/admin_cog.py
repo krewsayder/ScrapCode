@@ -210,18 +210,22 @@ class AdminCog(commands.Cog):
             await interaction.followup.send("❌ Could not find your member profile.", ephemeral=True)
             return
 
-        member_role_ids = {role.id for role in member.roles}
-        guilds          = load_guilds()
+        member_role_ids   = {role.id for role in member.roles}
+        member_role_names = {role.name.lower() for role in member.roles}
+        is_captain        = "captain" in member_role_names
+        guilds            = load_guilds()
 
-        matched_guilds = [
-            (guild_id, guild_data)
-            for guild_id, guild_data in guilds.items()
-            if guild_data.get("role_id") in member_role_ids
-        ]
+        matched_guilds = []
+        for guild_id, guild_data in guilds.items():
+            has_leader_role    = guild_data.get("role_id") in member_role_ids
+            has_guild_name_role = guild_data.get("name", "").lower() in member_role_names
+            if has_leader_role or (is_captain and has_guild_name_role):
+                matched_guilds.append((guild_id, guild_data))
 
         if not matched_guilds:
             await interaction.followup.send(
-                "❌ You don't have a guild leader role linked to any registered guild.",
+                "❌ You don't have permission to upload for any registered guild.\n"
+                "You need either the guild's leader role, or the Captain role with a matching guild role.",
                 ephemeral=True,
             )
             return
