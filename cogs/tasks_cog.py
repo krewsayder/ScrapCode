@@ -32,8 +32,11 @@ class TasksCog(commands.Cog):
 
         channel = self.bot.get_channel(CAP_CHANNEL_ID)
         if channel is None:
-            print(f"[cap_detect] Channel {CAP_CHANNEL_ID} not found — check CAP_CHANNEL_ID in config.py")
-            return
+            try:
+                channel = await self.bot.fetch_channel(CAP_CHANNEL_ID)
+            except Exception as e:
+                print(f"[cap_detect] Channel {CAP_CHANNEL_ID} not found — {e}")
+                return
 
         player_apis   = load_player_apis()
         capped_state  = load_capped_state()
@@ -97,8 +100,11 @@ class TasksCog(commands.Cog):
 
         channel = self.bot.get_channel(UPDATE_CHANNEL_ID)
         if channel is None:
-            print(f"[auto_update] Channel {UPDATE_CHANNEL_ID} not found — check UPDATE_CHANNEL_ID in config.py")
-            return
+            try:
+                channel = await self.bot.fetch_channel(UPDATE_CHANNEL_ID)
+            except Exception as e:
+                print(f"[auto_update] Channel {UPDATE_CHANNEL_ID} not found — {e}")
+                return
 
         guilds = load_guilds()
         if not guilds:
