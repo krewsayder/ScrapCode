@@ -2,10 +2,11 @@ import json
 import re
 from pathlib import Path
 
-GUILDS_FILE       = Path("guilds.json")
-PLAYER_API_FILE   = Path("player_api_list.json")
-CAPPED_STATE_FILE = Path("capped_state.json")
-DATA_DIR          = Path("data")
+_BASE             = Path(__file__).parent
+GUILDS_FILE       = _BASE / "guilds.json"
+PLAYER_API_FILE   = _BASE / "player_api_list.json"
+CAPPED_STATE_FILE = _BASE / "capped_state.json"
+DATA_DIR          = _BASE / "data"
 
 # Tacticus user IDs are standard UUIDs: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 UUID_PATTERN = re.compile(

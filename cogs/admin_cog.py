@@ -11,6 +11,7 @@ from guilds import (
     save_guilds,
     get_guild_data_path,
     save_player_list,
+    get_player_list,
     validate_player_list,
     load_live_leaderboards,
     save_live_leaderboards,
@@ -276,6 +277,43 @@ class AdminCog(commands.Cog):
         await interaction.followup.send(msg, ephemeral=True)
 
 
+    # # ==========================================
+    # # SLASH COMMAND: view_member_list
+    # # ==========================================
+    # @app_commands.command(
+    #     name="view_member_list",
+    #     description="View the member list for your guild.",
+    # )
+    # @app_commands.checks.has_any_role("Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
+    # @app_commands.describe(guild_id="A short unique ID for the guild, no spaces (e.g. iron_warriors)")
+    # async def view_member_list(self, interaction: discord.Interaction, guild_id: str):
+    #     await interaction.response.defer(ephemeral=True)
+
+    #     guild_id = guild_id.strip().lower().replace(" ", "_")
+    #     guilds   = load_guilds()
+
+    #     # Validate Guild Exists
+    #     if guild_id not in guilds:
+    #         await interaction.followup.send(
+    #             f"❌ A guild with ID `{guild_id}` is not registered. "
+    #             f"Choose a different ID or contact an admin to register the guild.",
+    #             ephemeral=True,
+    #         )
+    #         return
+    #     # Validate that if user is captain, they are member of guild they want to view
+
+    #     # Get Registered Players
+    #     players = get_player_list(guild_id).keys()
+    #     players = list(players)
+    #     if len(players) == 0:
+    #         await interaction.followup.send(
+    #             f"❌ No players registered for guild `{guild_id}` yet. "
+    #             f"Ask a guild leader to upload the member list using `/upload_member_list`.",
+    #             ephemeral=True,
+    #         )
+    #         return
+
+
     # ==========================================
     # SLASH COMMAND: SET_LIVE_LEADERBOARD
     # ==========================================
@@ -302,6 +340,20 @@ class AdminCog(commands.Cog):
         from embeds import build_battle_messages, load_leaderboard_file
         import httpx
 
+        print(f"[set_live_leaderboard] Invoked by {interaction.user} (id={interaction.user.id})")
+        print(f"[set_live_leaderboard] Target channel: #{channel.name} (id={channel.id}, type={type(channel).__name__})")
+        print(f"[set_live_leaderboard] Channel category: {channel.category} (id={channel.category_id})")
+
+        # Log computed permissions for the bot in this channel
+        bot_member = interaction.guild.me
+        perms = channel.permissions_for(bot_member)
+        print(f"[set_live_leaderboard] Bot permissions in #{channel.name}:")
+        print(f"[set_live_leaderboard]   view_channel={perms.view_channel}")
+        print(f"[set_live_leaderboard]   send_messages={perms.send_messages}")
+        print(f"[set_live_leaderboard]   read_message_history={perms.read_message_history}")
+        print(f"[set_live_leaderboard]   embed_links={perms.embed_links}")
+        print(f"[set_live_leaderboard]   administrator={perms.administrator}")
+
         guilds     = load_guilds()
         guild_data = guilds.get(guild_id)
         if not guild_data:
@@ -315,6 +367,7 @@ class AdminCog(commands.Cog):
             return
 
         # Determine current season
+        print(f"[set_live_leaderboard] Fetching current season from Tacticus API...")
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.get(
@@ -324,12 +377,16 @@ class AdminCog(commands.Cog):
                 resp.raise_for_status()
                 season = resp.json().get("season")
         except Exception as e:
+            print(f"[set_live_leaderboard] Tacticus API error: {e}")
             await interaction.followup.send(f"❌ Could not determine current season: {e}", ephemeral=True)
             return
+
+        print(f"[set_live_leaderboard] Current season: {season}")
 
         data_dir    = get_guild_data_path(guild_id)
         data, err   = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
         if err:
+            print(f"[set_live_leaderboard] Leaderboard file error: {err}")
             await interaction.followup.send(f"❌ {err} — run `/update_leaderboard` first.", ephemeral=True)
             return
 
@@ -341,8 +398,23 @@ class AdminCog(commands.Cog):
                 content = f"📊 **{guild_name} — {tier.name} — No data yet**"
             else:
                 content = "\n\n".join(messages)
-            msg = await channel.send(content)
-            message_ids[tier.value] = msg.id
+            print(f"[set_live_leaderboard] Sending {tier.name} message to #{channel.name} (len={len(content)})...")
+            try:
+                msg = await channel.send(content)
+                message_ids[tier.value] = msg.id
+                print(f"[set_live_leaderboard] Sent {tier.name} message (id={msg.id})")
+            except discord.Forbidden as e:
+                print(f"[set_live_leaderboard] Forbidden sending {tier.name} message: {e}")
+                await interaction.followup.send(
+                    f"❌ Missing permissions to send messages in {channel.mention}.\n"
+                    f"Error: `{e}`",
+                    ephemeral=True,
+                )
+                return
+            except Exception as e:
+                print(f"[set_live_leaderboard] Error sending {tier.name} message: {e}")
+                await interaction.followup.send(f"❌ Unexpected error sending message: {e}", ephemeral=True)
+                return
 
         # Save config
         live = load_live_leaderboards()
@@ -352,6 +424,7 @@ class AdminCog(commands.Cog):
             "messages":   message_ids,
         }
         save_live_leaderboards(live)
+        print(f"[set_live_leaderboard] Config saved. message_ids={message_ids}")
 
         await interaction.followup.send(
             f"✅ Live Battle leaderboard set up for **{guild_name}** in {channel.mention}!\n"
