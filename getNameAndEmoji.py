@@ -251,7 +251,12 @@ def get_boss_emoji(unit_id: str) -> str:
         "primarispsy": "<:Sibyll:1468464808251625535>",
 
 
-
+        # ===========================================
+        # Assorted other characters
+        # ===========================================
+        "ultraCalgar":    "<:Calgar:1476686945051738254>",
+        "darkaAsmodai":   "<:Asmo:1476625574561714388>",
+        "darkaCompanion": "<:Forcas:1476625758997970964>",
 
 
     }
