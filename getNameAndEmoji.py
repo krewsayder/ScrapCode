@@ -258,6 +258,8 @@ def get_boss_emoji(unit_id: str) -> str:
         "darkaasmodai":   "<:Asmo:1476625574561714388>",
         "darkacompanion": "<:Forcas:1476625758997970964>",
 
+        "votanmemnyr":    "<:Ammuk:1480629452936445973>",
+        "spacewulfen":    "<:Ulf:1476714131640815646>",
 
     }
 
