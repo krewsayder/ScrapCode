@@ -262,9 +262,9 @@ def get_boss_emoji(unit_id: str) -> str:
         "spacewulfen":    "<:Ulf:1476714131640815646>",
 
 
-        "bloodDeathCompany": "<:Lucien:1476624849899225281>",
-        "eldarRanger":       "<:Calandis:1476624101106909427>",
-        "templChampion":     "<:Jaeger:1476714016276480163>",
+        "blooddeathCompany": "<:Lucien:1476624849899225281>",
+        "eldarranger":       "<:Calandis:1476624101106909427>",
+        "templchampion":     "<:Jaeger:1476714016276480163>",
 
     }
 
