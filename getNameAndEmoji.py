@@ -254,17 +254,16 @@ def get_boss_emoji(unit_id: str) -> str:
         # ===========================================
         # Assorted other characters
         # ===========================================
-        "ultracalgar":    "<:Calgar:1476686945051738254>",
-        "darkaasmodai":   "<:Asmo:1476625574561714388>",
-        "darkacompanion": "<:Forcas:1476625758997970964>",
-
-        "votanmemnyr":    "<:Ammuk:1480629452936445973>",
-        "spacewulfen":    "<:Ulf:1476714131640815646>",
-
-
+        "ultracalgar":       "<:Calgar:1476686945051738254>",
+        "darkaasmodai":      "<:Asmo:1476625574561714388>",
+        "darkacompanion":    "<:Forcas:1476625758997970964>",
+        "votanmemnyr":       "<:Ammuk:1507567576102862999>",
+        "spacewulfen":       "<:Ulf:1476714131640815646>",
         "blooddeathcompany": "<:Lucien:1476624849899225281>",
         "eldarranger":       "<:Calandis:1476624101106909427>",
         "templchampion":     "<:Jaeger:1476714016276480163>",
+        "adepthospitaller":  "<:Isabella:1476623383834787851>",
+        
 
     }
 
