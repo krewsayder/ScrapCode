@@ -8,7 +8,7 @@ from guilds import load_player_list, save_player_list
 from services.chronicl3r.client import chronicl3rClient
 
 TACTICUS_GUILD_URL = "https://api.tacticusgame.com/api/v1/guild"
-STALE_AFTER_HOURS  = 24
+STALE_AFTER_HOURS  = 1
 
 
 class PlayerService:
