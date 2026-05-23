@@ -1,6 +1,3 @@
-import io
-import json
-
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -10,18 +7,17 @@ from guilds import (
     load_guilds,
     save_guilds,
     get_guild_data_path,
-    save_player_list,
-    get_player_list,
-    validate_player_list,
     load_live_leaderboards,
     save_live_leaderboards,
 )
 from embeds import guild_autocomplete
+from services.chronicl3r.player_service import PlayerService
 
 
 class AdminCog(commands.Cog):
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
+    def __init__(self, bot: commands.Bot, player_service: PlayerService):
+        self.bot            = bot
+        self.player_service = player_service
 
     # ==========================================
     # SLASH COMMAND: REGISTER_GUILD
@@ -76,13 +72,23 @@ class AdminCog(commands.Cog):
         get_guild_data_path(guild_id)  # Creates the data directory
 
         await interaction.followup.send(
-            f"✅ Guild **{name}** registered successfully!\n"
-            f"• ID: `{guild_id}`\n"
-            f"• Leader role: {role.mention}\n"
-            f"• Data folder: `data/{guild_id}/`\n\n"
-            f"The guild leader can now upload their member list using `/upload_member_list`.",
+            f"✅ Guild **{name}** registered! Fetching player roster...",
             ephemeral=True,
         )
+
+        try:
+            await self.player_service.refresh_guild(guild_id, api_key)
+            await interaction.followup.send(
+                f"✅ Player list populated for **{name}**.\n"
+                f"• ID: `{guild_id}`\n"
+                f"• Leader role: {role.mention}",
+                ephemeral=True,
+            )
+        except Exception as e:
+            await interaction.followup.send(
+                f"⚠️ Guild registered but player list could not be fetched: {e}",
+                ephemeral=True,
+            )
 
     # ==========================================
     # SLASH COMMAND: DEREGISTER_GUILD
@@ -144,175 +150,30 @@ class AdminCog(commands.Cog):
             color=discord.Color.blurple(),
         )
 
+        from guilds import load_player_list
         for guild_id, guild_data in guilds.items():
             guild_name   = guild_data.get("name", "Unknown")
             role_id      = guild_data.get("role_id")
             role_mention = f"<@&{role_id}>" if role_id else "❌ No role set"
             has_api_key  = "✅" if guild_data.get("api_key") else "❌ Missing"
 
-            player_list_path = get_guild_data_path(guild_id) / "player_list.json"
-            has_player_list  = "✅" if player_list_path.exists() else "❌ Not uploaded"
+            players      = load_player_list(guild_id).get("players", {})
+            active        = sum(1 for p in players.values() if not p.get("is_former"))
+            last_vals    = [p["last_validated"] for p in players.values() if p.get("last_validated") and p["last_validated"] != "1970-01-01T00:00:00Z"]
+            last_sync    = max(last_vals) if last_vals else None
+            roster_line  = f"✅ {active} active players • Last sync: {last_sync[:10] if last_sync else 'never'}" if players else "❌ Never synced"
 
             embed.add_field(
                 name=f"{guild_name} • `{guild_id}`",
                 value=(
                     f"**Leader role:** {role_mention}\n"
                     f"**API key:** {has_api_key}\n"
-                    f"**Player list:** {has_player_list}"
+                    f"**Roster:** {roster_line}"
                 ),
                 inline=False,
             )
 
         await interaction.followup.send(embed=embed, ephemeral=True)
-
-    # ==========================================
-    # SLASH COMMAND: GET_MEMBER_TEMPLATE
-    # ==========================================
-
-    @app_commands.command(
-        name="get_member_template",
-        description="Get an empty player list template to fill in and upload.",
-    )
-    @app_commands.checks.has_any_role("Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
-    async def get_member_template(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-
-        template       = {f"PlayerName{i}": "user-id-here" for i in range(1, 31)}
-        template_bytes = json.dumps(template, indent=2).encode("utf-8")
-        file           = discord.File(fp=io.BytesIO(template_bytes), filename="player_list.json")
-
-        await interaction.followup.send(
-            "📋 Here is your member list template.\n"
-            "• Replace `PlayerName1`, `PlayerName2` etc. with your players' in-game names\n"
-            "• Replace `user-id-here` with their Tacticus user IDs\n"
-            "• Add or remove entries as needed\n\n"
-            "Once filled in, upload it back using `/upload_member_list`.",
-            file=file,
-            ephemeral=True,
-        )
-
-    # ==========================================
-    # SLASH COMMAND: UPLOAD_MEMBER_LIST
-    # ==========================================
-
-    @app_commands.command(
-        name="upload_member_list",
-        description="Upload your guild's filled player list.",
-    )
-    @app_commands.checks.has_any_role("Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
-    @app_commands.describe(file="The filled player_list.json file")
-    async def upload_member_list(self, interaction: discord.Interaction, file: discord.Attachment):
-        await interaction.response.defer(ephemeral=True)
-
-        # Fetch member from API to ensure roles are up to date (not relying on cache)
-        try:
-            member = await interaction.guild.fetch_member(interaction.user.id)
-        except discord.NotFound:
-            await interaction.followup.send("❌ Could not find your member profile.", ephemeral=True)
-            return
-
-        member_role_ids   = {role.id for role in member.roles}
-        member_role_names = {role.name.lower() for role in member.roles}
-        is_captain        = "captain" in member_role_names
-        guilds            = load_guilds()
-
-        matched_guilds = []
-        for guild_id, guild_data in guilds.items():
-            has_leader_role    = guild_data.get("role_id") in member_role_ids
-            has_guild_name_role = guild_data.get("name", "").lower() in member_role_names
-            if has_leader_role or (is_captain and has_guild_name_role):
-                matched_guilds.append((guild_id, guild_data))
-
-        if not matched_guilds:
-            await interaction.followup.send(
-                "❌ You don't have permission to upload for any registered guild.\n"
-                "You need either the guild's leader role, or the Captain role with a matching guild role.",
-                ephemeral=True,
-            )
-            return
-
-        if len(matched_guilds) > 1:
-            guild_list = "\n".join(f"• `{gid}` — {gdata['name']}" for gid, gdata in matched_guilds)
-            await interaction.followup.send(
-                f"❌ You have leader roles for multiple guilds. Please ask an admin to upload "
-                f"on your behalf specifying the correct guild.\n\nYour guilds:\n{guild_list}",
-                ephemeral=True,
-            )
-            return
-
-        matched_guild_id, matched_guild_data = matched_guilds[0]
-        matched_guild_name = matched_guild_data["name"]
-
-        if not file.filename.endswith(".json"):
-            await interaction.followup.send("❌ Please upload a `.json` file.", ephemeral=True)
-            return
-
-        try:
-            raw  = await file.read()
-            data = json.loads(raw.decode("utf-8"))
-        except json.JSONDecodeError:
-            await interaction.followup.send("❌ File is not valid JSON.", ephemeral=True)
-            return
-        except Exception as e:
-            await interaction.followup.send(f"❌ Failed to read file: {e}", ephemeral=True)
-            return
-
-        is_valid, clean_data, skipped = validate_player_list(data)
-        if not is_valid:
-            await interaction.followup.send(
-                "❌ Invalid player list:\n" + "\n".join(skipped),
-                ephemeral=True,
-            )
-            return
-
-        save_player_list(matched_guild_id, clean_data)
-
-        msg = (
-            f"✅ Player list for **{matched_guild_name}** updated successfully!\n"
-            f"• {len(clean_data)} players registered."
-        )
-        if skipped:
-            msg += "\n\n⚠️ The following entries were skipped:\n" + "\n".join(skipped)
-
-        await interaction.followup.send(msg, ephemeral=True)
-
-
-    # # ==========================================
-    # # SLASH COMMAND: view_member_list
-    # # ==========================================
-    # @app_commands.command(
-    #     name="view_member_list",
-    #     description="View the member list for your guild.",
-    # )
-    # @app_commands.checks.has_any_role("Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
-    # @app_commands.describe(guild_id="A short unique ID for the guild, no spaces (e.g. iron_warriors)")
-    # async def view_member_list(self, interaction: discord.Interaction, guild_id: str):
-    #     await interaction.response.defer(ephemeral=True)
-
-    #     guild_id = guild_id.strip().lower().replace(" ", "_")
-    #     guilds   = load_guilds()
-
-    #     # Validate Guild Exists
-    #     if guild_id not in guilds:
-    #         await interaction.followup.send(
-    #             f"❌ A guild with ID `{guild_id}` is not registered. "
-    #             f"Choose a different ID or contact an admin to register the guild.",
-    #             ephemeral=True,
-    #         )
-    #         return
-    #     # Validate that if user is captain, they are member of guild they want to view
-
-    #     # Get Registered Players
-    #     players = get_player_list(guild_id).keys()
-    #     players = list(players)
-    #     if len(players) == 0:
-    #         await interaction.followup.send(
-    #             f"❌ No players registered for guild `{guild_id}` yet. "
-    #             f"Ask a guild leader to upload the member list using `/upload_member_list`.",
-    #             ephemeral=True,
-    #         )
-    #         return
-
 
     # ==========================================
     # SLASH COMMAND: SET_LIVE_LEADERBOARD
@@ -534,5 +395,5 @@ class AdminCog(commands.Cog):
         )
 
 
-async def setup_admin(bot: commands.Bot):
-    await bot.add_cog(AdminCog(bot))
+async def setup_admin(bot: commands.Bot, player_service: PlayerService):
+    await bot.add_cog(AdminCog(bot, player_service))

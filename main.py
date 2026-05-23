@@ -15,6 +15,8 @@ from cogs.fun_cog          import setup_fun
 from cogs.bomb_cog         import setup_bomb
 from cogs.token_cog        import setup_token
 from cogs.replay_cog       import setup_replay
+from services.chronicl3r.client         import chronicl3rClient
+from services.chronicl3r.player_service import PlayerService
 
 # ==========================================
 # CONFIGURATION & INITIALIZATION
@@ -64,12 +66,15 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
 # ==========================================
 
 async def load_cogs():
-    # UpdateCog needs the shared file_lock to prevent concurrent file writes
-    await setup_update(bot, file_lock)
+    chronicl3r_client = chronicl3rClient()
+    chronicl3r_client.authenticate()
+    player_service = PlayerService(chronicl3r_client)
+
+    await setup_update(bot, file_lock, player_service)
     await setup_view(bot)
-    await setup_admin(bot)
+    await setup_admin(bot, player_service)
     await setup_registration(bot)
-    await setup_tasks(bot, file_lock)
+    await setup_tasks(bot, file_lock, player_service)
     await setup_fun(bot)
     await setup_bomb(bot)
     await setup_token(bot)

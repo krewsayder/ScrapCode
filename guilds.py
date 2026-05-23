@@ -2,6 +2,8 @@ import json
 import re
 from pathlib import Path
 
+from migrations.player_list_migrations import PlayerListMigrator
+
 _BASE             = Path(__file__).parent
 GUILDS_FILE       = _BASE / "guilds.json"
 PLAYER_API_FILE   = _BASE / "player_api_list.json"
@@ -24,14 +26,14 @@ def load_guilds() -> dict:
     if not GUILDS_FILE.exists():
         return {}
     try:
-        return json.loads(GUILDS_FILE.read_text())
+        return json.loads(GUILDS_FILE.read_text(encoding='utf-8'))
     except Exception:
         return {}
 
 
 def save_guilds(guilds: dict):
     """Save the guild registry to disk."""
-    GUILDS_FILE.write_text(json.dumps(guilds, indent=2))
+    GUILDS_FILE.write_text(json.dumps(guilds, indent=2), encoding='utf-8')
 
 
 def get_guild_by_role(role_id: int) -> tuple[str, dict] | None:
@@ -50,62 +52,42 @@ def get_guild_data_path(guild_id: str) -> Path:
 
 
 # ==========================================
-# GUILD PLAYER LIST (name -> tacticus ID)
+# GUILD PLAYER LIST (v2 schema)
 # ==========================================
 
-def get_player_list(guild_id: str) -> dict:
-    """Load a guild's player list. Returns empty dict if not uploaded yet."""
+def load_player_list(guild_id: str) -> dict:
+    """Load the raw v2 player list structure, running migration if needed.
+    Returns the full {__meta__, players} dict. Writes back if migrated."""
     path = get_guild_data_path(guild_id) / "player_list.json"
     if not path.exists():
-        return {}
+        return {"__meta__": {"version": PlayerListMigrator.CURRENT_VERSION}, "players": {}}
     try:
-        raw = json.loads(path.read_text())
-        return {v: k for k, v in raw.items()}  # Flip {"Name": "ID"} -> {"ID": "Name"}
+        raw = json.loads(path.read_text(encoding='utf-8'))
+        data, was_migrated = PlayerListMigrator.migrate(raw)
+        if was_migrated:
+            path.write_text(json.dumps(data, indent=2), encoding='utf-8')
+        return data
     except Exception:
-        return {}
+        return {"__meta__": {"version": PlayerListMigrator.CURRENT_VERSION}, "players": {}}
+
+
+def get_player_list(guild_id: str) -> dict:
+    """Return {tacticus_id: display_name} for use in embeds/leaderboards.
+    Appends ' (former)' for players no longer in the guild roster."""
+    players = load_player_list(guild_id).get("players", {})
+    result = {}
+    for uid, entry in players.items():
+        name = entry.get("display_name", uid[:8])
+        if entry.get("is_former"):
+            name += " (former)"
+        result[uid] = name
+    return result
 
 
 def save_player_list(guild_id: str, data: dict):
-    """Save a player list for a guild."""
+    """Save a v2 player list for a guild. Expects {__meta__, players} structure."""
     path = get_guild_data_path(guild_id) / "player_list.json"
-    path.write_text(json.dumps(data, indent=2))
-
-
-def validate_player_list(data: dict) -> tuple[bool, dict, list[str]]:
-    """Validate and clean a player list.
-
-    - Rejects the whole file if it's not a dict or is completely empty.
-    - Skips individual entries with invalid names or non-UUID user IDs.
-    - Returns (is_valid, clean_data, skipped_warnings).
-
-    is_valid: False only if the whole file is unusable.
-    clean_data: dict of only the valid entries.
-    skipped_warnings: list of human-readable messages about skipped entries.
-    """
-    if not isinstance(data, dict):
-        return False, {}, ["File must be a JSON object."]
-
-    if len(data) == 0:
-        return False, {}, ["Player list is empty."]
-
-    clean   = {}
-    skipped = []
-
-    for name, uid in data.items():
-        if not isinstance(name, str) or not name.strip():
-            skipped.append(f"Skipped invalid player name: {repr(name)}")
-            continue
-
-        if not isinstance(uid, str) or not UUID_PATTERN.match(uid.strip()):
-            skipped.append(f"Skipped **{name}** — invalid user ID: `{uid}`")
-            continue
-
-        clean[name] = uid.strip()
-
-    if not clean:
-        return False, {}, ["No valid entries found. Make sure all user IDs are in UUID format."]
-
-    return True, clean, skipped
+    path.write_text(json.dumps(data, indent=2), encoding='utf-8')
 
 
 # ==========================================
@@ -119,14 +101,14 @@ def load_player_apis() -> dict:
     if not PLAYER_API_FILE.exists():
         return {}
     try:
-        return json.loads(PLAYER_API_FILE.read_text())
+        return json.loads(PLAYER_API_FILE.read_text(encoding='utf-8'))
     except Exception:
         return {}
 
 
 def save_player_apis(data: dict):
     """Save the global player API key registry to disk."""
-    PLAYER_API_FILE.write_text(json.dumps(data, indent=2))
+    PLAYER_API_FILE.write_text(json.dumps(data, indent=2), encoding='utf-8')
 
 
 # ==========================================
@@ -138,14 +120,14 @@ def load_capped_state() -> dict:
     if not CAPPED_STATE_FILE.exists():
         return {}
     try:
-        return json.loads(CAPPED_STATE_FILE.read_text())
+        return json.loads(CAPPED_STATE_FILE.read_text(encoding='utf-8'))
     except Exception:
         return {}
 
 
 def save_capped_state(data: dict):
     """Save the capped state to disk."""
-    CAPPED_STATE_FILE.write_text(json.dumps(data, indent=2))
+    CAPPED_STATE_FILE.write_text(json.dumps(data, indent=2), encoding='utf-8')
 
 
 # ==========================================
@@ -166,11 +148,11 @@ def load_live_leaderboards() -> dict:
     if not LIVE_LEADERBOARDS_FILE.exists():
         return {}
     try:
-        return json.loads(LIVE_LEADERBOARDS_FILE.read_text())
+        return json.loads(LIVE_LEADERBOARDS_FILE.read_text(encoding='utf-8'))
     except Exception:
         return {}
 
 
 def save_live_leaderboards(data: dict):
     """Save live leaderboard config to disk."""
-    LIVE_LEADERBOARDS_FILE.write_text(json.dumps(data, indent=2))
+    LIVE_LEADERBOARDS_FILE.write_text(json.dumps(data, indent=2), encoding='utf-8')

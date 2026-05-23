@@ -5,6 +5,7 @@ from discord.ext import commands, tasks
 from config import CAP_CHANNEL_ID, UPDATE_CHANNEL_ID
 from guilds import load_player_apis, load_capped_state, save_capped_state, load_guilds, get_guild_data_path, get_player_list, load_live_leaderboards, save_live_leaderboards
 from tracker import process_api_response
+from services.chronicl3r.player_service import PlayerService
 
 TACTICUS_PLAYER_URL   = "https://api.tacticusgame.com/api/v1/player"
 TACTICUS_RAID_URL     = "https://api.tacticusgame.com/api/v1/guildRaid/{season}"
@@ -12,9 +13,10 @@ TACTICUS_CURRENT_RAID = "https://api.tacticusgame.com/api/v1/guildRaid"
 
 
 class TasksCog(commands.Cog):
-    def __init__(self, bot: commands.Bot, file_lock):
-        self.bot       = bot
-        self.file_lock = file_lock
+    def __init__(self, bot: commands.Bot, file_lock, player_service: PlayerService):
+        self.bot            = bot
+        self.file_lock      = file_lock
+        self.player_service = player_service
         self.cap_detect.start()
         self.auto_update.start()
 
@@ -138,6 +140,12 @@ class TasksCog(commands.Cog):
             for guild_id, guild_data in guilds.items():
                 guild_name = guild_data["name"]
                 api_key    = guild_data.get("api_key")
+
+                if api_key:
+                    try:
+                        await self.player_service.validate_if_stale(guild_id, api_key)
+                    except Exception as e:
+                        print(f"[auto_update] Player list validation failed for {guild_name}: {e}")
 
                 if not api_key:
                     results.append(f"⚠️ **{guild_name}** — skipped, no API key set.")
@@ -294,5 +302,5 @@ class TasksCog(commands.Cog):
         await self.bot.wait_until_ready()
 
 
-async def setup_tasks(bot: commands.Bot, file_lock):
-    await bot.add_cog(TasksCog(bot, file_lock))
+async def setup_tasks(bot: commands.Bot, file_lock, player_service: PlayerService):
+    await bot.add_cog(TasksCog(bot, file_lock, player_service))

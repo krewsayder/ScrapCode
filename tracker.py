@@ -7,12 +7,12 @@ TOP_N = 5
 def load_json(path: Path) -> dict:
     if path.exists():
         try:
-            return json.loads(path.read_text())
+            return json.loads(path.read_text(encoding='utf-8'))
         except: pass
     return {"boss_hits": {}}
 
 def save_json(path: Path, data: dict):
-    path.write_text(json.dumps(data, indent=2))
+    path.write_text(json.dumps(data, indent=2), encoding='utf-8')
 
 def get_tier_key(entry: dict) -> str | None:
     rarity = entry.get("rarity")

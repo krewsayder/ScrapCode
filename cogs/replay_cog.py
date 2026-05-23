@@ -231,13 +231,13 @@ def load_replay_index() -> dict:
     if not REPLAY_INDEX_FILE.exists():
         return {}
     try:
-        return json.loads(REPLAY_INDEX_FILE.read_text())
+        return json.loads(REPLAY_INDEX_FILE.read_text(encoding='utf-8'))
     except Exception:
         return {}
 
 
 def save_replay_index(data: dict):
-    REPLAY_INDEX_FILE.write_text(json.dumps(data, indent=2))
+    REPLAY_INDEX_FILE.write_text(json.dumps(data, indent=2), encoding='utf-8')
 
 
 def build_index_message(entries: list) -> str:

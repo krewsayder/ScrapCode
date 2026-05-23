@@ -18,7 +18,7 @@ def load_leaderboard_file(file_path: Path) -> tuple[dict | None, str | None]:
     if not file_path.exists():
         return None, "No data file found."
     try:
-        return json.loads(file_path.read_text()), None
+        return json.loads(file_path.read_text(encoding='utf-8')), None
     except json.JSONDecodeError:
         return None, "Leaderboard file is corrupted."
     except Exception as e:

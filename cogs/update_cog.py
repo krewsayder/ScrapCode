@@ -6,17 +6,19 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import REQUIRED_ROLES
-from guilds import load_guilds, get_guild_data_path
+from guilds import load_guilds, get_guild_data_path, load_player_list
 from tracker import process_api_response
 from embeds import guild_autocomplete
+from services.chronicl3r.player_service import PlayerService
 
 TACTICUS_RAID_URL = "https://api.tacticusgame.com/api/v1/guildRaid/{season}"
 
 
 class UpdateCog(commands.Cog):
-    def __init__(self, bot: commands.Bot, file_lock: asyncio.Lock):
-        self.bot       = bot
-        self.file_lock = file_lock
+    def __init__(self, bot: commands.Bot, file_lock: asyncio.Lock, player_service: PlayerService):
+        self.bot            = bot
+        self.file_lock      = file_lock
+        self.player_service = player_service
 
     # ==========================================
     # SLASH COMMAND: UPDATE_LEADERBOARD
@@ -64,6 +66,8 @@ class UpdateCog(commands.Cog):
 
             async with self.file_lock:
                 process_api_response(api_data, season, data_dir)
+
+            await self._register_unknown_players(guild_id, api_data)
 
             await interaction.followup.send(
                 f"✅ Leaderboard for **{guild_name}** — Season **{season}** updated successfully."
@@ -118,6 +122,8 @@ class UpdateCog(commands.Cog):
                     async with self.file_lock:
                         process_api_response(api_data, season, data_dir)
 
+                    await self._register_unknown_players(guild_id, api_data)
+
                     results.append(f"✅ **{guild_name}** — updated successfully.")
 
                 except httpx.HTTPStatusError as e:
@@ -130,5 +136,18 @@ class UpdateCog(commands.Cog):
         )
 
 
-async def setup_update(bot: commands.Bot, file_lock: asyncio.Lock):
-    await bot.add_cog(UpdateCog(bot, file_lock))
+    async def _register_unknown_players(self, guild_id: str, api_data: dict) -> None:
+        """Register any user IDs from raid data that aren't in the local player list."""
+        known   = set(load_player_list(guild_id).get("players", {}).keys())
+        seen    = {e["userId"] for e in api_data.get("entries", []) if "userId" in e}
+        unknown = seen - known
+        for user_id in unknown:
+            try:
+                await self.player_service.get_or_register(user_id)
+                print(f"[UpdateCog] Registered previously unknown player {user_id}")
+            except Exception as e:
+                print(f"[UpdateCog] Failed to register {user_id}: {e}")
+
+
+async def setup_update(bot: commands.Bot, file_lock: asyncio.Lock, player_service: PlayerService):
+    await bot.add_cog(UpdateCog(bot, file_lock, player_service))
