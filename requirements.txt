@@ -2,3 +2,6 @@ discord.py
 python-dotenv
 httpx
 requests
+pytest
+pytest
+pytest-asyncio
