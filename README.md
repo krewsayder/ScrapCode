@@ -1,8 +1,6 @@
 # ScrapCode Discord Bot
 
-> The scrapcode discord bot is a bot for the UNDV cluster in the Warhammer Tacticus Mobile game to perform admin functions, player management functions, and create/analyze leaderboards.
->
-> This bot will be updated over time to be more dynamic so other guilds could perhaps import their data to use the functionality. Currently, the app is hard coded for the UNDV cluster.
+> ScrapCode is a multi-tenant Discord bot for Warhammer Tacticus clusters. It handles admin functions, player management, token cap notifications, and raid leaderboards. Each Discord server gets its own isolated data cluster, and all role permissions are configured dynamically per server.
 
 ## Background
 I took this tool over from another developer who had started the project to meet a need from cluster leadership.  That developer no longer maintains the project and so I took this project over.  The original developer will be credited at some point 
@@ -43,70 +41,59 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=27
 
 Replace `YOUR_CLIENT_ID` with the bot's application ID from the [Discord Developer Portal](https://discord.com/developers/applications).
 
+## Role Tiers
+
+Permissions are configured per Discord server — no hardcoded role names. There are three tiers:
+
+| Tier | Scope | Who configures it |
+|------|-------|-------------------|
+| **admin** | Cluster-wide — manage guilds, configure roles | `/set_cluster_role` |
+| **officer** | Cluster-wide — view/update leaderboards, manage channels | `/set_cluster_role` |
+| **guild member** | Per game guild — register, view tokens/bombs, submit replays | `/set_guild_member_role` |
+
+Discord `Administrator` permission always bypasses tier checks and is used to bootstrap the first configuration.
+
 ## Commands
 
 ### Admin Commands
-*Required roles: Guild Leader, Dark Tech, Tech-Priest (Captain for some)*
-
-| Command | Description | Parameters | Roles |
-|---------|-------------|------------|-------|
-| `/register_guild` | Register a guild into the cluster with its API key and leader role | `name`, `guild_id`, `api_key`, `role` | Guild Leader, Dark Tech, Tech-Priest |
-| `/deregister_guild` | Remove a guild from the cluster registry | `guild_id` (autocomplete) | Guild Leader, Dark Tech, Tech-Priest |
-| `/list_guilds` | List all registered guilds and their status | — | Captain, Guild Leader, Dark Tech, Tech-Priest |
-| `/get_member_template` | Download an empty player list JSON template | — | Captain, Guild Leader, Dark Tech, Tech-Priest |
-| `/upload_member_list` | Upload your guild's filled player list JSON file | `file` | Captain, Guild Leader, Dark Tech, Tech-Priest |
-| `/set_live_leaderboard` | Set up a Battle leaderboard in a channel that auto-updates every hour | `guild_id` (autocomplete), `channel` | Captain, Guild Leader, Dark Tech, Tech-Priest |
-| `/set_live_cluster_leaderboard` | Set up a cluster-wide leaderboard in a channel that auto-updates every hour | `channel` | Captain, Guild Leader, Dark Tech, Tech-Priest |
-
----
-
-### Update Commands
-*Required roles: Captain, Guild Leader, Dark Tech, Tech-Priest*
+*Requires: **admin** tier or Discord Administrator*
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
+| `/register_guild` | Register a guild into the cluster with its API key and leader role | `name`, `guild_id`, `api_key`, `role` |
+| `/deregister_guild` | Remove a guild from the cluster registry | `guild_id` (autocomplete) |
+| `/set_cluster_role` | Add a Discord role to the admin or officer tier | `tier` (admin/officer), `role` |
+| `/set_guild_member_role` | Add a Discord role as the member role for a game guild | `guild_id` (autocomplete), `role` |
+| `/set_ping_channel` | Set the channel where token cap notifications are posted for a guild | `guild_id` (autocomplete), `channel` |
+
+---
+
+### Officer Commands
+*Requires: **officer** tier or above*
+
+| Command | Description | Parameters |
+|---------|-------------|------------|
+| `/list_guilds` | List all registered guilds and their status | — |
+| `/check_registered_members` | List all players who have registered their Tacticus API key | — |
+| `/set_live_leaderboard` | Set up a Battle leaderboard in a channel that auto-updates every hour | `guild_id` (autocomplete), `channel` |
+| `/set_live_cluster_leaderboard` | Set up a cluster-wide leaderboard in a channel that auto-updates every hour | `channel` |
 | `/update_leaderboard` | Fetch raid data from Tacticus API and update local records for one guild | `guild_id` (autocomplete), `season` |
 | `/update_all` | Fetch raid data for all registered guilds and update local records | `season` |
+| `/view_leaderboard` | View top Battle damage leaderboard for a guild and tier | `guild_id` (autocomplete), `season`, `tier` |
+| `/view_bomb_leaderboard` | View top Bomb damage leaderboard for a guild and tier | `guild_id` (autocomplete), `season`, `tier` |
+| `/view_cluster_leaderboard` | View Battle damage leaderboard across all guilds in the cluster | `season`, `tier` |
 
 ---
 
-### View Commands
-*Required roles vary — see table*
-
-| Command | Description | Parameters | Roles |
-|---------|-------------|------------|-------|
-| `/view_leaderboard` | View top Battle damage leaderboard for a guild and tier | `guild_id` (autocomplete), `season`, `tier` | Captain, Guild Leader, Dark Tech, Tech-Priest |
-| `/view_bomb_leaderboard` | View top Bomb damage leaderboard for a guild and tier | `guild_id` (autocomplete), `season`, `tier` | Tech-Priest only |
-| `/view_cluster_leaderboard` | View Battle damage leaderboard across all guilds in the cluster | `season`, `tier` | Captain, Guild Leader, Dark Tech, Tech-Priest |
-
----
-
-### Player Registration Commands
-*Required roles vary — see table*
-
-| Command | Description | Parameters | Roles |
-|---------|-------------|------------|-------|
-| `/register` | Register your personal Tacticus API key for token cap notifications | `api_key`, `guild_id` (autocomplete), `target_user` *(admin only, optional)* | Veteran of the Long War |
-| `/unregister` | Remove your Tacticus API key registration | `target_user` *(admin only, optional)* | Veteran of the Long War |
-| `/check_registered_members` | List all players who have registered their Tacticus API key | — | Captain, Guild Leader, Dark Tech, Tech-Priest |
-
----
-
-### Token & Bomb Commands
-*Required roles: Veteran of the Long War, Captain, Guild Leader, Dark Tech, Tech-Priest*
+### Member Commands
+*Requires: **guild member** role for the relevant guild (or officer/admin)*
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
+| `/register` | Register your personal Tacticus API key for token cap notifications | `api_key`, `guild_id` (autocomplete), `target_user` *(admin only, optional)* |
+| `/unregister` | Remove your Tacticus API key registration | `target_user` *(admin only, optional)* |
 | `/token_availability` | Show raid token status for all registered players in a guild | `guild_id` (autocomplete) |
 | `/bomb_availability` | Show bomb token status for all registered players in a guild | `guild_id` (autocomplete) |
-
----
-
-### Replay Commands
-*Required roles: Veteran of the Long War*
-
-| Command | Description | Parameters |
-|---------|-------------|------------|
 | `/upload_replay` | Submit a raid replay link to the index for a boss/map | `boss` (autocomplete), `map_name` (autocomplete), `team`, `tier`, `damage`, `url`, `position` *(optional)*, `comment` *(optional)* |
 | `/get_replay` | View replays for a boss/map, optionally filtered by team | `boss` (autocomplete), `map_name` (autocomplete), `team` *(optional)* |
 | `/delete_replay` | Remove a replay from the index by its URL | `boss` (autocomplete), `map_name` (autocomplete), `url` |
