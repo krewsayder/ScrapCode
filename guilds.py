@@ -31,7 +31,6 @@ def load_guilds(discord_server_id: int) -> dict:
 
 
 def save_guilds(discord_server_id: int, guilds: dict) -> None:
-    """Save guild registry from a {guild_id: guild_data_dict} mapping."""
     from models import Cluster, Guild
     cluster = repo.load(discord_server_id)
     cluster.guilds = {
@@ -48,7 +47,6 @@ def save_guilds(discord_server_id: int, guilds: dict) -> None:
 
 
 def get_guild_by_role(discord_server_id: int, role_id: int):
-    """Find a guild by its leader role ID. Returns (guild_id, guild_data) or None."""
     for guild_id, guild_data in load_guilds(discord_server_id).items():
         if guild_data.get("role_id") == role_id:
             return guild_id, guild_data
@@ -56,7 +54,6 @@ def get_guild_by_role(discord_server_id: int, role_id: int):
 
 
 def get_guild_data_path(discord_server_id: int, guild_id: str) -> Path:
-    """Returns the data directory path for a guild, creating it if needed."""
     return repo.get_guild_data_path(discord_server_id, guild_id)
 
 
@@ -85,27 +82,27 @@ def save_player_list(discord_server_id: int, guild_id: str, data: dict) -> None:
 
 
 # ==========================================
-# PLAYER API LIST
+# PLAYER REGISTRATIONS  {discord_id: {api_key, guild_id}}
 # ==========================================
 
-def load_player_apis(discord_server_id: int, guild_id: str) -> dict:
-    return repo.load_player_apis(discord_server_id, guild_id)
+def load_player_registrations(discord_server_id: int) -> dict:
+    return repo.load_player_registrations(discord_server_id)
 
 
-def save_player_apis(discord_server_id: int, guild_id: str, data: dict) -> None:
-    repo.save_player_apis(discord_server_id, guild_id, data)
+def save_player_registrations(discord_server_id: int, data: dict) -> None:
+    repo.save_player_registrations(discord_server_id, data)
 
 
 # ==========================================
-# CAPPED STATE
+# CAPPED STATE  {discord_id: bool}
 # ==========================================
 
-def load_capped_state(discord_server_id: int, guild_id: str) -> dict:
-    return repo.load_capped_state(discord_server_id, guild_id)
+def load_capped_state(discord_server_id: int) -> dict:
+    return repo.load_capped_state(discord_server_id)
 
 
-def save_capped_state(discord_server_id: int, guild_id: str, data: dict) -> None:
-    repo.save_capped_state(discord_server_id, guild_id, data)
+def save_capped_state(discord_server_id: int, data: dict) -> None:
+    repo.save_capped_state(discord_server_id, data)
 
 
 # ==========================================

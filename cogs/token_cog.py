@@ -5,7 +5,7 @@ from discord.ext import commands
 
 from config import REQUIRED_ROLES
 from embeds import guild_autocomplete
-from guilds import load_guilds, load_player_apis
+from guilds import load_guilds, load_player_registrations
 
 TACTICUS_PLAYER_URL = "https://api.tacticusgame.com/api/v1/player"
 
@@ -45,10 +45,15 @@ class TokenCog(commands.Cog):
             await interaction.followup.send(f"❌ Guild `{guild_id}` not found.")
             return
 
-        guild_name  = guild_data["name"]
-        player_apis = load_player_apis(server_id, guild_id)
+        guild_name    = guild_data["name"]
+        registrations = load_player_registrations(server_id)
+        guild_players = {
+            discord_id: data
+            for discord_id, data in registrations.items()
+            if data.get("guild_id") == guild_id
+        }
 
-        if not player_apis:
+        if not guild_players:
             await interaction.followup.send(
                 f"❌ No registered players found in **{guild_name}**."
             )
@@ -58,7 +63,7 @@ class TokenCog(commands.Cog):
         failed = []
 
         async with httpx.AsyncClient(timeout=10.0) as client:
-            for discord_id, data in player_apis.items():
+            for discord_id, data in guild_players.items():
                 api_key = data.get("api_key") if isinstance(data, dict) else data
                 if not api_key:
                     failed.append(discord_id)

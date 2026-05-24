@@ -60,10 +60,11 @@ def migrate():
     new_guilds_file.write_text(json.dumps(new_guilds_data, indent=2), encoding="utf-8")
     print(f"Wrote {new_guilds_file}")
 
-    # --- player_api_list.json -> split by guild ---
+    # --- player_api_list.json -> cluster-level player_registrations.json ---
+    # Format: {discord_id: {api_key, guild_id}}
     old_players_file = BASE / "player_api_list.json"
-    players_by_guild: dict[str, dict] = {}
-    unassigned: dict[str, dict] = {}
+    registrations = {}
+    unassigned = {}
 
     if old_players_file.exists():
         raw = json.loads(old_players_file.read_text(encoding="utf-8"))
@@ -76,12 +77,11 @@ def migrate():
                 api_key  = data
 
             if guild_id and guild_id in guilds:
-                players_by_guild.setdefault(guild_id, {})[discord_id] = {"api_key": api_key}
+                registrations[discord_id] = {"api_key": api_key, "guild_id": guild_id}
             else:
                 unassigned[discord_id] = {"api_key": api_key, "original_guild_id": guild_id}
 
-        total = sum(len(v) for v in players_by_guild.values())
-        print(f"Migrated {total} players across {len(players_by_guild)} guilds")
+        print(f"Migrated {len(registrations)} player registrations")
         if unassigned:
             print(f"WARNING: {len(unassigned)} players had no valid guild_id and were skipped:")
             for did, info in unassigned.items():
@@ -89,43 +89,33 @@ def migrate():
     else:
         print("WARNING: player_api_list.json not found, skipping")
 
-    # --- capped_state.json -> split by guild ---
+    reg_file = SERVER_DIR / "player_registrations.json"
+    reg_file.write_text(json.dumps(registrations, indent=2), encoding="utf-8")
+    print(f"Wrote {reg_file}")
+
+    # --- capped_state.json -> cluster-level ---
     old_capped_file = BASE / "capped_state.json"
-    capped_by_guild: dict[str, dict] = {}
+    capped_state = {}
 
     if old_capped_file.exists():
-        capped = json.loads(old_capped_file.read_text(encoding="utf-8"))
-        for discord_id, state in capped.items():
-            for guild_id, players in players_by_guild.items():
-                if discord_id in players:
-                    capped_by_guild.setdefault(guild_id, {})[discord_id] = state
-                    break
-        print(f"Split capped_state across {len(capped_by_guild)} guilds")
+        capped_state = json.loads(old_capped_file.read_text(encoding="utf-8"))
+        # Keep only players that made it into registrations
+        capped_state = {k: v for k, v in capped_state.items() if k in registrations}
+        print(f"Migrated {len(capped_state)} capped state entries")
     else:
         print("WARNING: capped_state.json not found, skipping")
 
-    # --- per-guild files ---
+    capped_file = SERVER_DIR / "capped_state.json"
+    capped_file.write_text(json.dumps(capped_state, indent=2), encoding="utf-8")
+    print(f"Wrote {capped_file}")
+
+    # --- per-guild: player_list.json + season data files ---
     old_data_root = BASE / "data"
 
     for guild_id in guilds:
         guild_dir = SERVER_DIR / guild_id
         guild_dir.mkdir(parents=True, exist_ok=True)
 
-        # player_api_list.json
-        api_file = guild_dir / "player_api_list.json"
-        api_file.write_text(
-            json.dumps(players_by_guild.get(guild_id, {}), indent=2), encoding="utf-8"
-        )
-        print(f"  {guild_id}/player_api_list.json  ({len(players_by_guild.get(guild_id, {}))} players)")
-
-        # capped_state.json
-        capped_file = guild_dir / "capped_state.json"
-        capped_file.write_text(
-            json.dumps(capped_by_guild.get(guild_id, {}), indent=2), encoding="utf-8"
-        )
-        print(f"  {guild_id}/capped_state.json")
-
-        # player_list.json + season data files from data/{guild_id}/
         old_guild_dir = old_data_root / guild_id
         if old_guild_dir.exists():
             old_pl = old_guild_dir / "player_list.json"

@@ -15,16 +15,16 @@ class ClusterRepository(ABC):
     def save(self, cluster: Cluster) -> None: ...
 
     @abstractmethod
-    def load_player_apis(self, discord_server_id: int, guild_id: str) -> dict: ...
+    def load_player_registrations(self, discord_server_id: int) -> dict: ...
 
     @abstractmethod
-    def save_player_apis(self, discord_server_id: int, guild_id: str, data: dict) -> None: ...
+    def save_player_registrations(self, discord_server_id: int, data: dict) -> None: ...
 
     @abstractmethod
-    def load_capped_state(self, discord_server_id: int, guild_id: str) -> dict: ...
+    def load_capped_state(self, discord_server_id: int) -> dict: ...
 
     @abstractmethod
-    def save_capped_state(self, discord_server_id: int, guild_id: str, data: dict) -> None: ...
+    def save_capped_state(self, discord_server_id: int, data: dict) -> None: ...
 
     @abstractmethod
     def load_player_list(self, discord_server_id: int, guild_id: str) -> dict: ...
@@ -59,24 +59,33 @@ class JsonClusterRepository(ClusterRepository):
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def _read_json(self, path: Path) -> dict:
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _write_json(self, path: Path, data: dict) -> None:
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
     def load(self, discord_server_id: int) -> Cluster:
         guilds_file = self._server_path(discord_server_id) / "guilds.json"
-        if not guilds_file.exists():
-            return Cluster(discord_server_id=discord_server_id)
-        try:
-            raw = json.loads(guilds_file.read_text(encoding="utf-8"))
-        except Exception:
+        raw = self._read_json(guilds_file)
+        if not raw:
             return Cluster(discord_server_id=discord_server_id)
 
-        guilds = {}
-        for guild_id, data in raw.get("guilds", {}).items():
-            guilds[guild_id] = Guild(
+        guilds = {
+            guild_id: Guild(
                 id=guild_id,
                 name=data["name"],
                 api_key=data.get("api_key", ""),
                 role_id=data.get("role_id", 0),
                 notification_channel_id=data.get("notification_channel_id"),
             )
+            for guild_id, data in raw.get("guilds", {}).items()
+        }
 
         return Cluster(
             discord_server_id=discord_server_id,
@@ -86,7 +95,7 @@ class JsonClusterRepository(ClusterRepository):
 
     def save(self, cluster: Cluster) -> None:
         guilds_file = self._server_path(cluster.discord_server_id) / "guilds.json"
-        raw = {
+        self._write_json(guilds_file, {
             "update_channel_id": cluster.update_channel_id,
             "guilds": {
                 guild_id: {
@@ -97,34 +106,23 @@ class JsonClusterRepository(ClusterRepository):
                 }
                 for guild_id, g in cluster.guilds.items()
             },
-        }
-        guilds_file.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+        })
 
-    def load_player_apis(self, discord_server_id: int, guild_id: str) -> dict:
-        path = self._guild_path(discord_server_id, guild_id) / "player_api_list.json"
-        if not path.exists():
-            return {}
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+    def load_player_registrations(self, discord_server_id: int) -> dict:
+        path = self._server_path(discord_server_id) / "player_registrations.json"
+        return self._read_json(path)
 
-    def save_player_apis(self, discord_server_id: int, guild_id: str, data: dict) -> None:
-        path = self._guild_path(discord_server_id, guild_id) / "player_api_list.json"
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    def save_player_registrations(self, discord_server_id: int, data: dict) -> None:
+        path = self._server_path(discord_server_id) / "player_registrations.json"
+        self._write_json(path, data)
 
-    def load_capped_state(self, discord_server_id: int, guild_id: str) -> dict:
-        path = self._guild_path(discord_server_id, guild_id) / "capped_state.json"
-        if not path.exists():
-            return {}
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+    def load_capped_state(self, discord_server_id: int) -> dict:
+        path = self._server_path(discord_server_id) / "capped_state.json"
+        return self._read_json(path)
 
-    def save_capped_state(self, discord_server_id: int, guild_id: str, data: dict) -> None:
-        path = self._guild_path(discord_server_id, guild_id) / "capped_state.json"
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    def save_capped_state(self, discord_server_id: int, data: dict) -> None:
+        path = self._server_path(discord_server_id) / "capped_state.json"
+        self._write_json(path, data)
 
     def load_player_list(self, discord_server_id: int, guild_id: str) -> dict:
         path = self._guild_path(discord_server_id, guild_id) / "player_list.json"
@@ -141,20 +139,15 @@ class JsonClusterRepository(ClusterRepository):
 
     def save_player_list(self, discord_server_id: int, guild_id: str, data: dict) -> None:
         path = self._guild_path(discord_server_id, guild_id) / "player_list.json"
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self._write_json(path, data)
 
     def load_live_leaderboards(self, discord_server_id: int) -> dict:
         path = self._server_path(discord_server_id) / "live_leaderboards.json"
-        if not path.exists():
-            return {}
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+        return self._read_json(path)
 
     def save_live_leaderboards(self, discord_server_id: int, data: dict) -> None:
         path = self._server_path(discord_server_id) / "live_leaderboards.json"
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self._write_json(path, data)
 
     def get_guild_data_path(self, discord_server_id: int, guild_id: str) -> Path:
         path = self._guild_path(discord_server_id, guild_id) / "data"

@@ -7,7 +7,7 @@ from guilds import (
     load_guilds,
     get_guild_data_path,
     get_player_list,
-    load_player_apis,
+    load_player_registrations,
     load_capped_state,
     save_capped_state,
     load_live_leaderboards,
@@ -45,67 +45,82 @@ class TasksCog(commands.Cog):
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             for server_id in server_ids:
-                guilds = load_guilds(server_id)
+                registrations = load_player_registrations(server_id)
+                if not registrations:
+                    continue
 
-                for guild_id, guild_data in guilds.items():
+                guilds        = load_guilds(server_id)
+                capped_state  = load_capped_state(server_id)
+                state_changed = False
+
+                # Cache fetched channels to avoid redundant lookups
+                channel_cache: dict[int, discord.TextChannel | None] = {}
+
+                for discord_id, reg in registrations.items():
+                    api_key  = reg.get("api_key")
+                    guild_id = reg.get("guild_id")
+                    if not api_key or not guild_id:
+                        continue
+
+                    guild_data = guilds.get(guild_id)
+                    if not guild_data:
+                        continue
+
                     channel_id = guild_data.get("notification_channel_id")
                     if not channel_id:
                         continue
 
-                    channel = self.bot.get_channel(channel_id)
-                    if channel is None:
-                        try:
-                            channel = await self.bot.fetch_channel(channel_id)
-                        except Exception as e:
-                            print(f"[cap_detect] Channel {channel_id} not found for {guild_id} — {e}")
-                            continue
-
-                    player_apis   = load_player_apis(server_id, guild_id)
-                    capped_state  = load_capped_state(server_id, guild_id)
-                    state_changed = False
-
-                    for discord_id, data in player_apis.items():
-                        api_key = data.get("api_key") if isinstance(data, dict) else data
-                        if not api_key:
-                            continue
-
-                        headers = {"accept": "application/json", "X-API-KEY": api_key}
-                        try:
-                            response = await client.get(TACTICUS_PLAYER_URL, headers=headers)
-                            response.raise_for_status()
-                            player_data = response.json()
-                        except Exception as e:
-                            print(f"[cap_detect] Failed to fetch data for {discord_id}: {e}")
-                            continue
-
-                        tokens    = player_data.get("player", {}).get("progress", {}).get("guildRaid", {}).get("tokens", {})
-                        current   = tokens.get("current", 0)
-                        maximum   = tokens.get("max", 3)
-                        is_capped = current >= maximum
-                        print(f"[cap_detect] {discord_id}: {current}/{maximum} capped={is_capped}")
-
-                        was_capped = capped_state.get(discord_id, False)
-
-                        if is_capped and not was_capped:
+                    if channel_id not in channel_cache:
+                        channel = self.bot.get_channel(channel_id)
+                        if channel is None:
                             try:
-                                await channel.send(
-                                    f"⚔️ <@{discord_id}> your raid tokens are full ({current}/{maximum})! "
-                                    f"Time to raid!"
-                                )
-                                print(f"[cap_detect] Pinged {discord_id}")
-                            except discord.Forbidden:
-                                print(f"[cap_detect] Missing permission to send in channel {channel_id}")
-                                break
-                            capped_state[discord_id] = True
-                            state_changed = True
+                                channel = await self.bot.fetch_channel(channel_id)
+                            except Exception as e:
+                                print(f"[cap_detect] Channel {channel_id} not found for {guild_id} — {e}")
+                                channel = None
+                        channel_cache[channel_id] = channel
 
-                        elif not is_capped and was_capped:
-                            print(f"[cap_detect] {discord_id} spent tokens, resetting state")
-                            capped_state[discord_id] = False
-                            state_changed = True
+                    channel = channel_cache[channel_id]
+                    if channel is None:
+                        continue
 
-                    if state_changed:
-                        save_capped_state(server_id, guild_id, capped_state)
+                    headers = {"accept": "application/json", "X-API-KEY": api_key}
+                    try:
+                        response = await client.get(TACTICUS_PLAYER_URL, headers=headers)
+                        response.raise_for_status()
+                        player_data = response.json()
+                    except Exception as e:
+                        print(f"[cap_detect] Failed to fetch data for {discord_id}: {e}")
+                        continue
+
+                    tokens    = player_data.get("player", {}).get("progress", {}).get("guildRaid", {}).get("tokens", {})
+                    current   = tokens.get("current", 0)
+                    maximum   = tokens.get("max", 3)
+                    is_capped = current >= maximum
+                    print(f"[cap_detect] {discord_id}: {current}/{maximum} capped={is_capped}")
+
+                    was_capped = capped_state.get(discord_id, False)
+
+                    if is_capped and not was_capped:
+                        try:
+                            await channel.send(
+                                f"⚔️ <@{discord_id}> your raid tokens are full ({current}/{maximum})! "
+                                f"Time to raid!"
+                            )
+                            print(f"[cap_detect] Pinged {discord_id}")
+                        except discord.Forbidden:
+                            print(f"[cap_detect] Missing permission to send in channel {channel_id}")
+                            continue
+                        capped_state[discord_id] = True
+                        state_changed = True
+
+                    elif not is_capped and was_capped:
+                        print(f"[cap_detect] {discord_id} spent tokens, resetting state")
+                        capped_state[discord_id] = False
+                        state_changed = True
+
+                if state_changed:
+                    save_capped_state(server_id, capped_state)
 
     @cap_detect.before_loop
     async def before_cap_detect(self):
