@@ -78,6 +78,25 @@ class PlayerService:
                 await self.refresh_guild(guild_id, api_key)
                 return
 
+    async def ensure_player_in_list(self, guild_id: str, user_id: str) -> bool:
+        """Register a player with chronicl3r and save them to the local player list
+        if they aren't already there. Marks them as is_former=True since they're
+        not on the current roster. Returns True if a new entry was saved."""
+        data    = load_player_list(guild_id)
+        players = data["players"]
+
+        if user_id in players:
+            return False
+
+        profile = await self.get_or_register(user_id)
+        players[user_id] = {
+            "display_name":  profile["tacticus_display_nm"],
+            "last_validated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "is_former":     True,
+        }
+        save_player_list(guild_id, data)
+        return True
+
     def get_display_name(self, tacticus_user_id: str, guild_id: str) -> str:
         """Return the display name for a player, with ' (former)' appended if applicable.
         Falls back to a truncated ID if the player isn't in the list."""

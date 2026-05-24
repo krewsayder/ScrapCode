@@ -137,16 +137,18 @@ class UpdateCog(commands.Cog):
 
 
     async def _register_unknown_players(self, guild_id: str, api_data: dict) -> None:
-        """Register any user IDs from raid data that aren't in the local player list."""
+        """Register any user IDs from raid data that aren't in the local player list
+        and save them as former members so they display correctly on leaderboards."""
         known   = set(load_player_list(guild_id).get("players", {}).keys())
         seen    = {e["userId"] for e in api_data.get("entries", []) if "userId" in e}
         unknown = seen - known
         for user_id in unknown:
             try:
-                await self.player_service.get_or_register(user_id)
-                print(f"[UpdateCog] Registered previously unknown player {user_id}")
+                saved = await self.player_service.ensure_player_in_list(guild_id, user_id)
+                if saved:
+                    print(f"[UpdateCog] Saved unknown player {user_id} to player list")
             except Exception as e:
-                print(f"[UpdateCog] Failed to register {user_id}: {e}")
+                print(f"[UpdateCog] Failed to save unknown player {user_id}: {e}")
 
 
 async def setup_update(bot: commands.Bot, file_lock: asyncio.Lock, player_service: PlayerService):
