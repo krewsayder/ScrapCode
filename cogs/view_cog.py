@@ -2,7 +2,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import REQUIRED_ROLES, TIER_CHOICES
+from config import TIER_CHOICES
+from permissions import require_tier
 from guilds import load_guilds, get_guild_data_path, get_player_list
 from embeds import (
     build_battle_messages,
@@ -25,7 +26,7 @@ class ViewCog(commands.Cog):
         name="view_leaderboard",
         description="View top Battle damage leaderboard for a specific guild and tier.",
     )
-    @app_commands.checks.has_any_role("Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
+    @require_tier("officer")
     @app_commands.describe(
         guild_id="Select the guild",
         season="Season number (e.g., 94)",
@@ -75,7 +76,7 @@ class ViewCog(commands.Cog):
         name="view_bomb_leaderboard",
         description="View top Bomb damage leaderboard for a specific guild and tier.",
     )
-    @app_commands.checks.has_any_role("Tech-Priest")
+    @require_tier("officer")
     @app_commands.describe(
         guild_id="Select the guild",
         season="Season number (e.g., 94)",
@@ -125,7 +126,7 @@ class ViewCog(commands.Cog):
         name="view_cluster_leaderboard",
         description="View top Battle damage leaderboard across all guilds in the cluster.",
     )
-    @app_commands.checks.has_any_role("Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
+    @require_tier("officer")
     @app_commands.describe(
         season="Season number (e.g., 94)",
         tier="Select the boss tier",

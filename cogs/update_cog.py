@@ -5,7 +5,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import REQUIRED_ROLES
+from permissions import require_tier
 from guilds import load_guilds, get_guild_data_path, load_player_list
 from tracker import process_api_response
 from embeds import guild_autocomplete
@@ -28,7 +28,7 @@ class UpdateCog(commands.Cog):
         name="update_leaderboard",
         description="Fetches raid data from the Tacticus API and updates local records.",
     )
-    @app_commands.checks.has_any_role("Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
+    @require_tier("officer")
     @app_commands.describe(
         guild_id="The guild to update",
         season="The season number to update (e.g. 94)",
@@ -89,7 +89,7 @@ class UpdateCog(commands.Cog):
         name="update_all",
         description="Fetches raid data for ALL registered guilds and updates local records.",
     )
-    @app_commands.checks.has_any_role("Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
+    @require_tier("officer")
     @app_commands.describe(season="The season number to update (e.g. 94)")
     async def update_all(self, interaction: discord.Interaction, season: int):
         await interaction.response.defer(thinking=True)

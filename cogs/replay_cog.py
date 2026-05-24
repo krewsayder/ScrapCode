@@ -6,7 +6,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import REQUIRED_ROLES, TIER_CHOICES
+from config import TIER_CHOICES
+from permissions import require_guild_member
 
 REPLAY_INDEX_FILE = Path("replay_index.json")
 
@@ -351,7 +352,7 @@ class ReplayCog(commands.Cog):
     # ==========================================
 
     @app_commands.command(name="upload_replay", description="Submit a raid replay to the index.")
-    @app_commands.checks.has_any_role("Veteran of the Long War")
+    @require_guild_member()
     @app_commands.describe(
         boss="The boss this replay is for",
         map_name="The map this replay was played on",
@@ -430,7 +431,7 @@ class ReplayCog(commands.Cog):
     # ==========================================
 
     @app_commands.command(name="get_replay", description="View replays for a map, optionally filtered by team.")
-    @app_commands.checks.has_any_role("Veteran of the Long War")
+    @require_guild_member()
     @app_commands.describe(
         boss="The boss to look up",
         map_name="The map to look up",
@@ -474,7 +475,7 @@ class ReplayCog(commands.Cog):
     # ==========================================
 
     @app_commands.command(name="delete_replay", description="Remove a replay from the index by its URL.")
-    @app_commands.checks.has_any_role("Veteran of the Long War")
+    @require_guild_member()
     @app_commands.describe(
         boss="The boss the replay belongs to",
         map_name="The map the replay belongs to",

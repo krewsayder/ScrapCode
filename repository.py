@@ -83,6 +83,7 @@ class JsonClusterRepository(ClusterRepository):
                 api_key=data.get("api_key", ""),
                 role_id=data.get("role_id", 0),
                 notification_channel_id=data.get("notification_channel_id"),
+                member_role_ids=data.get("member_role_ids", []),
             )
             for guild_id, data in raw.get("guilds", {}).items()
         }
@@ -91,18 +92,21 @@ class JsonClusterRepository(ClusterRepository):
             discord_server_id=discord_server_id,
             guilds=guilds,
             update_channel_id=raw.get("update_channel_id"),
+            role_tiers=raw.get("role_tiers", {}),
         )
 
     def save(self, cluster: Cluster) -> None:
         guilds_file = self._server_path(cluster.discord_server_id) / "guilds.json"
         self._write_json(guilds_file, {
             "update_channel_id": cluster.update_channel_id,
+            "role_tiers":        cluster.role_tiers,
             "guilds": {
                 guild_id: {
                     "name":                    g.name,
                     "api_key":                 g.api_key,
                     "role_id":                 g.role_id,
                     "notification_channel_id": g.notification_channel_id,
+                    "member_role_ids":         g.member_role_ids,
                 }
                 for guild_id, g in cluster.guilds.items()
             },

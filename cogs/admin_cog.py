@@ -3,7 +3,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import REQUIRED_ROLES
 from guilds import (
     load_guilds,
     save_guilds,
@@ -11,9 +10,17 @@ from guilds import (
     load_live_leaderboards,
     save_live_leaderboards,
     load_player_list,
+    add_cluster_role,
+    add_guild_member_role,
 )
 from embeds import guild_autocomplete
+from permissions import require_tier
 from services.chronicl3r.player_service import PlayerService
+
+TIER_OPTIONS = [
+    app_commands.Choice(name="admin",   value="admin"),
+    app_commands.Choice(name="officer", value="officer"),
+]
 
 
 class AdminCog(commands.Cog):
@@ -29,7 +36,7 @@ class AdminCog(commands.Cog):
         name="register_guild",
         description="Register a guild into the cluster with its API key and leader role.",
     )
-    @app_commands.checks.has_any_role("Guild Leader", "Dark Tech", "Tech-Priest")
+    @require_tier("admin")
     @app_commands.describe(
         name="The guild's display name (e.g. Iron Warriors)",
         guild_id="A short unique ID for the guild, no spaces (e.g. iron_warriors)",
@@ -102,7 +109,7 @@ class AdminCog(commands.Cog):
         name="deregister_guild",
         description="Remove a guild from the cluster registry.",
     )
-    @app_commands.checks.has_any_role("Guild Leader", "Dark Tech", "Tech-Priest")
+    @require_tier("admin")
     @app_commands.describe(guild_id="The guild to deregister")
     @app_commands.autocomplete(guild_id=guild_autocomplete)
     async def deregister_guild(self, interaction: discord.Interaction, guild_id: str):
@@ -136,7 +143,7 @@ class AdminCog(commands.Cog):
         name="list_guilds",
         description="List all registered guilds in the cluster.",
     )
-    @app_commands.checks.has_any_role("Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
+    @require_tier("officer")
     async def list_guilds(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
@@ -187,7 +194,7 @@ class AdminCog(commands.Cog):
         name="set_ping_channel",
         description="Set the channel where token cap notifications are posted for a guild.",
     )
-    @app_commands.checks.has_any_role("Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
+    @require_tier("officer")
     @app_commands.describe(
         guild_id="The guild to configure",
         channel="The channel to send cap notifications to",
@@ -225,7 +232,7 @@ class AdminCog(commands.Cog):
         name="set_live_leaderboard",
         description="Set up a live Battle leaderboard for a guild that auto-updates every hour.",
     )
-    @app_commands.checks.has_any_role("Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
+    @require_tier("officer")
     @app_commands.describe(
         guild_id="The guild to set up a live leaderboard for",
         channel="The channel to post the live leaderboard in",
@@ -309,7 +316,7 @@ class AdminCog(commands.Cog):
         name="set_live_cluster_leaderboard",
         description="Set up a live Cluster leaderboard that auto-updates every hour.",
     )
-    @app_commands.checks.has_any_role("Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
+    @require_tier("officer")
     @app_commands.describe(channel="The channel to post the live cluster leaderboard in")
     async def set_live_cluster_leaderboard(
         self,
@@ -390,6 +397,69 @@ class AdminCog(commands.Cog):
         await interaction.followup.send(
             f"✅ Live Cluster leaderboard set up in {channel.mention}!\n"
             f"It will automatically update every hour.",
+            ephemeral=True,
+        )
+
+
+    # ==========================================
+    # SLASH COMMAND: SET_CLUSTER_ROLE
+    # ==========================================
+
+    @app_commands.command(
+        name="set_cluster_role",
+        description="Add a Discord role to a cluster permission tier (admin or officer).",
+    )
+    @require_tier("admin")
+    @app_commands.describe(
+        tier="The permission tier to assign this role to",
+        role="The Discord role to add",
+    )
+    @app_commands.choices(tier=TIER_OPTIONS)
+    async def set_cluster_role(
+        self,
+        interaction: discord.Interaction,
+        tier: app_commands.Choice[str],
+        role: discord.Role,
+    ):
+        await interaction.response.defer(ephemeral=True)
+        add_cluster_role(interaction.guild_id, tier.value, role.id)
+        await interaction.followup.send(
+            f"✅ {role.mention} added to the **{tier.value}** tier.",
+            ephemeral=True,
+        )
+
+    # ==========================================
+    # SLASH COMMAND: SET_GUILD_MEMBER_ROLE
+    # ==========================================
+
+    @app_commands.command(
+        name="set_guild_member_role",
+        description="Add a Discord role as a member role for a specific game guild.",
+    )
+    @require_tier("admin")
+    @app_commands.describe(
+        guild_id="The game guild to configure",
+        role="The Discord role to add as a member role",
+    )
+    @app_commands.autocomplete(guild_id=guild_autocomplete)
+    async def set_guild_member_role(
+        self,
+        interaction: discord.Interaction,
+        guild_id: str,
+        role: discord.Role,
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        server_id  = interaction.guild_id
+        guilds     = load_guilds(server_id)
+        guild_data = guilds.get(guild_id)
+        if not guild_data:
+            await interaction.followup.send(f"❌ Guild `{guild_id}` not found.", ephemeral=True)
+            return
+
+        add_guild_member_role(server_id, guild_id, role.id)
+        await interaction.followup.send(
+            f"✅ {role.mention} added as a member role for **{guild_data['name']}**.",
             ephemeral=True,
         )
 

@@ -61,11 +61,15 @@ async def on_guild_remove(guild: discord.Guild):
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
-    print(f"Command error: {error}")
+    if isinstance(error, discord.app_commands.CheckFailure):
+        msg = "❌ You don't have permission to use this command."
+    else:
+        print(f"Command error: {error}")
+        msg = f"❌ An error occurred: {error}"
     try:
-        await interaction.response.send_message(f"Error: {error}", ephemeral=True)
+        await interaction.response.send_message(msg, ephemeral=True)
     except discord.InteractionResponded:
-        await interaction.followup.send(f"Error: {error}", ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
 
 # ==========================================
 # COG LOADING

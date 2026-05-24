@@ -29,13 +29,6 @@ TIER_CHOICES = [
     app_commands.Choice(name="Mythic 2",    value="Mythic_1"),
 ]
 
-# ==========================================
-# REQUIRED ROLES (for restricted commands)
-# ==========================================
-
-REQUIRED_ROLES = ("Dark Tech", "Tech-Priest", "Captain", "Guild Leader")
-
-
 # Load environment variables from .env file
 load_dotenv()
 

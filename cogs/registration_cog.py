@@ -4,9 +4,9 @@ from discord import app_commands
 from discord.ext import commands
 from typing import Optional
 
-from config import REQUIRED_ROLES
-from guilds import load_player_registrations, save_player_registrations, load_capped_state, save_capped_state, load_guilds
+from guilds import load_player_registrations, save_player_registrations, load_capped_state, save_capped_state, load_guilds, repo
 from embeds import guild_autocomplete
+from permissions import require_guild_member, require_tier
 
 TACTICUS_PLAYER_URL = "https://api.tacticusgame.com/api/v1/player"
 
@@ -23,7 +23,7 @@ class RegistrationCog(commands.Cog):
         name="register",
         description="Register your Tacticus API key to enable token cap notifications.",
     )
-    @app_commands.checks.has_any_role("Veteran of the Long War")
+    @require_guild_member()
     @app_commands.describe(
         api_key="Your personal Tacticus API key",
         guild_id="Your guild",
@@ -42,8 +42,10 @@ class RegistrationCog(commands.Cog):
         server_id = interaction.guild_id
 
         if target_user is not None:
-            caller_roles = {role.name for role in interaction.user.roles}
-            if not caller_roles.intersection(REQUIRED_ROLES):
+            cluster = repo.load(server_id)
+            user_role_ids = {r.id for r in interaction.user.roles}
+            admin_roles = set(cluster.role_tiers.get("admin", []))
+            if not interaction.user.guild_permissions.administrator and not (user_role_ids & admin_roles):
                 await interaction.followup.send(
                     "❌ You don't have permission to register on behalf of another user.",
                     ephemeral=True,
@@ -125,7 +127,7 @@ class RegistrationCog(commands.Cog):
         name="unregister",
         description="Remove your Tacticus API key registration.",
     )
-    @app_commands.checks.has_any_role("Veteran of the Long War")
+    @require_guild_member()
     @app_commands.describe(
         target_user="(Admin only) Unregister on behalf of another Discord user",
     )
@@ -139,8 +141,10 @@ class RegistrationCog(commands.Cog):
         server_id = interaction.guild_id
 
         if target_user is not None:
-            caller_roles = {role.name for role in interaction.user.roles}
-            if not caller_roles.intersection(REQUIRED_ROLES):
+            cluster = repo.load(server_id)
+            user_role_ids = {r.id for r in interaction.user.roles}
+            admin_roles = set(cluster.role_tiers.get("admin", []))
+            if not interaction.user.guild_permissions.administrator and not (user_role_ids & admin_roles):
                 await interaction.followup.send(
                     "❌ You don't have permission to unregister another user.",
                     ephemeral=True,
@@ -185,7 +189,7 @@ class RegistrationCog(commands.Cog):
         name="check_registered_members",
         description="List all players who have registered their Tacticus API key.",
     )
-    @app_commands.checks.has_any_role("Dark Tech", "Tech-Priest", "Guild Leader", "Captain")
+    @require_tier("officer")
     async def check_registered_members(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 

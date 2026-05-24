@@ -17,7 +17,7 @@ UUID_PATTERN = re.compile(
 # ==========================================
 
 def load_guilds(discord_server_id: int) -> dict:
-    """Return {guild_id: {name, api_key, role_id, notification_channel_id}} for a server."""
+    """Return {guild_id: {name, api_key, role_id, notification_channel_id, member_role_ids}} for a server."""
     cluster = repo.load(discord_server_id)
     return {
         gid: {
@@ -25,6 +25,7 @@ def load_guilds(discord_server_id: int) -> dict:
             "api_key":                 g.api_key,
             "role_id":                 g.role_id,
             "notification_channel_id": g.notification_channel_id,
+            "member_role_ids":         g.member_role_ids,
         }
         for gid, g in cluster.guilds.items()
     }
@@ -40,9 +41,26 @@ def save_guilds(discord_server_id: int, guilds: dict) -> None:
             api_key=data.get("api_key", ""),
             role_id=data.get("role_id", 0),
             notification_channel_id=data.get("notification_channel_id"),
+            member_role_ids=data.get("member_role_ids", []),
         )
         for gid, data in guilds.items()
     }
+    repo.save(cluster)
+
+
+def add_cluster_role(discord_server_id: int, tier: str, role_id: int) -> None:
+    cluster = repo.load(discord_server_id)
+    existing = cluster.role_tiers.get(tier, [])
+    if role_id not in existing:
+        cluster.role_tiers[tier] = existing + [role_id]
+    repo.save(cluster)
+
+
+def add_guild_member_role(discord_server_id: int, guild_id: str, role_id: int) -> None:
+    cluster = repo.load(discord_server_id)
+    guild = cluster.guilds.get(guild_id)
+    if guild and role_id not in guild.member_role_ids:
+        guild.member_role_ids = guild.member_role_ids + [role_id]
     repo.save(cluster)
 
 
