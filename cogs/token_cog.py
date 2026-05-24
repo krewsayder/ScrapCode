@@ -28,7 +28,7 @@ class TokenCog(commands.Cog):
         name="token_availability",
         description="Show raid token status for all registered players in a guild.",
     )
-    @app_commands.checks.has_any_role("Veteran of the Long War","Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
+    @app_commands.checks.has_any_role("Veteran of the Long War", "Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
     @app_commands.describe(guild_id="Select the guild")
     @app_commands.autocomplete(guild_id=guild_autocomplete)
     async def token_availability(
@@ -38,35 +38,28 @@ class TokenCog(commands.Cog):
     ):
         await interaction.response.defer()
 
-        guilds     = load_guilds()
+        server_id  = interaction.guild_id
+        guilds     = load_guilds(server_id)
         guild_data = guilds.get(guild_id)
         if not guild_data:
             await interaction.followup.send(f"❌ Guild `{guild_id}` not found.")
             return
 
         guild_name  = guild_data["name"]
-        player_apis = load_player_apis()
+        player_apis = load_player_apis(server_id, guild_id)
 
-        # Filter to only players registered in this guild
-        guild_players = {
-            discord_id: data
-            for discord_id, data in player_apis.items()
-            if isinstance(data, dict) and data.get("guild_id") == guild_id
-        }
-
-        if not guild_players:
+        if not player_apis:
             await interaction.followup.send(
                 f"❌ No registered players found in **{guild_name}**."
             )
             return
 
-        # Fetch token data for each player
-        rows   = []  # (discord_id, current, maximum, next_in)
+        rows   = []
         failed = []
 
         async with httpx.AsyncClient(timeout=10.0) as client:
-            for discord_id, data in guild_players.items():
-                api_key = data.get("api_key")
+            for discord_id, data in player_apis.items():
+                api_key = data.get("api_key") if isinstance(data, dict) else data
                 if not api_key:
                     failed.append(discord_id)
                     continue
@@ -92,10 +85,8 @@ class TokenCog(commands.Cog):
 
                 rows.append((discord_id, current, maximum, next_in))
 
-        # Sort by current tokens descending, then by next_in ascending
         rows.sort(key=lambda x: (-x[1], x[3]))
 
-        # Build embed
         embed = discord.Embed(
             title=f"⚔️ Token Count — {guild_name}",
             color=discord.Color.blurple(),
@@ -115,7 +106,6 @@ class TokenCog(commands.Cog):
                     lines.append(f"{name} — `{current}/{maximum}` tokens")
                 else:
                     lines.append(f"{name} — `{current}/{maximum}` tokens • in {_format_countdown(next_in)}")
-
             embed.description = "\n".join(lines)
 
         if failed:

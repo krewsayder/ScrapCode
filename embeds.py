@@ -30,7 +30,7 @@ def load_leaderboard_file(file_path: Path) -> tuple[dict | None, str | None]:
 # ==========================================
 
 async def guild_autocomplete(interaction: discord.Interaction, current: str):
-    guilds = load_guilds()
+    guilds = load_guilds(interaction.guild_id)
     return [
         app_commands.Choice(name=data["name"], value=gid)
         for gid, data in guilds.items()
@@ -59,13 +59,13 @@ def build_battle_messages(
     data: dict,
     season: int,
     tier: app_commands.Choice[str],
+    discord_server_id: int = 0,
     guild_id: str = "",
     guild_name: str = "",
 ) -> list[str]:
-    """Returns a list of plain text messages for the Battle leaderboard.
-    First message is the header, followed by one message per boss."""
+    """Returns a list of plain text messages for the Battle leaderboard."""
     tier_key   = tier.value
-    id_to_name = get_player_list(guild_id) if guild_id else {}
+    id_to_name = get_player_list(discord_server_id, guild_id) if guild_id and discord_server_id else {}
     boss_hits  = data.get("boss_hits", {})
 
     title_guild = f" • {guild_name}" if guild_name else ""
@@ -98,7 +98,7 @@ def build_battle_messages(
                     f"{hero_display} | {mow_display}"
                 )
 
-        if len(boss_lines) > 1:  # only add if there's actual data beyond the header
+        if len(boss_lines) > 1:
             messages.append("\n".join(boss_lines))
 
     return messages if len(messages) > 1 else []
@@ -112,12 +112,13 @@ def build_bomb_messages(
     data: dict,
     season: int,
     tier: app_commands.Choice[str],
+    discord_server_id: int = 0,
     guild_id: str = "",
     guild_name: str = "",
 ) -> list[str]:
     """Returns a list of plain text messages for the Bomb leaderboard."""
     tier_key   = tier.value
-    id_to_name = get_player_list(guild_id) if guild_id else {}
+    id_to_name = get_player_list(discord_server_id, guild_id) if guild_id and discord_server_id else {}
     boss_hits  = data.get("boss_hits", {})
 
     title_guild = f" • {guild_name}" if guild_name else ""

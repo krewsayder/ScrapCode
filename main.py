@@ -35,22 +35,28 @@ file_lock = asyncio.Lock()
 # ==========================================
 # BOT EVENTS
 # ==========================================
-GUILD_IDS = [1458181638453203099]
+DEV_GUILD_IDS = [1458181638453203099]
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    
-    # Prod variant, remove comments before launching
-    # Propogating takes a while so we're doing this in dev
-    # await bot.tree.sync()
-    # print("Slash commands synced.")
 
-    for guild_id in GUILD_IDS:
+    # Dev: sync instantly to known guilds. In prod, swap for: await bot.tree.sync()
+    for guild_id in DEV_GUILD_IDS:
         guild = discord.Object(id=guild_id)
         bot.tree.copy_global_to(guild=guild)
         synced = await bot.tree.sync(guild=guild)
         print(f"Synced {len(synced)} commands to guild {guild_id}")
+
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    print(f"[on_guild_join] Joined {guild.name} (id={guild.id})")
+
+
+@bot.event
+async def on_guild_remove(guild: discord.Guild):
+    print(f"[on_guild_remove] Removed from {guild.name} (id={guild.id})")
 
 
 @bot.tree.error

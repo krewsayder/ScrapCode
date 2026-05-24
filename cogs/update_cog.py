@@ -28,7 +28,7 @@ class UpdateCog(commands.Cog):
         name="update_leaderboard",
         description="Fetches raid data from the Tacticus API and updates local records.",
     )
-    @app_commands.checks.has_any_role("Captain","Guild Leader","Dark Tech","Tech-Priest")
+    @app_commands.checks.has_any_role("Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
     @app_commands.describe(
         guild_id="The guild to update",
         season="The season number to update (e.g. 94)",
@@ -37,7 +37,8 @@ class UpdateCog(commands.Cog):
     async def update_leaderboard(self, interaction: discord.Interaction, guild_id: str, season: int):
         await interaction.response.defer(thinking=True)
 
-        guilds     = load_guilds()
+        server_id  = interaction.guild_id
+        guilds     = load_guilds(server_id)
         guild_data = guilds.get(guild_id.strip().lower())
 
         if not guild_data:
@@ -56,7 +57,7 @@ class UpdateCog(commands.Cog):
 
         url      = TACTICUS_RAID_URL.format(season=season)
         headers  = {"accept": "application/json", "X-API-KEY": api_key}
-        data_dir = get_guild_data_path(guild_id)
+        data_dir = get_guild_data_path(server_id, guild_id)
 
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
@@ -67,7 +68,7 @@ class UpdateCog(commands.Cog):
             async with self.file_lock:
                 process_api_response(api_data, season, data_dir)
 
-            await self._register_unknown_players(guild_id, api_data)
+            await self._register_unknown_players(server_id, guild_id, api_data)
 
             await interaction.followup.send(
                 f"✅ Leaderboard for **{guild_name}** — Season **{season}** updated successfully."
@@ -88,12 +89,13 @@ class UpdateCog(commands.Cog):
         name="update_all",
         description="Fetches raid data for ALL registered guilds and updates local records.",
     )
-    @app_commands.checks.has_any_role("Captain","Guild Leader","Dark Tech","Tech-Priest")
+    @app_commands.checks.has_any_role("Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
     @app_commands.describe(season="The season number to update (e.g. 94)")
     async def update_all(self, interaction: discord.Interaction, season: int):
         await interaction.response.defer(thinking=True)
 
-        guilds = load_guilds()
+        server_id = interaction.guild_id
+        guilds    = load_guilds(server_id)
         if not guilds:
             await interaction.followup.send("❌ No guilds registered yet.")
             return
@@ -101,7 +103,6 @@ class UpdateCog(commands.Cog):
         url     = TACTICUS_RAID_URL.format(season=season)
         results = []
 
-        # Reuse a single client for all guild requests
         async with httpx.AsyncClient(timeout=20.0) as client:
             for guild_id, guild_data in guilds.items():
                 guild_name = guild_data["name"]
@@ -112,7 +113,7 @@ class UpdateCog(commands.Cog):
                     continue
 
                 headers  = {"accept": "application/json", "X-API-KEY": api_key}
-                data_dir = get_guild_data_path(guild_id)
+                data_dir = get_guild_data_path(server_id, guild_id)
 
                 try:
                     response = await client.get(url, headers=headers)
@@ -122,8 +123,7 @@ class UpdateCog(commands.Cog):
                     async with self.file_lock:
                         process_api_response(api_data, season, data_dir)
 
-                    await self._register_unknown_players(guild_id, api_data)
-
+                    await self._register_unknown_players(server_id, guild_id, api_data)
                     results.append(f"✅ **{guild_name}** — updated successfully.")
 
                 except httpx.HTTPStatusError as e:
@@ -135,16 +135,13 @@ class UpdateCog(commands.Cog):
             f"**Season {season} update complete:**\n" + "\n".join(results)
         )
 
-
-    async def _register_unknown_players(self, guild_id: str, api_data: dict) -> None:
-        """Register any user IDs from raid data that aren't in the local player list
-        and save them as former members so they display correctly on leaderboards."""
-        known   = set(load_player_list(guild_id).get("players", {}).keys())
+    async def _register_unknown_players(self, server_id: int, guild_id: str, api_data: dict) -> None:
+        known   = set(load_player_list(server_id, guild_id).get("players", {}).keys())
         seen    = {e["userId"] for e in api_data.get("entries", []) if "userId" in e}
         unknown = seen - known
         for user_id in unknown:
             try:
-                saved = await self.player_service.ensure_player_in_list(guild_id, user_id)
+                saved = await self.player_service.ensure_player_in_list(server_id, guild_id, user_id)
                 if saved:
                     print(f"[UpdateCog] Saved unknown player {user_id} to player list")
             except Exception as e:

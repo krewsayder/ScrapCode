@@ -39,7 +39,8 @@ class RegistrationCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True)
 
-        # If a target_user is provided, check the caller has an admin role
+        server_id = interaction.guild_id
+
         if target_user is not None:
             caller_roles = {role.name for role in interaction.user.roles}
             if not caller_roles.intersection(REQUIRED_ROLES):
@@ -49,8 +50,7 @@ class RegistrationCog(commands.Cog):
                 )
                 return
 
-        # Validate guild_id exists in registry
-        guilds = load_guilds()
+        guilds = load_guilds(server_id)
         if guild_id not in guilds:
             await interaction.followup.send(
                 f"❌ Guild `{guild_id}` not found. Please select a valid guild from the list.",
@@ -60,7 +60,6 @@ class RegistrationCog(commands.Cog):
 
         guild_name = guilds[guild_id]["name"]
 
-        # Validate the API key by hitting the Tacticus player endpoint
         headers = {"accept": "application/json", "X-API-KEY": api_key}
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -85,12 +84,11 @@ class RegistrationCog(commands.Cog):
             )
             return
 
-        # Use target_user's ID if provided, otherwise the caller's
-        discord_id    = str(target_user.id) if target_user else str(interaction.user.id)
-        player_apis   = load_player_apis()
+        discord_id  = str(target_user.id) if target_user else str(interaction.user.id)
+        player_apis = load_player_apis(server_id, guild_id)
         already_exist = discord_id in player_apis
 
-        # Check if this api_key is already registered to a different Discord ID
+        # Check if this api_key is already registered to a different Discord ID in this guild
         for existing_id, existing_data in player_apis.items():
             existing_key = existing_data.get("api_key") if isinstance(existing_data, dict) else existing_data
             if existing_key == api_key and existing_id != discord_id:
@@ -100,8 +98,8 @@ class RegistrationCog(commands.Cog):
                 )
                 return
 
-        player_apis[discord_id] = {"api_key": api_key, "guild_id": guild_id}
-        save_player_apis(player_apis)
+        player_apis[discord_id] = {"api_key": api_key}
+        save_player_apis(server_id, guild_id, player_apis)
 
         if target_user:
             action = "updated" if already_exist else "registered"
@@ -139,6 +137,8 @@ class RegistrationCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True)
 
+        server_id = interaction.guild_id
+
         if target_user is not None:
             caller_roles = {role.name for role in interaction.user.roles}
             if not caller_roles.intersection(REQUIRED_ROLES):
@@ -148,25 +148,31 @@ class RegistrationCog(commands.Cog):
                 )
                 return
 
-        discord_id  = str(target_user.id) if target_user else str(interaction.user.id)
-        player_apis = load_player_apis()
+        discord_id = str(target_user.id) if target_user else str(interaction.user.id)
+        guilds     = load_guilds(server_id)
 
-        if discord_id not in player_apis:
+        removed = False
+        for guild_id in guilds:
+            player_apis = load_player_apis(server_id, guild_id)
+            if discord_id in player_apis:
+                del player_apis[discord_id]
+                save_player_apis(server_id, guild_id, player_apis)
+
+                capped_state = load_capped_state(server_id, guild_id)
+                if discord_id in capped_state:
+                    del capped_state[discord_id]
+                    save_capped_state(server_id, guild_id, capped_state)
+
+                removed = True
+                break
+
+        if not removed:
             target = target_user.mention if target_user else "You are"
             await interaction.followup.send(
                 f"❌ {target} not currently registered.",
                 ephemeral=True,
             )
             return
-
-        del player_apis[discord_id]
-        save_player_apis(player_apis)
-
-        # Clear capped state so they don't get a ghost ping if re-registered later
-        capped_state = load_capped_state()
-        if discord_id in capped_state:
-            del capped_state[discord_id]
-            save_capped_state(capped_state)
 
         if target_user:
             await interaction.followup.send(
@@ -191,48 +197,26 @@ class RegistrationCog(commands.Cog):
     async def check_registered_members(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
-        player_apis = load_player_apis()
+        server_id = interaction.guild_id
+        guilds    = load_guilds(server_id)
 
-        if not player_apis:
-            await interaction.followup.send(
-                "❌ No players have registered yet.",
-                ephemeral=True,
-            )
-            return
+        total = 0
+        await interaction.followup.send("📋 **Registered Players**", ephemeral=True)
 
-        guilds   = load_guilds()
-        by_guild = {}
-        no_guild = []
-
-        for discord_id, data in player_apis.items():
-            gid = data.get("guild_id") if isinstance(data, dict) else None
-            if gid and gid in guilds:
-                by_guild.setdefault(gid, []).append(discord_id)
-            else:
-                no_guild.append(discord_id)
-
-        # Send header then one embed per guild to avoid Discord's 6000 char embed limit
-        await interaction.followup.send(
-            f"📋 **Registered Players — {len(player_apis)} total**",
-            ephemeral=True,
-        )
-
-        for gid, members in by_guild.items():
-            guild_name = guilds[gid]["name"]
+        for guild_id, guild_data in guilds.items():
+            player_apis = load_player_apis(server_id, guild_id)
+            if not player_apis:
+                continue
+            total += len(player_apis)
             embed = discord.Embed(
-                title=f"{guild_name} ({len(members)})",
-                description="\n".join(f"• <@{did}>" for did in members),
+                title=f"{guild_data['name']} ({len(player_apis)})",
+                description="\n".join(f"• <@{did}>" for did in player_apis),
                 color=discord.Color.blurple(),
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
 
-        if no_guild:
-            embed = discord.Embed(
-                title=f"No Guild Assigned ({len(no_guild)})",
-                description="\n".join(f"• <@{did}>" for did in no_guild),
-                color=discord.Color.red(),
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
+        if total == 0:
+            await interaction.followup.send("❌ No players have registered yet.", ephemeral=True)
 
 
 async def setup_registration(bot: commands.Bot):

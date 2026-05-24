@@ -33,18 +33,11 @@ TIER_CHOICES = [
 # REQUIRED ROLES (for restricted commands)
 # ==========================================
 
-REQUIRED_ROLES = ("Dark Tech", "Tech-Priest", "Captain","Guild Leader")
+REQUIRED_ROLES = ("Dark Tech", "Tech-Priest", "Captain", "Guild Leader")
 
 
 # Load environment variables from .env file
 load_dotenv()
-# ==========================================
-# CAP DETECT CHANNEL
-# ==========================================
-
-# The Discord channel ID where cap_detect will post token cap pings.
-
-CAP_CHANNEL_ID = int(os.getenv("CAP_CHANNEL_ID"))
 
 # ==========================================
 # AUTO UPDATE CHANNEL

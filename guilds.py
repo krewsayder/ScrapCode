@@ -1,16 +1,11 @@
-import json
 import re
 from pathlib import Path
 
+from repository import JsonClusterRepository
 from migrations.player_list_migrations import PlayerListMigrator
 
-_BASE             = Path(__file__).parent
-GUILDS_FILE       = _BASE / "guilds.json"
-PLAYER_API_FILE   = _BASE / "player_api_list.json"
-CAPPED_STATE_FILE = _BASE / "capped_state.json"
-DATA_DIR          = _BASE / "data"
+repo = JsonClusterRepository()
 
-# Tacticus user IDs are standard UUIDs: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 UUID_PATTERN = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
     re.IGNORECASE
@@ -21,60 +16,61 @@ UUID_PATTERN = re.compile(
 # GUILD REGISTRY
 # ==========================================
 
-def load_guilds() -> dict:
-    """Load the guild registry. Returns empty dict if file doesn't exist."""
-    if not GUILDS_FILE.exists():
-        return {}
-    try:
-        return json.loads(GUILDS_FILE.read_text(encoding='utf-8'))
-    except Exception:
-        return {}
+def load_guilds(discord_server_id: int) -> dict:
+    """Return {guild_id: {name, api_key, role_id, notification_channel_id}} for a server."""
+    cluster = repo.load(discord_server_id)
+    return {
+        gid: {
+            "name":                    g.name,
+            "api_key":                 g.api_key,
+            "role_id":                 g.role_id,
+            "notification_channel_id": g.notification_channel_id,
+        }
+        for gid, g in cluster.guilds.items()
+    }
 
 
-def save_guilds(guilds: dict):
-    """Save the guild registry to disk."""
-    GUILDS_FILE.write_text(json.dumps(guilds, indent=2), encoding='utf-8')
+def save_guilds(discord_server_id: int, guilds: dict) -> None:
+    """Save guild registry from a {guild_id: guild_data_dict} mapping."""
+    from models import Cluster, Guild
+    cluster = repo.load(discord_server_id)
+    cluster.guilds = {
+        gid: Guild(
+            id=gid,
+            name=data["name"],
+            api_key=data.get("api_key", ""),
+            role_id=data.get("role_id", 0),
+            notification_channel_id=data.get("notification_channel_id"),
+        )
+        for gid, data in guilds.items()
+    }
+    repo.save(cluster)
 
 
-def get_guild_by_role(role_id: int) -> tuple[str, dict] | None:
+def get_guild_by_role(discord_server_id: int, role_id: int):
     """Find a guild by its leader role ID. Returns (guild_id, guild_data) or None."""
-    for guild_id, guild_data in load_guilds().items():
+    for guild_id, guild_data in load_guilds(discord_server_id).items():
         if guild_data.get("role_id") == role_id:
             return guild_id, guild_data
     return None
 
 
-def get_guild_data_path(guild_id: str) -> Path:
+def get_guild_data_path(discord_server_id: int, guild_id: str) -> Path:
     """Returns the data directory path for a guild, creating it if needed."""
-    path = DATA_DIR / guild_id
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return repo.get_guild_data_path(discord_server_id, guild_id)
 
 
 # ==========================================
 # GUILD PLAYER LIST (v2 schema)
 # ==========================================
 
-def load_player_list(guild_id: str) -> dict:
-    """Load the raw v2 player list structure, running migration if needed.
-    Returns the full {__meta__, players} dict. Writes back if migrated."""
-    path = get_guild_data_path(guild_id) / "player_list.json"
-    if not path.exists():
-        return {"__meta__": {"version": PlayerListMigrator.CURRENT_VERSION}, "players": {}}
-    try:
-        raw = json.loads(path.read_text(encoding='utf-8'))
-        data, was_migrated = PlayerListMigrator.migrate(raw)
-        if was_migrated:
-            path.write_text(json.dumps(data, indent=2), encoding='utf-8')
-        return data
-    except Exception:
-        return {"__meta__": {"version": PlayerListMigrator.CURRENT_VERSION}, "players": {}}
+def load_player_list(discord_server_id: int, guild_id: str) -> dict:
+    return repo.load_player_list(discord_server_id, guild_id)
 
 
-def get_player_list(guild_id: str) -> dict:
-    """Return {tacticus_id: display_name} for use in embeds/leaderboards.
-    Appends ' (former)' for players no longer in the guild roster."""
-    players = load_player_list(guild_id).get("players", {})
+def get_player_list(discord_server_id: int, guild_id: str) -> dict:
+    """Return {tacticus_id: display_name} for use in embeds/leaderboards."""
+    players = load_player_list(discord_server_id, guild_id).get("players", {})
     result = {}
     for uid, entry in players.items():
         name = entry.get("display_name", uid[:8])
@@ -84,75 +80,41 @@ def get_player_list(guild_id: str) -> dict:
     return result
 
 
-def save_player_list(guild_id: str, data: dict):
-    """Save a v2 player list for a guild. Expects {__meta__, players} structure."""
-    path = get_guild_data_path(guild_id) / "player_list.json"
-    path.write_text(json.dumps(data, indent=2), encoding='utf-8')
+def save_player_list(discord_server_id: int, guild_id: str, data: dict) -> None:
+    repo.save_player_list(discord_server_id, guild_id, data)
 
 
 # ==========================================
-# PLAYER API LIST (discord_id -> tacticus api key)
+# PLAYER API LIST
 # ==========================================
 
-def load_player_apis() -> dict:
-    """Load the global player API key registry. Returns empty dict if file doesn't exist.
-    Format: {discord_id: {"api_key": str, "name": str}}
-    """
-    if not PLAYER_API_FILE.exists():
-        return {}
-    try:
-        return json.loads(PLAYER_API_FILE.read_text(encoding='utf-8'))
-    except Exception:
-        return {}
+def load_player_apis(discord_server_id: int, guild_id: str) -> dict:
+    return repo.load_player_apis(discord_server_id, guild_id)
 
 
-def save_player_apis(data: dict):
-    """Save the global player API key registry to disk."""
-    PLAYER_API_FILE.write_text(json.dumps(data, indent=2), encoding='utf-8')
+def save_player_apis(discord_server_id: int, guild_id: str, data: dict) -> None:
+    repo.save_player_apis(discord_server_id, guild_id, data)
 
 
 # ==========================================
-# CAPPED STATE (discord_id -> True if already pinged)
+# CAPPED STATE
 # ==========================================
 
-def load_capped_state() -> dict:
-    """Load the set of already-pinged capped players. Returns empty dict if file doesn't exist."""
-    if not CAPPED_STATE_FILE.exists():
-        return {}
-    try:
-        return json.loads(CAPPED_STATE_FILE.read_text(encoding='utf-8'))
-    except Exception:
-        return {}
+def load_capped_state(discord_server_id: int, guild_id: str) -> dict:
+    return repo.load_capped_state(discord_server_id, guild_id)
 
 
-def save_capped_state(data: dict):
-    """Save the capped state to disk."""
-    CAPPED_STATE_FILE.write_text(json.dumps(data, indent=2), encoding='utf-8')
+def save_capped_state(discord_server_id: int, guild_id: str, data: dict) -> None:
+    repo.save_capped_state(discord_server_id, guild_id, data)
 
 
 # ==========================================
-# LIVE LEADERBOARDS (channel + message IDs)
+# LIVE LEADERBOARDS
 # ==========================================
 
-LIVE_LEADERBOARDS_FILE = Path("live_leaderboards.json")
+def load_live_leaderboards(discord_server_id: int) -> dict:
+    return repo.load_live_leaderboards(discord_server_id)
 
 
-def load_live_leaderboards() -> dict:
-    """Load live leaderboard config. Returns empty dict if file doesn't exist.
-    Format:
-    {
-      "guild:guild_one": {"channel_id": 123, "messages": {"Legendary_0": 456, ...}},
-      "cluster":         {"channel_id": 123, "messages": {"Legendary_0": 456, ...}}
-    }
-    """
-    if not LIVE_LEADERBOARDS_FILE.exists():
-        return {}
-    try:
-        return json.loads(LIVE_LEADERBOARDS_FILE.read_text(encoding='utf-8'))
-    except Exception:
-        return {}
-
-
-def save_live_leaderboards(data: dict):
-    """Save live leaderboard config to disk."""
-    LIVE_LEADERBOARDS_FILE.write_text(json.dumps(data, indent=2), encoding='utf-8')
+def save_live_leaderboards(discord_server_id: int, data: dict) -> None:
+    repo.save_live_leaderboards(discord_server_id, data)

@@ -25,7 +25,7 @@ class ViewCog(commands.Cog):
         name="view_leaderboard",
         description="View top Battle damage leaderboard for a specific guild and tier.",
     )
-    @app_commands.checks.has_any_role("Captain","Guild Leader","Dark Tech","Tech-Priest")
+    @app_commands.checks.has_any_role("Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
     @app_commands.describe(
         guild_id="Select the guild",
         season="Season number (e.g., 94)",
@@ -42,27 +42,27 @@ class ViewCog(commands.Cog):
     ):
         await interaction.response.defer()
 
-        guilds     = load_guilds()
+        server_id  = interaction.guild_id
+        guilds     = load_guilds(server_id)
         guild_data = guilds.get(guild_id)
         if not guild_data:
             await interaction.followup.send(f"❌ Guild `{guild_id}` not found.")
             return
 
         guild_name = guild_data["name"]
-        data_dir   = get_guild_data_path(guild_id)
+        data_dir   = get_guild_data_path(server_id, guild_id)
         data, err  = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
         if err:
             await interaction.followup.send(f"❌ {err}")
             return
 
-        messages = build_battle_messages(data, season, tier, guild_id, guild_name)
+        messages = build_battle_messages(data, season, tier, server_id, guild_id, guild_name)
         if not messages:
             await interaction.followup.send(
                 f"❌ No Battle entries found for **{tier.name}** in season {season}."
             )
             return
 
-        # Send header as the followup, then each boss as a separate message
         await interaction.followup.send(messages[0])
         for msg in messages[1:]:
             await interaction.channel.send(msg)
@@ -75,7 +75,7 @@ class ViewCog(commands.Cog):
         name="view_bomb_leaderboard",
         description="View top Bomb damage leaderboard for a specific guild and tier.",
     )
-    @app_commands.checks.has_any_role("Tech-Priest") 
+    @app_commands.checks.has_any_role("Tech-Priest")
     @app_commands.describe(
         guild_id="Select the guild",
         season="Season number (e.g., 94)",
@@ -92,20 +92,21 @@ class ViewCog(commands.Cog):
     ):
         await interaction.response.defer()
 
-        guilds     = load_guilds()
+        server_id  = interaction.guild_id
+        guilds     = load_guilds(server_id)
         guild_data = guilds.get(guild_id)
         if not guild_data:
             await interaction.followup.send(f"❌ Guild `{guild_id}` not found.")
             return
 
         guild_name = guild_data["name"]
-        data_dir   = get_guild_data_path(guild_id)
+        data_dir   = get_guild_data_path(server_id, guild_id)
         data, err  = load_leaderboard_file(data_dir / f"highest_bombs_season_{season}.json")
         if err:
             await interaction.followup.send(f"❌ {err}")
             return
 
-        messages = build_bomb_messages(data, season, tier, guild_id, guild_name)
+        messages = build_bomb_messages(data, season, tier, server_id, guild_id, guild_name)
         if not messages:
             await interaction.followup.send(
                 f"❌ No Bomb entries found for **{tier.name}** in season {season}."
@@ -124,7 +125,7 @@ class ViewCog(commands.Cog):
         name="view_cluster_leaderboard",
         description="View top Battle damage leaderboard across all guilds in the cluster.",
     )
-    @app_commands.checks.has_any_role("Captain","Guild Leader","Dark Tech","Tech-Priest")
+    @app_commands.checks.has_any_role("Captain", "Guild Leader", "Dark Tech", "Tech-Priest")
     @app_commands.describe(
         season="Season number (e.g., 94)",
         tier="Select the boss tier",
@@ -138,7 +139,8 @@ class ViewCog(commands.Cog):
     ):
         await interaction.response.defer()
 
-        guilds = load_guilds()
+        server_id = interaction.guild_id
+        guilds    = load_guilds(server_id)
         if not guilds:
             await interaction.followup.send("❌ No guilds registered yet.")
             return
@@ -147,12 +149,12 @@ class ViewCog(commands.Cog):
         merged   = {}
 
         for guild_id, guild_data in guilds.items():
-            data_dir   = get_guild_data_path(guild_id)
-            data, err  = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
+            data_dir  = get_guild_data_path(server_id, guild_id)
+            data, err = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
             if err or not data:
                 continue
 
-            id_to_name = get_player_list(guild_id)
+            id_to_name = get_player_list(server_id, guild_id)
             guild_name = guild_data["name"]
 
             for boss_id, encounter_dict in data.get("boss_hits", {}).items():
@@ -171,7 +173,6 @@ class ViewCog(commands.Cog):
             )
             return
 
-        # Sort each bucket and keep top 5 for Main ("0"), top 1 for sides
         for boss_id, encounter_dict in merged.items():
             for e_index in encounter_dict:
                 limit = 5 if e_index == "0" else 1
