@@ -5,7 +5,7 @@ from discord.ext import commands
 
 from config import REQUIRED_ROLES
 from embeds import guild_autocomplete
-from guilds import load_guilds, load_player_apis
+from guilds import load_guilds, load_player_registrations
 
 TACTICUS_PLAYER_URL = "https://api.tacticusgame.com/api/v1/player"
 
@@ -38,19 +38,20 @@ class BombCog(commands.Cog):
     ):
         await interaction.response.defer()
 
-        guilds     = load_guilds()
+        server_id  = interaction.guild_id
+        guilds     = load_guilds(server_id)
         guild_data = guilds.get(guild_id)
         if not guild_data:
             await interaction.followup.send(f"❌ Guild `{guild_id}` not found.")
             return
 
-        guild_name  = guild_data["name"]
-        player_apis = load_player_apis()
+        guild_name    = guild_data["name"]
+        registrations = load_player_registrations(server_id)
 
         guild_players = {
             discord_id: data
-            for discord_id, data in player_apis.items()
-            if isinstance(data, dict) and data.get("guild_id") == guild_id
+            for discord_id, data in registrations.items()
+            if data.get("guild_id") == guild_id
         }
 
         if not guild_players:
