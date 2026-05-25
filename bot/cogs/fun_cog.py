@@ -37,7 +37,7 @@ HELP_DATA = {
         "color": discord.Color.gold(),
         "intro": "These commands are available to cluster officers and admins.",
         "commands": [
-            ("/list_guilds",                 "List all registered guilds and their status."),
+            ("/view_config",                  "View cluster configuration — guilds, roles, or leaderboards. Replaces the retired /list_guilds command."),
             ("/check_registered_members",    "List all players who have registered their Tacticus API key."),
             ("/set_ping_channel",            "Set the channel where token cap notifications are posted for a guild."),
             ("/set_live_leaderboard",        "Pin a Battle leaderboard in a channel — it auto-updates every hour."),

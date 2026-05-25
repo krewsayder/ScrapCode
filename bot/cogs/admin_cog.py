@@ -12,10 +12,17 @@ from bot.guilds import (
     load_player_list,
     add_cluster_role,
     add_guild_member_role,
+    repo,
 )
 from bot.embeds import guild_autocomplete
-from bot.permissions import require_tier
+from bot.permissions import require_tier, check_tier
 from bot.services.chronicl3r.player_service import PlayerService
+
+CONFIG_OPTIONS = [
+    app_commands.Choice(name="guilds",        value="guilds"),
+    app_commands.Choice(name="roles",         value="roles"),
+    app_commands.Choice(name="leaderboards",  value="leaderboards"),
+]
 
 TIER_OPTIONS = [
     app_commands.Choice(name="admin",   value="admin"),
@@ -136,29 +143,41 @@ class AdminCog(commands.Cog):
         )
 
     # ==========================================
-    # SLASH COMMAND: LIST_GUILDS
+    # SLASH COMMAND: VIEW_CONFIG
     # ==========================================
 
     @app_commands.command(
-        name="list_guilds",
-        description="List all registered guilds in the cluster.",
+        name="view_config",
+        description="View bot configuration for the cluster.",
     )
-    @require_tier("officer")
-    async def list_guilds(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-
-        server_id = interaction.guild_id
-        guilds    = load_guilds(server_id)
-        if not guilds:
-            await interaction.followup.send("❌ No guilds registered yet.", ephemeral=True)
+    @app_commands.describe(config="The configuration to view")
+    @app_commands.choices(config=CONFIG_OPTIONS)
+    async def view_config(self, interaction: discord.Interaction, config: app_commands.Choice[str]):
+        if not await check_tier(interaction, "officer"):
+            await interaction.response.send_message(
+                "❌ You don't have permission to view configuration.", ephemeral=True
+            )
             return
 
-        embed = discord.Embed(
+        await interaction.response.defer(ephemeral=True)
+        server_id = interaction.guild_id
+
+        if config.value == "guilds":
+            embed = self._config_guilds(server_id)
+        elif config.value == "roles":
+            embed = self._config_roles(server_id)
+        elif config.value == "leaderboards":
+            embed = self._config_leaderboards(server_id)
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    def _config_guilds(self, server_id: int) -> discord.Embed:
+        guilds = load_guilds(server_id)
+        embed  = discord.Embed(
             title="🏰 Registered Guilds",
-            description=f"{len(guilds)} guild(s) in the cluster",
+            description=f"{len(guilds)} guild(s) in the cluster" if guilds else "No guilds registered yet.",
             color=discord.Color.blurple(),
         )
-
         for guild_id, guild_data in guilds.items():
             guild_name   = guild_data.get("name", "Unknown")
             role_id      = guild_data.get("role_id")
@@ -167,10 +186,10 @@ class AdminCog(commands.Cog):
             ping_channel = guild_data.get("notification_channel_id")
             ping_line    = f"<#{ping_channel}>" if ping_channel else "❌ Not set"
 
-            players    = load_player_list(server_id, guild_id).get("players", {})
-            active     = sum(1 for p in players.values() if not p.get("is_former"))
-            last_vals  = [p["last_validated"] for p in players.values() if p.get("last_validated") and p["last_validated"] != "1970-01-01T00:00:00Z"]
-            last_sync  = max(last_vals) if last_vals else None
+            players     = load_player_list(server_id, guild_id).get("players", {})
+            active      = sum(1 for p in players.values() if not p.get("is_former"))
+            last_vals   = [p["last_validated"] for p in players.values() if p.get("last_validated") and p["last_validated"] != "1970-01-01T00:00:00Z"]
+            last_sync   = max(last_vals) if last_vals else None
             roster_line = f"✅ {active} active • Last sync: {last_sync[:10] if last_sync else 'never'}" if players else "❌ Never synced"
 
             embed.add_field(
@@ -183,8 +202,42 @@ class AdminCog(commands.Cog):
                 ),
                 inline=False,
             )
+        return embed
 
-        await interaction.followup.send(embed=embed, ephemeral=True)
+    def _config_roles(self, server_id: int) -> discord.Embed:
+        cluster = repo.load(server_id)
+
+        def fmt_roles(role_ids: list[int]) -> str:
+            if not role_ids:
+                return "❌ None configured"
+            return " ".join(f"<@&{rid}>" for rid in role_ids)
+
+        embed = discord.Embed(title="🔐 Role Configuration", color=discord.Color.blurple())
+        embed.add_field(name="🛡️ Admin",   value=fmt_roles(cluster.role_tiers.get("admin", [])),   inline=False)
+        embed.add_field(name="🔱 Officer", value=fmt_roles(cluster.role_tiers.get("officer", [])), inline=False)
+        for guild_id, guild in cluster.guilds.items():
+            embed.add_field(name=f"⚙️ {guild.name} members", value=fmt_roles(guild.member_role_ids), inline=False)
+        return embed
+
+    def _config_leaderboards(self, server_id: int) -> discord.Embed:
+        live  = load_live_leaderboards(server_id)
+        embed = discord.Embed(title="📊 Live Leaderboards", color=discord.Color.blurple())
+
+        if not live:
+            embed.description = "No live leaderboards configured."
+            return embed
+
+        for key, cfg in live.items():
+            channel_id  = cfg.get("channel_id")
+            channel_str = f"<#{channel_id}>" if channel_id else "❌ No channel"
+            tier_count  = len(cfg.get("messages", {}))
+            label       = "Cluster" if key == "cluster" else key.replace("guild:", "")
+            embed.add_field(
+                name=label,
+                value=f"**Channel:** {channel_str}\n**Tiers tracked:** {tier_count}",
+                inline=False,
+            )
+        return embed
 
     # ==========================================
     # SLASH COMMAND: SET_PING_CHANNEL
@@ -462,6 +515,7 @@ class AdminCog(commands.Cog):
             f"✅ {role.mention} added as a member role for **{guild_data['name']}**.",
             ephemeral=True,
         )
+
 
 
 async def setup_admin(bot: commands.Bot, player_service: PlayerService):

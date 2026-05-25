@@ -64,7 +64,6 @@ Discord `Administrator` permission always bypasses tier checks and is used to bo
 | `/deregister_guild` | Remove a guild from the cluster registry | `guild_id` (autocomplete) |
 | `/set_cluster_role` | Add a Discord role to the admin or officer tier | `tier` (admin/officer), `role` |
 | `/set_guild_member_role` | Add a Discord role as the member role for a game guild | `guild_id` (autocomplete), `role` |
-| `/set_ping_channel` | Set the channel where token cap notifications are posted for a guild | `guild_id` (autocomplete), `channel` |
 
 ---
 
@@ -73,8 +72,9 @@ Discord `Administrator` permission always bypasses tier checks and is used to bo
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
-| `/list_guilds` | List all registered guilds and their status | — |
+| `/view_config` | View cluster configuration — guilds, roles, or live leaderboards. Replaces the retired `/list_guilds` | `config` (guilds/roles/leaderboards) |
 | `/check_registered_members` | List all players who have registered their Tacticus API key | — |
+| `/set_ping_channel` | Set the channel where token cap notifications are posted for a guild | `guild_id` (autocomplete), `channel` |
 | `/set_live_leaderboard` | Set up a Battle leaderboard in a channel that auto-updates every hour | `guild_id` (autocomplete), `channel` |
 | `/set_live_cluster_leaderboard` | Set up a cluster-wide leaderboard in a channel that auto-updates every hour | `channel` |
 | `/update_leaderboard` | Fetch raid data from Tacticus API and update local records for one guild | `guild_id` (autocomplete), `season` |
