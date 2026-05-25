@@ -1,10 +1,23 @@
 import asyncio
 import logging
 import os
+import subprocess
 
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+
+from bot import VERSION
+
+
+def _git_hash() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        return "unknown"
 
 from bot.cogs.update_cog       import setup_update
 from bot.cogs.view_cog         import setup_view
@@ -39,7 +52,7 @@ DEV_GUILD_IDS = [1458181638453203099]
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
+    print(f"Logged in as {bot.user} — v{VERSION} ({_git_hash()})")
 
     # Dev: sync instantly to known guilds. In prod, swap for: await bot.tree.sync()
     for guild_id in DEV_GUILD_IDS:
