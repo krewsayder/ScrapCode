@@ -15,6 +15,7 @@ from bot.guilds import (
     repo,
 )
 from bot.tracker import process_api_response
+from bot.guilds import load_player_list
 from bot.services.chronicl3r.player_service import PlayerService
 
 TACTICUS_PLAYER_URL   = "https://api.tacticusgame.com/api/v1/player"
@@ -198,6 +199,7 @@ class TasksCog(commands.Cog):
                         async with self.file_lock:
                             process_api_response(api_data, season, data_dir)
 
+                        await self._register_unknown_players(server_id, guild_id, api_data)
                         results.append(f"✅ **{guild_name}** — updated successfully.")
                         print(f"[auto_update] {guild_name} updated.")
 
@@ -216,6 +218,18 @@ class TasksCog(commands.Cog):
                 print(f"[auto_update] Missing permission to send in channel {UPDATE_CHANNEL_ID}")
 
             await self._refresh_live_leaderboards(server_id, season, guilds)
+
+    async def _register_unknown_players(self, server_id: int, guild_id: str, api_data: dict) -> None:
+        known   = set(load_player_list(server_id, guild_id).get("players", {}).keys())
+        seen    = {e["userId"] for e in api_data.get("entries", []) if "userId" in e}
+        unknown = seen - known
+        for user_id in unknown:
+            try:
+                saved = await self.player_service.ensure_player_in_list(server_id, guild_id, user_id)
+                if saved:
+                    print(f"[auto_update] Saved unknown player {user_id} to player list")
+            except Exception as e:
+                print(f"[auto_update] Failed to save unknown player {user_id}: {e}")
 
     async def _refresh_live_leaderboards(self, server_id: int, season: int, guilds: dict):
         """Edit all live leaderboard messages with fresh data."""
