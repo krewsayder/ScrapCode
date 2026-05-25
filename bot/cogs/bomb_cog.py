@@ -3,9 +3,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from embeds import guild_autocomplete
-from guilds import load_guilds, load_player_registrations
-from permissions import require_guild_member
+from bot.embeds import guild_autocomplete
+from bot.guilds import load_guilds, load_player_registrations
+from bot.permissions import require_guild_member
 
 TACTICUS_PLAYER_URL = "https://api.tacticusgame.com/api/v1/player"
 

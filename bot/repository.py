@@ -3,8 +3,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
 
-from models import Cluster, Guild
-from migrations.player_list_migrations import PlayerListMigrator
+from bot.models import Cluster, Guild
+from bot.migrations.player_list_migrations import PlayerListMigrator
 
 
 class ClusterRepository(ABC):

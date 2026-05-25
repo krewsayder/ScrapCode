@@ -5,8 +5,8 @@ import discord
 from discord import app_commands
 
 from config import LABELS
-from getNameAndEmoji import get_boss_emoji, get_clean_boss_name, get_mow_emoji
-from guilds import get_player_list, load_guilds
+from bot.getNameAndEmoji import get_boss_emoji, get_clean_boss_name, get_mow_emoji
+from bot.guilds import get_player_list, load_guilds
 
 
 # ==========================================

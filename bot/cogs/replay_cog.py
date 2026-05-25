@@ -7,7 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import TIER_CHOICES
-from permissions import require_guild_member
+from bot.permissions import require_guild_member
 
 REPLAY_INDEX_FILE = Path("replay_index.json")
 

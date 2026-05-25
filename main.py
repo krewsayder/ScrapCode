@@ -6,17 +6,17 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
-from cogs.update_cog       import setup_update
-from cogs.view_cog         import setup_view
-from cogs.admin_cog        import setup_admin
-from cogs.registration_cog import setup_registration
-from cogs.tasks_cog        import setup_tasks
-from cogs.fun_cog          import setup_fun
-from cogs.bomb_cog         import setup_bomb
-from cogs.token_cog        import setup_token
-from cogs.replay_cog       import setup_replay
-from services.chronicl3r.client         import chronicl3rClient
-from services.chronicl3r.player_service import PlayerService
+from bot.cogs.update_cog       import setup_update
+from bot.cogs.view_cog         import setup_view
+from bot.cogs.admin_cog        import setup_admin
+from bot.cogs.registration_cog import setup_registration
+from bot.cogs.tasks_cog        import setup_tasks
+from bot.cogs.fun_cog          import setup_fun
+from bot.cogs.bomb_cog         import setup_bomb
+from bot.cogs.token_cog        import setup_token
+from bot.cogs.replay_cog       import setup_replay
+from bot.services.chronicl3r.client         import chronicl3rClient
+from bot.services.chronicl3r.player_service import PlayerService
 
 # ==========================================
 # CONFIGURATION & INITIALIZATION

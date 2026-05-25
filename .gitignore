@@ -9,3 +9,4 @@ data/
 logs/
 *.json
 *.log
+.pytest_cache

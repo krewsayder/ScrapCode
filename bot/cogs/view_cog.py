@@ -3,9 +3,9 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import TIER_CHOICES
-from permissions import require_tier
-from guilds import load_guilds, get_guild_data_path, get_player_list
-from embeds import (
+from bot.permissions import require_tier
+from bot.guilds import load_guilds, get_guild_data_path, get_player_list
+from bot.embeds import (
     build_battle_messages,
     build_bomb_messages,
     build_cluster_messages,

@@ -3,7 +3,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from permissions import check_tier, check_guild_member
+from bot.permissions import check_tier, check_guild_member
 
 
 HELP_TIERS = [

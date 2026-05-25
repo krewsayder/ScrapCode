@@ -3,7 +3,7 @@ import discord
 from discord.ext import commands, tasks
 
 from config import UPDATE_CHANNEL_ID
-from guilds import (
+from bot.guilds import (
     load_guilds,
     get_guild_data_path,
     get_player_list,
@@ -14,8 +14,8 @@ from guilds import (
     save_live_leaderboards,
     repo,
 )
-from tracker import process_api_response
-from services.chronicl3r.player_service import PlayerService
+from bot.tracker import process_api_response
+from bot.services.chronicl3r.player_service import PlayerService
 
 TACTICUS_PLAYER_URL   = "https://api.tacticusgame.com/api/v1/player"
 TACTICUS_RAID_URL     = "https://api.tacticusgame.com/api/v1/guildRaid/{season}"

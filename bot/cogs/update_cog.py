@@ -5,11 +5,11 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from permissions import require_tier
-from guilds import load_guilds, get_guild_data_path, load_player_list
-from tracker import process_api_response
-from embeds import guild_autocomplete
-from services.chronicl3r.player_service import PlayerService
+from bot.permissions import require_tier
+from bot.guilds import load_guilds, get_guild_data_path, load_player_list
+from bot.tracker import process_api_response
+from bot.embeds import guild_autocomplete
+from bot.services.chronicl3r.player_service import PlayerService
 
 TACTICUS_RAID_URL = "https://api.tacticusgame.com/api/v1/guildRaid/{season}"
 

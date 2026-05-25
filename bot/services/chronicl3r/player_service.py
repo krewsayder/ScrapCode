@@ -4,8 +4,8 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import requests
 
-from guilds import load_player_list, save_player_list
-from services.chronicl3r.client import chronicl3rClient
+from bot.guilds import load_player_list, save_player_list
+from bot.services.chronicl3r.client import chronicl3rClient
 
 TACTICUS_GUILD_URL = "https://api.tacticusgame.com/api/v1/guild"
 STALE_AFTER_HOURS  = 1

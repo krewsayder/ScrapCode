@@ -3,7 +3,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from guilds import (
+from bot.guilds import (
     load_guilds,
     save_guilds,
     get_guild_data_path,
@@ -13,9 +13,9 @@ from guilds import (
     add_cluster_role,
     add_guild_member_role,
 )
-from embeds import guild_autocomplete
-from permissions import require_tier
-from services.chronicl3r.player_service import PlayerService
+from bot.embeds import guild_autocomplete
+from bot.permissions import require_tier
+from bot.services.chronicl3r.player_service import PlayerService
 
 TIER_OPTIONS = [
     app_commands.Choice(name="admin",   value="admin"),

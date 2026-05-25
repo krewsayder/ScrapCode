@@ -1,8 +1,8 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
-from models import Cluster, Guild
-from permissions import check_tier, check_guild_member
+from bot.models import Cluster, Guild
+from bot.permissions import check_tier, check_guild_member
 
 SERVER_ID   = 12345
 ADMIN_ROLE  = 111
@@ -62,35 +62,35 @@ STANDARD_CLUSTER = make_cluster(
 @pytest.mark.asyncio
 async def test_tier_admin_discord_admin_passes():
     interaction = make_interaction(is_admin=True)
-    with patch("permissions.repo") as mock_repo:
+    with patch("bot.permissions.repo") as mock_repo:
         mock_repo.load.return_value = STANDARD_CLUSTER
         assert await check_tier(interaction, "admin") is True
 
 @pytest.mark.asyncio
 async def test_tier_admin_with_admin_role_passes():
     interaction = make_interaction(role_ids=[ADMIN_ROLE])
-    with patch("permissions.repo") as mock_repo:
+    with patch("bot.permissions.repo") as mock_repo:
         mock_repo.load.return_value = STANDARD_CLUSTER
         assert await check_tier(interaction, "admin") is True
 
 @pytest.mark.asyncio
 async def test_tier_admin_with_officer_role_fails():
     interaction = make_interaction(role_ids=[OFFICER_ROLE])
-    with patch("permissions.repo") as mock_repo:
+    with patch("bot.permissions.repo") as mock_repo:
         mock_repo.load.return_value = STANDARD_CLUSTER
         assert await check_tier(interaction, "admin") is False
 
 @pytest.mark.asyncio
 async def test_tier_admin_no_roles_fails():
     interaction = make_interaction(role_ids=[OTHER_ROLE])
-    with patch("permissions.repo") as mock_repo:
+    with patch("bot.permissions.repo") as mock_repo:
         mock_repo.load.return_value = STANDARD_CLUSTER
         assert await check_tier(interaction, "admin") is False
 
 @pytest.mark.asyncio
 async def test_tier_admin_empty_config_fails():
     interaction = make_interaction(role_ids=[ADMIN_ROLE])
-    with patch("permissions.repo") as mock_repo:
+    with patch("bot.permissions.repo") as mock_repo:
         mock_repo.load.return_value = make_cluster()
         assert await check_tier(interaction, "admin") is False
 
@@ -102,21 +102,21 @@ async def test_tier_admin_empty_config_fails():
 @pytest.mark.asyncio
 async def test_tier_officer_with_officer_role_passes():
     interaction = make_interaction(role_ids=[OFFICER_ROLE])
-    with patch("permissions.repo") as mock_repo:
+    with patch("bot.permissions.repo") as mock_repo:
         mock_repo.load.return_value = STANDARD_CLUSTER
         assert await check_tier(interaction, "officer") is True
 
 @pytest.mark.asyncio
 async def test_tier_officer_with_admin_role_passes():
     interaction = make_interaction(role_ids=[ADMIN_ROLE])
-    with patch("permissions.repo") as mock_repo:
+    with patch("bot.permissions.repo") as mock_repo:
         mock_repo.load.return_value = STANDARD_CLUSTER
         assert await check_tier(interaction, "officer") is True
 
 @pytest.mark.asyncio
 async def test_tier_officer_with_member_role_fails():
     interaction = make_interaction(role_ids=[MEMBER_ROLE])
-    with patch("permissions.repo") as mock_repo:
+    with patch("bot.permissions.repo") as mock_repo:
         mock_repo.load.return_value = STANDARD_CLUSTER
         assert await check_tier(interaction, "officer") is False
 
@@ -128,7 +128,7 @@ async def test_tier_officer_with_member_role_fails():
 @pytest.mark.asyncio
 async def test_guild_member_discord_admin_passes():
     interaction = make_interaction(is_admin=True, namespace_guild_id=GUILD_A)
-    with patch("permissions.repo") as mock_repo:
+    with patch("bot.permissions.repo") as mock_repo:
         mock_repo.load.return_value = STANDARD_CLUSTER
         assert await check_guild_member(interaction) is True
 
@@ -140,14 +140,14 @@ async def test_guild_member_discord_admin_passes():
 @pytest.mark.asyncio
 async def test_guild_member_officer_role_passes_without_member_role():
     interaction = make_interaction(role_ids=[OFFICER_ROLE], namespace_guild_id=GUILD_A)
-    with patch("permissions.repo") as mock_repo:
+    with patch("bot.permissions.repo") as mock_repo:
         mock_repo.load.return_value = STANDARD_CLUSTER
         assert await check_guild_member(interaction) is True
 
 @pytest.mark.asyncio
 async def test_guild_member_admin_role_passes_without_member_role():
     interaction = make_interaction(role_ids=[ADMIN_ROLE], namespace_guild_id=GUILD_A)
-    with patch("permissions.repo") as mock_repo:
+    with patch("bot.permissions.repo") as mock_repo:
         mock_repo.load.return_value = STANDARD_CLUSTER
         assert await check_guild_member(interaction) is True
 
@@ -159,7 +159,7 @@ async def test_guild_member_admin_role_passes_without_member_role():
 @pytest.mark.asyncio
 async def test_guild_member_correct_guild_passes():
     interaction = make_interaction(role_ids=[MEMBER_ROLE], namespace_guild_id=GUILD_A)
-    with patch("permissions.repo") as mock_repo:
+    with patch("bot.permissions.repo") as mock_repo:
         mock_repo.load.return_value = STANDARD_CLUSTER
         assert await check_guild_member(interaction) is True
 
@@ -170,14 +170,14 @@ async def test_guild_member_wrong_guild_fails():
         guilds={GUILD_A: [MEMBER_ROLE], GUILD_B: [OTHER_ROLE]},
     )
     interaction = make_interaction(role_ids=[MEMBER_ROLE], namespace_guild_id=GUILD_B)
-    with patch("permissions.repo") as mock_repo:
+    with patch("bot.permissions.repo") as mock_repo:
         mock_repo.load.return_value = cluster
         assert await check_guild_member(interaction) is False
 
 @pytest.mark.asyncio
 async def test_guild_member_unknown_guild_fails():
     interaction = make_interaction(role_ids=[MEMBER_ROLE], namespace_guild_id="nonexistent")
-    with patch("permissions.repo") as mock_repo:
+    with patch("bot.permissions.repo") as mock_repo:
         mock_repo.load.return_value = STANDARD_CLUSTER
         assert await check_guild_member(interaction) is False
 
@@ -189,14 +189,14 @@ async def test_guild_member_unknown_guild_fails():
 @pytest.mark.asyncio
 async def test_guild_member_any_guild_with_member_role_passes():
     interaction = make_interaction(role_ids=[MEMBER_ROLE], namespace_guild_id=None)
-    with patch("permissions.repo") as mock_repo:
+    with patch("bot.permissions.repo") as mock_repo:
         mock_repo.load.return_value = STANDARD_CLUSTER
         assert await check_guild_member(interaction) is True
 
 @pytest.mark.asyncio
 async def test_guild_member_any_guild_no_matching_role_fails():
     interaction = make_interaction(role_ids=[OTHER_ROLE], namespace_guild_id=None)
-    with patch("permissions.repo") as mock_repo:
+    with patch("bot.permissions.repo") as mock_repo:
         mock_repo.load.return_value = STANDARD_CLUSTER
         assert await check_guild_member(interaction) is False
 
@@ -207,6 +207,6 @@ async def test_guild_member_empty_member_role_ids_fails():
         guilds={GUILD_A: [], GUILD_B: []},
     )
     interaction = make_interaction(role_ids=[MEMBER_ROLE], namespace_guild_id=GUILD_A)
-    with patch("permissions.repo") as mock_repo:
+    with patch("bot.permissions.repo") as mock_repo:
         mock_repo.load.return_value = cluster
         assert await check_guild_member(interaction) is False

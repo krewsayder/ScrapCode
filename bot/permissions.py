@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands
 
-from guilds import repo
+from bot.guilds import repo
 
 
 def _is_discord_admin(interaction: discord.Interaction) -> bool:

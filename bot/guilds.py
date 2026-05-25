@@ -1,8 +1,8 @@
 import re
 from pathlib import Path
 
-from repository import JsonClusterRepository
-from migrations.player_list_migrations import PlayerListMigrator
+from bot.repository import JsonClusterRepository
+from bot.migrations.player_list_migrations import PlayerListMigrator
 
 repo = JsonClusterRepository()
 
