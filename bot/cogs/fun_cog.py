@@ -18,8 +18,8 @@ HELP_DATA = {
         "color": discord.Color.green(),
         "intro": (
             "These commands are available to guild members. "
-            "You need your Tacticus API key to register — find it at "
-            "**Tacticus → Settings → API Key**."
+            "You need your Tacticus API key to register — get it at "
+            "**https://api.tacticusgame.com/**"
         ),
         "commands": [
             ("/register",           "Link your Tacticus API key to your Discord account for token notifications."),
