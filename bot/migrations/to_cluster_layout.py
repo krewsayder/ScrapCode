@@ -21,7 +21,7 @@ DISCORD_SERVER_ID  = 1458181638453203099
 CAP_CHANNEL_ID_STR = os.getenv("CAP_CHANNEL_ID")
 CAP_CHANNEL_ID     = int(CAP_CHANNEL_ID_STR) if CAP_CHANNEL_ID_STR else None
 
-BASE       = Path(__file__).parent.parent
+BASE       = Path(__file__).parent.parent.parent
 CLUSTERS   = BASE / "clusters"
 SERVER_DIR = CLUSTERS / str(DISCORD_SERVER_ID)
 
