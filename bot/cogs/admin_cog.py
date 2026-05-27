@@ -300,7 +300,7 @@ class AdminCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         from config import TIER_CHOICES
-        from embeds import build_battle_messages, load_leaderboard_file
+        from bot.embeds import build_battle_messages, load_leaderboard_file
 
         server_id  = interaction.guild_id
         guilds     = load_guilds(server_id)
@@ -379,8 +379,8 @@ class AdminCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         from config import TIER_CHOICES
-        from embeds import build_cluster_messages, load_leaderboard_file
-        from guilds import get_player_list
+        from bot.embeds import build_cluster_messages, load_leaderboard_file
+        from bot.guilds import get_player_list
 
         server_id = interaction.guild_id
         guilds    = load_guilds(server_id)

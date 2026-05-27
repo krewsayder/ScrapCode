@@ -234,7 +234,7 @@ class TasksCog(commands.Cog):
     async def _refresh_live_leaderboards(self, server_id: int, season: int, guilds: dict):
         """Edit all live leaderboard messages with fresh data."""
         from config import TIER_CHOICES
-        from embeds import build_battle_messages, build_cluster_messages, load_leaderboard_file
+        from bot.embeds import build_battle_messages, build_cluster_messages, load_leaderboard_file
 
         live = load_live_leaderboards(server_id)
         if not live:
