@@ -73,7 +73,8 @@ Discord `Administrator` permission always bypasses tier checks and is used to bo
 | Command | Description | Parameters |
 |---------|-------------|------------|
 | `/view_config` | View cluster configuration — guilds, roles, or live leaderboards. Replaces the retired `/list_guilds` | `config` (guilds/roles/leaderboards) |
-| `/check_registered_members` | List all players who have registered their Tacticus API key | — |
+| `/registration list` | List all registered players, optionally filtered by guild. Replaces the retired `/check_registered_members` | `guild_id` *(optional, autocomplete)* |
+| `/registration move` | Move a registered player to a different guild without needing their API key | `target_user`, `guild_id` (autocomplete) |
 | `/set_ping_channel` | Set the channel where token cap notifications are posted for a guild | `guild_id` (autocomplete), `channel` |
 | `/set_live_leaderboard` | Set up a Battle leaderboard in a channel that auto-updates every hour | `guild_id` (autocomplete), `channel` |
 | `/set_live_cluster_leaderboard` | Set up a cluster-wide leaderboard in a channel that auto-updates every hour | `channel` |
@@ -90,8 +91,8 @@ Discord `Administrator` permission always bypasses tier checks and is used to bo
 
 | Command | Description | Parameters |
 |---------|-------------|------------|
-| `/register` | Register your personal Tacticus API key for token cap notifications | `api_key`, `guild_id` (autocomplete), `target_user` *(admin only, optional)* |
-| `/unregister` | Remove your Tacticus API key registration | `target_user` *(admin only, optional)* |
+| `/registration register` | Register your personal Tacticus API key for token cap notifications | `api_key`, `guild_id` (autocomplete), `target_user` *(admin only, optional)* |
+| `/registration unregister` | Remove your Tacticus API key registration | `target_user` *(admin only, optional)* |
 | `/token_availability` | Show raid token status for all registered players in a guild | `guild_id` (autocomplete) |
 | `/bomb_availability` | Show bomb token status for all registered players in a guild | `guild_id` (autocomplete) |
 | `/upload_replay` | Submit a raid replay link to the index for a boss/map | `boss` (autocomplete), `map_name` (autocomplete), `team`, `tier`, `damage`, `url`, `position` *(optional)*, `comment` *(optional)* |

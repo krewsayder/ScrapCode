@@ -1,3 +1,4 @@
+import asyncio
 import httpx
 import discord
 from discord import app_commands
@@ -18,6 +19,16 @@ def _format_countdown(seconds: int) -> str:
     if hours > 0:
         return f"{hours}h {minutes}m"
     return f"{minutes}m"
+
+
+async def _fetch_bomb(client: httpx.AsyncClient, discord_id: str, api_key: str):
+    headers = {"accept": "application/json", "X-API-KEY": api_key}
+    try:
+        response = await client.get(TACTICUS_PLAYER_URL, headers=headers)
+        response.raise_for_status()
+        return discord_id, response.json()
+    except Exception:
+        return discord_id, None
 
 
 class BombCog(commands.Cog):
@@ -66,35 +77,29 @@ class BombCog(commands.Cog):
         failed    = []  # discord_ids
 
         async with httpx.AsyncClient(timeout=10.0) as client:
-            for discord_id, data in guild_players.items():
-                api_key = data.get("api_key")
-                if not api_key:
-                    failed.append(discord_id)
-                    continue
+            tasks = [
+                _fetch_bomb(client, discord_id, data.get("api_key", ""))
+                for discord_id, data in guild_players.items()
+            ]
+            results = await asyncio.gather(*tasks)
 
-                headers = {"accept": "application/json", "X-API-KEY": api_key}
-                try:
-                    response = await client.get(TACTICUS_PLAYER_URL, headers=headers)
-                    response.raise_for_status()
-                    player_data = response.json()
-                except Exception:
-                    failed.append(discord_id)
-                    continue
+        for discord_id, player_data in results:
+            if player_data is None:
+                failed.append(discord_id)
+                continue
 
-                bomb_tokens = (
-                    player_data.get("player", {})
-                    .get("progress", {})
-                    .get("guildRaid", {})
-                    .get("bombTokens", {})
-                )
-                current = bomb_tokens.get("current", 0)
-                maximum = bomb_tokens.get("max", 1)
-                next_in = bomb_tokens.get("nextTokenInSeconds", 0)
+            player    = player_data.get("player") or {}
+            progress  = player.get("progress") or {}
+            guild_raid = progress.get("guildRaid") or {}
+            bomb_tokens = guild_raid.get("bombTokens") or {}
+            current = bomb_tokens.get("current", 0)
+            maximum = bomb_tokens.get("max", 1)
+            next_in = bomb_tokens.get("nextTokenInSeconds", 0)
 
-                if current >= maximum:
-                    ready.append(discord_id)
-                else:
-                    not_ready.append((discord_id, next_in))
+            if current >= maximum:
+                ready.append(discord_id)
+            else:
+                not_ready.append((discord_id, next_in))
 
         # Sort not_ready by soonest ready first
         not_ready.sort(key=lambda x: x[1])
@@ -136,8 +141,8 @@ class BombCog(commands.Cog):
             copy_lines = []
             for did in ready:
                 member = interaction.guild.get_member(int(did))
-                name   = f"@{member.display_name}" if member else f"<@{did}>"
-                copy_lines.append(name)
+                name   = f"@{member.display_name}" if member else f"Unknown"
+                copy_lines.append(f"{name} : <@{did}>")
             copy_text = "\n".join(copy_lines)
             embed.add_field(
                 name="Copy players with available bombs",

@@ -1,3 +1,4 @@
+import asyncio
 import httpx
 import discord
 from discord import app_commands
@@ -18,6 +19,16 @@ def _format_countdown(seconds: int) -> str:
     if hours > 0:
         return f"{hours}h {minutes}m"
     return f"{minutes}m"
+
+
+async def _fetch_token(client: httpx.AsyncClient, discord_id: str, api_key: str):
+    headers = {"accept": "application/json", "X-API-KEY": api_key}
+    try:
+        response = await client.get(TACTICUS_PLAYER_URL, headers=headers)
+        response.raise_for_status()
+        return discord_id, response.json()
+    except Exception:
+        return discord_id, None
 
 
 class TokenCog(commands.Cog):
@@ -63,32 +74,26 @@ class TokenCog(commands.Cog):
         failed = []
 
         async with httpx.AsyncClient(timeout=10.0) as client:
-            for discord_id, data in guild_players.items():
-                api_key = data.get("api_key") if isinstance(data, dict) else data
-                if not api_key:
-                    failed.append(discord_id)
-                    continue
+            tasks = [
+                _fetch_token(client, discord_id, data.get("api_key", "") if isinstance(data, dict) else data)
+                for discord_id, data in guild_players.items()
+            ]
+            results = await asyncio.gather(*tasks)
 
-                headers = {"accept": "application/json", "X-API-KEY": api_key}
-                try:
-                    response = await client.get(TACTICUS_PLAYER_URL, headers=headers)
-                    response.raise_for_status()
-                    player_data = response.json()
-                except Exception:
-                    failed.append(discord_id)
-                    continue
+        for discord_id, player_data in results:
+            if player_data is None:
+                failed.append(discord_id)
+                continue
 
-                tokens  = (
-                    player_data.get("player", {})
-                    .get("progress", {})
-                    .get("guildRaid", {})
-                    .get("tokens", {})
-                )
-                current = tokens.get("current", 0)
-                maximum = tokens.get("max", 3)
-                next_in = tokens.get("nextTokenInSeconds", 0)
+            player     = player_data.get("player") or {}
+            progress   = player.get("progress") or {}
+            guild_raid = progress.get("guildRaid") or {}
+            tokens     = guild_raid.get("tokens") or {}
+            current = tokens.get("current", 0)
+            maximum = tokens.get("max", 3)
+            next_in = tokens.get("nextTokenInSeconds", 0)
 
-                rows.append((discord_id, current, maximum, next_in))
+            rows.append((discord_id, current, maximum, next_in))
 
         rows.sort(key=lambda x: (-x[1], x[3]))
 

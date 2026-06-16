@@ -6,7 +6,7 @@ from typing import Optional
 
 from bot.guilds import load_player_registrations, save_player_registrations, load_capped_state, save_capped_state, load_guilds, repo
 from bot.embeds import guild_autocomplete
-from bot.permissions import require_guild_member, require_tier
+from bot.permissions import require_guild_member, require_tier, check_tier
 
 TACTICUS_PLAYER_URL = "https://api.tacticusgame.com/api/v1/player"
 
@@ -15,11 +15,13 @@ class RegistrationCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    reg = app_commands.Group(name="registration", description="Player registration commands")
+
     # ==========================================
-    # SLASH COMMAND: REGISTER
+    # SLASH COMMAND: REGISTRATION REGISTER
     # ==========================================
 
-    @app_commands.command(
+    @reg.command(
         name="register",
         description="Register your Tacticus API key to enable token cap notifications.",
     )
@@ -120,10 +122,10 @@ class RegistrationCog(commands.Cog):
             )
 
     # ==========================================
-    # SLASH COMMAND: UNREGISTER
+    # SLASH COMMAND: REGISTRATION UNREGISTER
     # ==========================================
 
-    @app_commands.command(
+    @reg.command(
         name="unregister",
         description="Remove your Tacticus API key registration.",
     )
@@ -182,15 +184,77 @@ class RegistrationCog(commands.Cog):
             )
 
     # ==========================================
-    # SLASH COMMAND: CHECK_REGISTERED_MEMBERS
+    # SLASH COMMAND: REGISTRATION MOVE
     # ==========================================
 
-    @app_commands.command(
-        name="check_registered_members",
-        description="List all players who have registered their Tacticus API key.",
+    @reg.command(
+        name="move",
+        description="Move a registered player to a different guild.",
+    )
+    @app_commands.describe(
+        target_user="The player to move",
+        guild_id="The guild to move them to",
+    )
+    @app_commands.autocomplete(guild_id=guild_autocomplete)
+    async def move(
+        self,
+        interaction: discord.Interaction,
+        target_user: discord.Member,
+        guild_id: str,
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        if not await check_tier(interaction, "officer"):
+            await interaction.followup.send(
+                "❌ You don't have permission to use this command.",
+                ephemeral=True,
+            )
+            return
+
+        server_id     = interaction.guild_id
+        guilds        = load_guilds(server_id)
+        registrations = load_player_registrations(server_id)
+        discord_id    = str(target_user.id)
+
+        if guild_id not in guilds:
+            await interaction.followup.send(
+                f"❌ Guild `{guild_id}` not found. Please select a valid guild from the list.",
+                ephemeral=True,
+            )
+            return
+
+        if discord_id not in registrations:
+            await interaction.followup.send(
+                f"❌ {target_user.mention} is not currently registered.",
+                ephemeral=True,
+            )
+            return
+
+        guild_name = guilds[guild_id]["name"]
+        registrations[discord_id]["guild_id"] = guild_id
+        save_player_registrations(server_id, registrations)
+
+        await interaction.followup.send(
+            f"✅ {target_user.mention} has been moved to **{guild_name}**.",
+            ephemeral=True,
+        )
+
+    # ==========================================
+    # SLASH COMMAND: REGISTRATION LIST
+    # ==========================================
+
+    @reg.command(
+        name="list",
+        description="List all registered players, optionally filtered by guild.",
     )
     @require_tier("officer")
-    async def check_registered_members(self, interaction: discord.Interaction):
+    @app_commands.describe(guild_id="Filter by guild (optional)")
+    @app_commands.autocomplete(guild_id=guild_autocomplete)
+    async def list_registrations(
+        self,
+        interaction: discord.Interaction,
+        guild_id: Optional[str] = None,
+    ):
         await interaction.response.defer(ephemeral=True)
 
         server_id     = interaction.guild_id
@@ -201,13 +265,22 @@ class RegistrationCog(commands.Cog):
             await interaction.followup.send("❌ No players have registered yet.", ephemeral=True)
             return
 
-        by_guild: dict[str, list] = {}
-        for discord_id, data in registrations.items():
-            gid = data.get("guild_id")
-            by_guild.setdefault(gid, []).append(discord_id)
+        if guild_id:
+            filtered = {k: v for k, v in registrations.items() if isinstance(v, dict) and v.get("guild_id") == guild_id}
+            if not filtered:
+                guild_name = guilds.get(guild_id, {}).get("name", guild_id)
+                await interaction.followup.send(f"❌ No registered players in **{guild_name}**.", ephemeral=True)
+                return
+            by_guild = {guild_id: list(filtered.keys())}
+        else:
+            by_guild: dict[str, list] = {}
+            for discord_id, data in registrations.items():
+                gid = data.get("guild_id") if isinstance(data, dict) else None
+                by_guild.setdefault(gid, []).append(discord_id)
 
+        total = sum(len(v) for v in by_guild.values())
         await interaction.followup.send(
-            f"📋 **Registered Players — {len(registrations)} total**",
+            f"📋 **Registered Players — {total} total**",
             ephemeral=True,
         )
 

@@ -22,8 +22,8 @@ HELP_DATA = {
             "**https://api.tacticusgame.com/**"
         ),
         "commands": [
-            ("/register",           "Link your Tacticus API key to your Discord account for token notifications."),
-            ("/unregister",         "Remove your Tacticus API key registration."),
+            ("/registration register", "Link your Tacticus API key to your Discord account for token notifications."),
+            ("/registration unregister", "Remove your Tacticus API key registration."),
             ("/token_availability", "See raid token status for all registered players in a guild."),
             ("/bomb_availability",  "See bomb token status for all registered players in a guild."),
             ("/upload_replay",      "Submit a raid replay link to the index for a boss/map."),
@@ -38,7 +38,8 @@ HELP_DATA = {
         "intro": "These commands are available to cluster officers and admins.",
         "commands": [
             ("/view_config",                  "View cluster configuration — guilds, roles, or leaderboards. Replaces the retired /list_guilds command."),
-            ("/check_registered_members",    "List all players who have registered their Tacticus API key."),
+            ("/registration list",            "List all registered players, optionally filtered by guild. Replaces the retired /check_registered_members command."),
+            ("/registration move",           "Move a registered player to a different guild without needing their API key."),
             ("/set_ping_channel",            "Set the channel where token cap notifications are posted for a guild."),
             ("/set_live_leaderboard",        "Pin a Battle leaderboard in a channel — it auto-updates every hour."),
             ("/set_live_cluster_leaderboard","Pin a cluster-wide leaderboard in a channel — it auto-updates every hour."),
