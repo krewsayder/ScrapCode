@@ -297,11 +297,14 @@ class RegistrationCog(commands.Cog):
         member_map = {did: member for did, member in present}
         gone_set   = set(gone)
 
-        total = sum(len(v) for v in by_guild.values())
-        await interaction.followup.send(
-            f"📋 **Registered Players — {total} total**",
-            ephemeral=True,
-        )
+        total        = sum(len(v) for v in by_guild.values())
+        multi_guild  = len(by_guild) > 1
+
+        if multi_guild:
+            await interaction.followup.send(
+                f"📋 **Registered Players — {total} total**",
+                ephemeral=True,
+            )
 
         for gid, members in by_guild.items():
             guild_name    = guilds.get(gid, {}).get("name", f"`{gid}`")
@@ -309,7 +312,7 @@ class RegistrationCog(commands.Cog):
             off_server    = [did for did in members if did in gone_set]
 
             embed = discord.Embed(
-                title=f"{guild_name} ({len(members)})",
+                title=f"📋 Registered Players — {guild_name} ({len(members)})" if not multi_guild else f"{guild_name} ({len(members)})",
                 color=discord.Color.blurple(),
             )
             if on_server:
