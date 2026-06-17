@@ -104,8 +104,15 @@ class BombCog(commands.Cog):
         # Sort not_ready by soonest ready first
         not_ready.sort(key=lambda x: x[1])
 
-        # Resolve members for ready players — split into present/gone
-        ready_present, ready_gone = await resolve_members(interaction.guild, ready)
+        # Resolve all players upfront — split into present/gone
+        all_ids = ready + [did for did, _ in not_ready]
+        present, gone = await resolve_members(interaction.guild, all_ids)
+        member_map  = {did: member for did, member in present}
+        gone_set    = set(gone)
+
+        ready_present    = [(did, member_map[did]) for did in ready    if did in member_map]
+        not_ready_present = [(did, s) for did, s in not_ready          if did in member_map]
+        gone_ids         = [did for did in all_ids                     if did in gone_set]
 
         total = len(ready) + len(not_ready)
 
@@ -119,15 +126,15 @@ class BombCog(commands.Cog):
         if ready_present:
             embed.add_field(
                 name=f"✅ Ready ({len(ready_present)})",
-                value="\n".join(f"<@{did}>" for did, _ in ready_present),
+                value="\n".join(f"@{member.display_name}" for _, member in ready_present),
                 inline=False,
             )
 
-        # Not ready players
-        if not_ready:
+        # Not ready players (on server)
+        if not_ready_present:
             embed.add_field(
-                name=f"❌ Not Ready ({len(not_ready)})",
-                value="\n".join(f"<@{did}> — {_format_countdown(s)}" for did, s in not_ready),
+                name=f"❌ Not Ready ({len(not_ready_present)})",
+                value="\n".join(f"@{member_map[did].display_name} — {_format_countdown(s)}" for did, s in not_ready_present),
                 inline=False,
             )
 
@@ -139,11 +146,11 @@ class BombCog(commands.Cog):
                 inline=False,
             )
 
-        # Players who have bombs but left the server
-        if ready_gone:
+        # Players no longer on the server
+        if gone_ids:
             embed.add_field(
-                name=f"🚪 Ready but no longer on server ({len(ready_gone)})",
-                value="\n".join(f"`{did}`" for did in ready_gone),
+                name=f"🚪 No longer on server ({len(gone_ids)})",
+                value="\n".join(f"`{did}`" for did in gone_ids),
                 inline=False,
             )
 
