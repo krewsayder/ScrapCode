@@ -58,18 +58,38 @@ async def resolve_members(guild: discord.Guild, discord_ids: list[str]) -> tuple
     if to_fetch:
         async def _fetch(did):
             try:
-                return did, await guild.fetch_member(int(did))
+                return did, await guild.fetch_member(int(did)), False
+            except discord.NotFound:
+                return did, None, True   # confirmed not in guild
             except Exception:
-                return did, None
+                return did, None, False  # transient error — retry
 
         fetched = await asyncio.gather(*[_fetch(did) for did in to_fetch])
-        for did, member in fetched:
+
+        retry = []
+        for did, member, confirmed_gone in fetched:
             if member is not None:
                 present.append((did, member))
+            elif confirmed_gone:
+                pass  # will land in gone below
+            else:
+                retry.append(did)
+
+        # Retry transient failures sequentially after a short pause
+        if retry:
+            await asyncio.sleep(1)
+            for did in retry:
+                try:
+                    member = await guild.fetch_member(int(did))
+                    present.append((did, member))
+                except discord.NotFound:
+                    pass  # confirmed gone — will land in gone below
+                except Exception:
+                    present.append((did, None))  # still failing — exclude from gone but hide
 
     present_ids = {did for did, _ in present}
     gone        = [did for did in discord_ids if did not in present_ids]
-    return present, gone
+    return [(did, m) for did, m in present if m is not None], gone
 
 
 def _build_hero_display(hero_units: list[dict]) -> str:
