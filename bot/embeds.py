@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -44,19 +45,30 @@ async def guild_autocomplete(interaction: discord.Interaction, current: str):
 
 async def resolve_members(guild: discord.Guild, discord_ids: list[str]) -> tuple[list, list]:
     """Resolve Discord IDs to members. Returns (present: [(id, member)], gone: [id])."""
-    present = []
-    gone    = []
+    present    = []
+    to_fetch   = []
+
     for did in discord_ids:
         member = guild.get_member(int(did))
-        if member is None:
-            try:
-                member = await guild.fetch_member(int(did))
-            except Exception:
-                member = None
-        if member is None:
-            gone.append(did)
-        else:
+        if member is not None:
             present.append((did, member))
+        else:
+            to_fetch.append(did)
+
+    if to_fetch:
+        async def _fetch(did):
+            try:
+                return did, await guild.fetch_member(int(did))
+            except Exception:
+                return did, None
+
+        fetched = await asyncio.gather(*[_fetch(did) for did in to_fetch])
+        for did, member in fetched:
+            if member is not None:
+                present.append((did, member))
+
+    present_ids = {did for did, _ in present}
+    gone        = [did for did in discord_ids if did not in present_ids]
     return present, gone
 
 
