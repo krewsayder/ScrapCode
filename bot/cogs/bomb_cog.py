@@ -141,6 +141,11 @@ class BombCog(commands.Cog):
             copy_lines = []
             for did in ready:
                 member = interaction.guild.get_member(int(did))
+                if member is None:
+                    try:
+                        member = await interaction.guild.fetch_member(int(did))
+                    except Exception:
+                        member = None
                 name   = f"@{member.display_name}" if member else f"Unknown"
                 copy_lines.append(f"{name} : <@{did}>")
             copy_text = "\n".join(copy_lines)
