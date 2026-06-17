@@ -44,33 +44,22 @@ async def guild_autocomplete(interaction: discord.Interaction, current: str):
 # ==========================================
 
 async def resolve_members(guild: discord.Guild, discord_ids: list[str]) -> tuple[list, list]:
-    """Resolve Discord IDs to members. Returns (present: [(id, member)], gone: [id])."""
+    """Resolve Discord IDs to members. Returns (present: [(id, member)], gone: [id]).
+
+    Skips local cache — always queries Discord live so departed members
+    are not falsely returned from a stale cache.
+    """
     if not discord_ids:
         return [], []
 
-    # Check cache first
-    present    = []
-    to_fetch   = []
-    for did in discord_ids:
-        member = guild.get_member(int(did))
-        if member is not None:
-            present.append((did, member))
-        else:
-            to_fetch.append(did)
+    try:
+        fetched     = await guild.query_members(user_ids=[int(did) for did in discord_ids], cache=False)
+        fetched_map = {str(m.id): m for m in fetched}
+    except Exception:
+        fetched_map = {}
 
-    # Bulk lookup via single WebSocket request — far faster than individual REST calls
-    if to_fetch:
-        try:
-            fetched = await guild.query_members(user_ids=[int(did) for did in to_fetch], cache=True)
-            fetched_map = {str(m.id): m for m in fetched}
-            for did in to_fetch:
-                if did in fetched_map:
-                    present.append((did, fetched_map[did]))
-        except Exception:
-            pass  # if query_members fails entirely, treat all as unresolvable
-
-    present_ids = {did for did, _ in present}
-    gone        = [did for did in discord_ids if did not in present_ids]
+    present = [(did, fetched_map[did]) for did in discord_ids if did in fetched_map]
+    gone    = [did for did in discord_ids if did not in fetched_map]
     return present, gone
 
 

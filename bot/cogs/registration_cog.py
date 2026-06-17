@@ -313,7 +313,7 @@ class RegistrationCog(commands.Cog):
                 color=discord.Color.blurple(),
             )
             if on_server:
-                embed.description = "\n".join(f"• <@{did}>" for did in on_server)
+                embed.description = "\n".join(f"• @{member_map[did].display_name}" for did in on_server)
             if off_server:
                 embed.add_field(
                     name=f"🚪 No longer on server ({len(off_server)})",
