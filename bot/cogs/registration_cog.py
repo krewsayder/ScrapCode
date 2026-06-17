@@ -5,7 +5,7 @@ from discord.ext import commands
 from typing import Optional
 
 from bot.guilds import load_player_registrations, save_player_registrations, load_capped_state, save_capped_state, load_guilds, repo
-from bot.embeds import guild_autocomplete
+from bot.embeds import guild_autocomplete, resolve_members
 from bot.permissions import require_guild_member, require_tier, check_tier
 
 TACTICUS_PLAYER_URL = "https://api.tacticusgame.com/api/v1/player"
@@ -132,17 +132,20 @@ class RegistrationCog(commands.Cog):
     @require_guild_member()
     @app_commands.describe(
         target_user="(Admin only) Unregister on behalf of another Discord user",
+        user_id="(Admin only) Raw Discord ID — use when the player has left the server",
     )
     async def unregister(
         self,
         interaction: discord.Interaction,
         target_user: Optional[discord.Member] = None,
+        user_id: Optional[str] = None,
     ):
         await interaction.response.defer(ephemeral=True)
 
         server_id = interaction.guild_id
 
-        if target_user is not None:
+        # Require admin to use target_user or user_id
+        if target_user is not None or user_id is not None:
             cluster = repo.load(server_id)
             user_role_ids = {r.id for r in interaction.user.roles}
             admin_roles = set(cluster.role_tiers.get("admin", []))
@@ -153,11 +156,17 @@ class RegistrationCog(commands.Cog):
                 )
                 return
 
-        discord_id    = str(target_user.id) if target_user else str(interaction.user.id)
+        if target_user is not None:
+            discord_id = str(target_user.id)
+        elif user_id is not None:
+            discord_id = user_id.strip()
+        else:
+            discord_id = str(interaction.user.id)
+
         registrations = load_player_registrations(server_id)
 
         if discord_id not in registrations:
-            target = target_user.mention if target_user else "You are"
+            target = target_user.mention if target_user else f"`{discord_id}`" if user_id else "You are"
             await interaction.followup.send(
                 f"❌ {target} not currently registered.",
                 ephemeral=True,
@@ -175,6 +184,11 @@ class RegistrationCog(commands.Cog):
         if target_user:
             await interaction.followup.send(
                 f"✅ {target_user.mention} has been unregistered successfully.",
+                ephemeral=True,
+            )
+        elif user_id:
+            await interaction.followup.send(
+                f"✅ User `{discord_id}` has been unregistered successfully.",
                 ephemeral=True,
             )
         else:
@@ -278,6 +292,11 @@ class RegistrationCog(commands.Cog):
                 gid = data.get("guild_id") if isinstance(data, dict) else None
                 by_guild.setdefault(gid, []).append(discord_id)
 
+        all_ids = [did for members in by_guild.values() for did in members]
+        present, gone = await resolve_members(interaction.guild, all_ids)
+        member_map = {did: member for did, member in present}
+        gone_set   = set(gone)
+
         total = sum(len(v) for v in by_guild.values())
         await interaction.followup.send(
             f"📋 **Registered Players — {total} total**",
@@ -285,12 +304,22 @@ class RegistrationCog(commands.Cog):
         )
 
         for gid, members in by_guild.items():
-            guild_name = guilds.get(gid, {}).get("name", f"`{gid}`")
+            guild_name    = guilds.get(gid, {}).get("name", f"`{gid}`")
+            on_server     = [did for did in members if did in member_map]
+            off_server    = [did for did in members if did in gone_set]
+
             embed = discord.Embed(
                 title=f"{guild_name} ({len(members)})",
-                description="\n".join(f"• <@{did}>" for did in members),
                 color=discord.Color.blurple(),
             )
+            if on_server:
+                embed.description = "\n".join(f"• <@{did}>" for did in on_server)
+            if off_server:
+                embed.add_field(
+                    name=f"🚪 No longer on server ({len(off_server)})",
+                    value="\n".join(f"• `{did}`" for did in off_server),
+                    inline=False,
+                )
             await interaction.followup.send(embed=embed, ephemeral=True)
 
 
