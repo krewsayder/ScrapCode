@@ -160,7 +160,7 @@ class BombCog(commands.Cog):
 
         # Copy field — only present ready players, needs display names for code block
         if ready_present:
-            copy_lines = [f"@{member.display_name} : <@{did}>" for did, member in ready_present]
+            copy_lines = [f"<@{did}>" for did, member in ready_present]
             copy_text = "\n".join(copy_lines)
             embed.add_field(
                 name="Copy players with available bombs",

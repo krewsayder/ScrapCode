@@ -45,9 +45,12 @@ async def guild_autocomplete(interaction: discord.Interaction, current: str):
 
 async def resolve_members(guild: discord.Guild, discord_ids: list[str]) -> tuple[list, list]:
     """Resolve Discord IDs to members. Returns (present: [(id, member)], gone: [id])."""
+    if not discord_ids:
+        return [], []
+
+    # Check cache first
     present    = []
     to_fetch   = []
-
     for did in discord_ids:
         member = guild.get_member(int(did))
         if member is not None:
@@ -55,41 +58,20 @@ async def resolve_members(guild: discord.Guild, discord_ids: list[str]) -> tuple
         else:
             to_fetch.append(did)
 
+    # Bulk lookup via single WebSocket request — far faster than individual REST calls
     if to_fetch:
-        async def _fetch(did):
-            try:
-                return did, await guild.fetch_member(int(did)), False
-            except discord.NotFound:
-                return did, None, True   # confirmed not in guild
-            except Exception:
-                return did, None, False  # transient error — retry
-
-        fetched = await asyncio.gather(*[_fetch(did) for did in to_fetch])
-
-        retry = []
-        for did, member, confirmed_gone in fetched:
-            if member is not None:
-                present.append((did, member))
-            elif confirmed_gone:
-                pass  # will land in gone below
-            else:
-                retry.append(did)
-
-        # Retry transient failures sequentially after a short pause
-        if retry:
-            await asyncio.sleep(1)
-            for did in retry:
-                try:
-                    member = await guild.fetch_member(int(did))
-                    present.append((did, member))
-                except discord.NotFound:
-                    pass  # confirmed gone — will land in gone below
-                except Exception:
-                    present.append((did, None))  # still failing — exclude from gone but hide
+        try:
+            fetched = await guild.query_members(user_ids=[int(did) for did in to_fetch], cache=True)
+            fetched_map = {str(m.id): m for m in fetched}
+            for did in to_fetch:
+                if did in fetched_map:
+                    present.append((did, fetched_map[did]))
+        except Exception:
+            pass  # if query_members fails entirely, treat all as unresolvable
 
     present_ids = {did for did, _ in present}
     gone        = [did for did in discord_ids if did not in present_ids]
-    return [(did, m) for did, m in present if m is not None], gone
+    return present, gone
 
 
 def _build_hero_display(hero_units: list[dict]) -> str:
