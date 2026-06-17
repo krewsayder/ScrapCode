@@ -73,14 +73,23 @@ class TokenCog(commands.Cog):
         rows   = []
         failed = []
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            tasks = [
-                _fetch_token(client, discord_id, data.get("api_key", "") if isinstance(data, dict) else data)
-                for discord_id, data in guild_players.items()
-            ]
-            results = await asyncio.gather(*tasks)
+        # Run API fetches and member resolution in parallel
+        async def _do_api_fetches():
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                return await asyncio.gather(*[
+                    _fetch_token(client, did, data.get("api_key", "") if isinstance(data, dict) else data)
+                    for did, data in guild_players.items()
+                ])
 
-        for discord_id, player_data in results:
+        api_results, (present, gone) = await asyncio.gather(
+            _do_api_fetches(),
+            resolve_members(interaction.guild, list(guild_players.keys())),
+        )
+
+        member_map = {did: member for did, member in present}
+        gone_set   = set(gone)
+
+        for discord_id, player_data in api_results:
             if player_data is None:
                 failed.append(discord_id)
                 continue
@@ -97,15 +106,6 @@ class TokenCog(commands.Cog):
 
         rows.sort(key=lambda x: (-x[1], x[3]))
 
-        # Resolve members — split into present/gone
-        all_ids = [discord_id for discord_id, *_ in rows]
-        present_map = {}
-        gone_ids    = []
-        present, gone = await resolve_members(interaction.guild, all_ids)
-        for did, member in present:
-            present_map[did] = member
-        gone_ids = gone
-
         embed = discord.Embed(
             title=f"⚔️ Token Count — {guild_name}",
             color=discord.Color.blurple(),
@@ -114,30 +114,30 @@ class TokenCog(commands.Cog):
         if rows:
             lines = []
             for discord_id, current, maximum, next_in in rows:
-                if discord_id not in present_map:
-                    continue
-                name = f"@{present_map[discord_id].display_name}"
+                name = f"@{member_map[discord_id].display_name}" if discord_id in member_map else f"<@{discord_id}>"
                 if current >= maximum:
                     lines.append(f"{name} — `{current}/{maximum}` tokens")
                 else:
                     lines.append(f"{name} — `{current}/{maximum}` tokens • in {_format_countdown(next_in)}")
             embed.description = "\n".join(lines)
 
-        if gone_ids:
-            embed.add_field(
-                name=f"🚪 No longer on server ({len(gone_ids)})",
-                value="\n".join(f"`{did}`" for did in gone_ids),
-                inline=False,
-            )
-
         if failed:
-            embed.add_field(
-                name=f"⚠️ Failed to fetch ({len(failed)})",
-                value="\n".join(f"<@{did}>" for did in failed),
-                inline=False,
-            )
+            failed_present = [did for did in failed if did in member_map]
+            failed_gone    = [did for did in failed if did in gone_set]
+            if failed_present:
+                embed.add_field(
+                    name=f"⚠️ Failed to fetch ({len(failed_present)}) — ask them to /registration register",
+                    value="\n".join(f"@{member_map[did].display_name}" for did in failed_present),
+                    inline=False,
+                )
+            if failed_gone:
+                embed.add_field(
+                    name=f"🚪 No longer on server ({len(failed_gone)})",
+                    value="\n".join(f"`{did}`" for did in failed_gone),
+                    inline=False,
+                )
 
-        embed.set_footer(text=f"{len(present_map)} player(s)")
+        embed.set_footer(text=f"{len(rows)} player(s)")
         await interaction.followup.send(embed=embed)
 
 

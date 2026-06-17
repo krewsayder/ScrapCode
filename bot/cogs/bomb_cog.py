@@ -72,25 +72,36 @@ class BombCog(commands.Cog):
             )
             return
 
-        ready     = []  # discord_ids
-        not_ready = []  # (discord_id, next_in_seconds)
-        failed    = []  # discord_ids
+        all_player_ids = list(guild_players.keys())
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            tasks = [
-                _fetch_bomb(client, discord_id, data.get("api_key", ""))
-                for discord_id, data in guild_players.items()
-            ]
-            results = await asyncio.gather(*tasks)
+        # Run API fetches and member resolution in parallel
+        async def _do_api_fetches():
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                return await asyncio.gather(*[
+                    _fetch_bomb(client, did, data.get("api_key", ""))
+                    for did, data in guild_players.items()
+                ])
 
-        for discord_id, player_data in results:
+        api_results, (present, gone) = await asyncio.gather(
+            _do_api_fetches(),
+            resolve_members(interaction.guild, all_player_ids),
+        )
+
+        member_map = {did: member for did, member in present}
+        gone_set   = set(gone)
+
+        ready     = []
+        not_ready = []
+        failed    = []
+
+        for discord_id, player_data in api_results:
             if player_data is None:
                 failed.append(discord_id)
                 continue
 
-            player    = player_data.get("player") or {}
-            progress  = player.get("progress") or {}
-            guild_raid = progress.get("guildRaid") or {}
+            player      = player_data.get("player") or {}
+            progress    = player.get("progress") or {}
+            guild_raid  = progress.get("guildRaid") or {}
             bomb_tokens = guild_raid.get("bombTokens") or {}
             current = bomb_tokens.get("current", 0)
             maximum = bomb_tokens.get("max", 1)
@@ -104,57 +115,50 @@ class BombCog(commands.Cog):
         # Sort not_ready by soonest ready first
         not_ready.sort(key=lambda x: x[1])
 
-        # Resolve all players upfront — split into present/gone
-        all_ids = ready + [did for did, _ in not_ready]
-        present, gone = await resolve_members(interaction.guild, all_ids)
-        member_map  = {did: member for did, member in present}
-        gone_set    = set(gone)
-
-        ready_present    = [(did, member_map[did]) for did in ready    if did in member_map]
-        not_ready_present = [(did, s) for did, s in not_ready          if did in member_map]
-        gone_ids         = [did for did in all_ids                     if did in gone_set]
+        ready_present = [(did, member_map[did]) for did in ready if did in member_map]
+        ready_gone    = [did for did in ready if did in gone_set]
 
         total = len(ready) + len(not_ready)
 
         # Build embed
         embed = discord.Embed(
             title=f"💣 Bomb Availability — {guild_name}",
-            color=discord.Color.green() if ready_present else discord.Color.red(),
+            color=discord.Color.green() if ready else discord.Color.red(),
         )
 
-        # Ready players (on server)
-        if ready_present:
+        # Ready players
+        if ready:
             embed.add_field(
-                name=f"✅ Ready ({len(ready_present)})",
-                value="\n".join(f"@{member.display_name}" for _, member in ready_present),
+                name=f"✅ Ready ({len(ready)})",
+                value="\n".join(f"@{member_map[did].display_name}" if did in member_map else f"<@{did}>" for did in ready),
                 inline=False,
             )
 
-        # Not ready players (on server)
-        if not_ready_present:
+        # Not ready players
+        if not_ready:
             embed.add_field(
-                name=f"❌ Not Ready ({len(not_ready_present)})",
-                value="\n".join(f"@{member_map[did].display_name} — {_format_countdown(s)}" for did, s in not_ready_present),
+                name=f"❌ Not Ready ({len(not_ready)})",
+                value="\n".join(f"@{member_map[did].display_name} — {_format_countdown(s)}" if did in member_map else f"<@{did}> — {_format_countdown(s)}" for did, s in not_ready),
                 inline=False,
             )
 
         # Failed
         if failed:
             embed.add_field(
-                name=f"⚠️ Failed to fetch ({len(failed)})",
-                value="\n".join(f"<@{did}>" for did in failed),
+                name=f"⚠️ Failed to fetch ({len(failed)}) — ask them to /registration register",
+                value="\n".join(f"@{member_map[did].display_name}" if did in member_map else f"<@{did}>" for did in failed),
                 inline=False,
             )
 
-        # Players no longer on the server
-        if gone_ids:
+        # Ready players who have left the server
+        if ready_gone:
             embed.add_field(
-                name=f"🚪 No longer on server ({len(gone_ids)})",
-                value="\n".join(f"`{did}`" for did in gone_ids),
+                name=f"🚪 Ready but no longer on server ({len(ready_gone)})",
+                value="\n".join(f"`{did}`" for did in ready_gone),
                 inline=False,
             )
 
-        # Copy field inside the embed — use display names so mobile can copy cleanly
+        # Copy field — only present ready players, needs display names for code block
         if ready_present:
             copy_lines = [f"@{member.display_name} : <@{did}>" for did, member in ready_present]
             copy_text = "\n".join(copy_lines)
