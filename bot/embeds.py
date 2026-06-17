@@ -42,6 +42,24 @@ async def guild_autocomplete(interaction: discord.Interaction, current: str):
 # SHARED HELPERS
 # ==========================================
 
+async def resolve_members(guild: discord.Guild, discord_ids: list[str]) -> tuple[list, list]:
+    """Resolve Discord IDs to members. Returns (present: [(id, member)], gone: [id])."""
+    present = []
+    gone    = []
+    for did in discord_ids:
+        member = guild.get_member(int(did))
+        if member is None:
+            try:
+                member = await guild.fetch_member(int(did))
+            except Exception:
+                member = None
+        if member is None:
+            gone.append(did)
+        else:
+            present.append((did, member))
+    return present, gone
+
+
 def _build_hero_display(hero_units: list[dict]) -> str:
     sorted_units = sorted(hero_units, key=lambda h: h.get("unitId", ""))
     return " ".join(get_boss_emoji(h.get("unitId", "")) for h in sorted_units) or "❌"

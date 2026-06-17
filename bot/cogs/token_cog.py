@@ -4,7 +4,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot.embeds import guild_autocomplete
+from bot.embeds import guild_autocomplete, resolve_members
 from bot.guilds import load_guilds, load_player_registrations
 from bot.permissions import require_guild_member
 
@@ -97,6 +97,15 @@ class TokenCog(commands.Cog):
 
         rows.sort(key=lambda x: (-x[1], x[3]))
 
+        # Resolve members — split into present/gone
+        all_ids = [discord_id for discord_id, *_ in rows]
+        present_map = {}
+        gone_ids    = []
+        present, gone = await resolve_members(interaction.guild, all_ids)
+        for did, member in present:
+            present_map[did] = member
+        gone_ids = gone
+
         embed = discord.Embed(
             title=f"⚔️ Token Count — {guild_name}",
             color=discord.Color.blurple(),
@@ -105,18 +114,21 @@ class TokenCog(commands.Cog):
         if rows:
             lines = []
             for discord_id, current, maximum, next_in in rows:
-                member = interaction.guild.get_member(int(discord_id))
-                if member is None:
-                    try:
-                        member = await interaction.guild.fetch_member(int(discord_id))
-                    except Exception:
-                        member = None
-                name = f"@{member.display_name}" if member else f"<@{discord_id}>"
+                if discord_id not in present_map:
+                    continue
+                name = f"@{present_map[discord_id].display_name}"
                 if current >= maximum:
                     lines.append(f"{name} — `{current}/{maximum}` tokens")
                 else:
                     lines.append(f"{name} — `{current}/{maximum}` tokens • in {_format_countdown(next_in)}")
             embed.description = "\n".join(lines)
+
+        if gone_ids:
+            embed.add_field(
+                name=f"🚪 No longer on server ({len(gone_ids)})",
+                value="\n".join(f"`{did}`" for did in gone_ids),
+                inline=False,
+            )
 
         if failed:
             embed.add_field(
@@ -125,7 +137,7 @@ class TokenCog(commands.Cog):
                 inline=False,
             )
 
-        embed.set_footer(text=f"{len(rows)} player(s)")
+        embed.set_footer(text=f"{len(present_map)} player(s)")
         await interaction.followup.send(embed=embed)
 
 

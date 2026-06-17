@@ -4,7 +4,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot.embeds import guild_autocomplete
+from bot.embeds import guild_autocomplete, resolve_members
 from bot.guilds import load_guilds, load_player_registrations
 from bot.permissions import require_guild_member
 
@@ -104,19 +104,22 @@ class BombCog(commands.Cog):
         # Sort not_ready by soonest ready first
         not_ready.sort(key=lambda x: x[1])
 
+        # Resolve members for ready players — split into present/gone
+        ready_present, ready_gone = await resolve_members(interaction.guild, ready)
+
         total = len(ready) + len(not_ready)
 
         # Build embed
         embed = discord.Embed(
             title=f"💣 Bomb Availability — {guild_name}",
-            color=discord.Color.green() if ready else discord.Color.red(),
+            color=discord.Color.green() if ready_present else discord.Color.red(),
         )
 
-        # Ready players
-        if ready:
+        # Ready players (on server)
+        if ready_present:
             embed.add_field(
-                name=f"✅ Ready ({len(ready)})",
-                value="\n".join(f"<@{did}>" for did in ready),
+                name=f"✅ Ready ({len(ready_present)})",
+                value="\n".join(f"<@{did}>" for did, _ in ready_present),
                 inline=False,
             )
 
@@ -136,18 +139,17 @@ class BombCog(commands.Cog):
                 inline=False,
             )
 
+        # Players who have bombs but left the server
+        if ready_gone:
+            embed.add_field(
+                name=f"🚪 Ready but no longer on server ({len(ready_gone)})",
+                value="\n".join(f"`{did}`" for did in ready_gone),
+                inline=False,
+            )
+
         # Copy field inside the embed — use display names so mobile can copy cleanly
-        if ready:
-            copy_lines = []
-            for did in ready:
-                member = interaction.guild.get_member(int(did))
-                if member is None:
-                    try:
-                        member = await interaction.guild.fetch_member(int(did))
-                    except Exception:
-                        member = None
-                name   = f"@{member.display_name}" if member else f"Unknown"
-                copy_lines.append(f"{name} : <@{did}>")
+        if ready_present:
+            copy_lines = [f"@{member.display_name} : <@{did}>" for did, member in ready_present]
             copy_text = "\n".join(copy_lines)
             embed.add_field(
                 name="Copy players with available bombs",
