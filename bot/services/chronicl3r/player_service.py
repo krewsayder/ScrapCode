@@ -41,7 +41,12 @@ class PlayerService:
 
         for user_id in current_ids:
             try:
-                profile = await self.get_or_register(user_id)
+                if user_id in players:
+                    # Already registered — fetch profile directly to pick up name changes
+                    profile = await asyncio.to_thread(self.client.get_profile, user_id)
+                else:
+                    # New player — register first, fall back to fetch on 409
+                    profile = await self.get_or_register(user_id)
                 players[user_id] = {
                     "display_name":   profile["tacticus_display_nm"],
                     "last_validated": now,
