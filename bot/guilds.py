@@ -32,7 +32,7 @@ def load_guilds(discord_server_id: int) -> dict:
 
 
 def save_guilds(discord_server_id: int, guilds: dict) -> None:
-    from models import Cluster, Guild
+    from bot.models import Cluster, Guild
     cluster = repo.load(discord_server_id)
     cluster.guilds = {
         gid: Guild(
