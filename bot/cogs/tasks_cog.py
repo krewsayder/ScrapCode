@@ -1,3 +1,4 @@
+import asyncio
 import httpx
 import discord
 from discord.ext import commands, tasks
@@ -44,87 +45,102 @@ class TasksCog(commands.Cog):
         server_ids = repo.list_server_ids()
         print(f"[cap_detect] Loop fired, checking {len(server_ids)} server(s)...")
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            for server_id in server_ids:
-                registrations = load_player_registrations(server_id)
-                if not registrations:
+        for server_id in server_ids:
+            registrations = load_player_registrations(server_id)
+            if not registrations:
+                continue
+
+            guilds        = load_guilds(server_id)
+            capped_state  = load_capped_state(server_id)
+            state_changed = False
+
+            # Resolve channels upfront
+            channel_cache: dict[int, discord.TextChannel | None] = {}
+            for guild_data in guilds.values():
+                channel_id = guild_data.get("notification_channel_id")
+                if not channel_id or channel_id in channel_cache:
                     continue
-
-                guilds        = load_guilds(server_id)
-                capped_state  = load_capped_state(server_id)
-                state_changed = False
-
-                # Cache fetched channels to avoid redundant lookups
-                channel_cache: dict[int, discord.TextChannel | None] = {}
-
-                for discord_id, reg in registrations.items():
-                    api_key  = reg.get("api_key")
-                    guild_id = reg.get("guild_id")
-                    if not api_key or not guild_id:
-                        continue
-
-                    guild_data = guilds.get(guild_id)
-                    if not guild_data:
-                        continue
-
-                    channel_id = guild_data.get("notification_channel_id")
-                    if not channel_id:
-                        continue
-
-                    if channel_id not in channel_cache:
-                        channel = self.bot.get_channel(channel_id)
-                        if channel is None:
-                            try:
-                                channel = await self.bot.fetch_channel(channel_id)
-                            except Exception as e:
-                                print(f"[cap_detect] Channel {channel_id} not found for {guild_id} — {e}")
-                                channel = None
-                        channel_cache[channel_id] = channel
-
-                    channel = channel_cache[channel_id]
-                    if channel is None:
-                        continue
-
-                    headers = {"accept": "application/json", "X-API-KEY": api_key}
+                channel = self.bot.get_channel(channel_id)
+                if channel is None:
                     try:
+                        channel = await self.bot.fetch_channel(channel_id)
+                    except Exception as e:
+                        print(f"[cap_detect] Channel {channel_id} not found — {e}")
+                        channel = None
+                channel_cache[channel_id] = channel
+
+            # Build list of valid players to check
+            players_to_check = []
+            for discord_id, reg in registrations.items():
+                api_key  = reg.get("api_key")
+                guild_id = reg.get("guild_id")
+                if not api_key or not guild_id:
+                    continue
+                guild_data = guilds.get(guild_id)
+                if not guild_data:
+                    continue
+                channel_id = guild_data.get("notification_channel_id")
+                if not channel_id or channel_cache.get(channel_id) is None:
+                    continue
+                players_to_check.append((discord_id, api_key, channel_id))
+
+            # Fetch all player token data in parallel
+            async def _fetch(discord_id, api_key):
+                headers = {"accept": "application/json", "X-API-KEY": api_key}
+                try:
+                    async with httpx.AsyncClient(timeout=10.0) as client:
                         response = await client.get(TACTICUS_PLAYER_URL, headers=headers)
                         response.raise_for_status()
-                        player_data = response.json()
-                    except Exception as e:
-                        print(f"[cap_detect] Failed to fetch data for {discord_id}: {e}")
+                        return discord_id, response.json()
+                except Exception as e:
+                    print(f"[cap_detect] Failed to fetch data for {discord_id}: {e}")
+                    return discord_id, None
+
+            results = await asyncio.gather(*[
+                _fetch(discord_id, api_key)
+                for discord_id, api_key, _ in players_to_check
+            ])
+
+            # Map channel_id back to each result
+            channel_by_player = {did: cid for did, _, cid in players_to_check}
+
+            # Process results and send notifications
+            for (discord_id, player_data), (_, _, channel_id) in zip(results, players_to_check):
+                if player_data is None:
+                    continue
+
+                player     = player_data.get("player") or {}
+                progress   = player.get("progress") or {}
+                guild_raid = progress.get("guildRaid") or {}
+                tokens     = guild_raid.get("tokens") or {}
+                current    = tokens.get("current", 0)
+                maximum    = tokens.get("max", 3)
+                is_capped  = current >= maximum
+                print(f"[cap_detect] {discord_id}: {current}/{maximum} capped={is_capped}")
+
+                was_capped = capped_state.get(discord_id, False)
+                channel    = channel_cache[channel_id]
+
+                if is_capped and not was_capped:
+                    try:
+                        await channel.send(
+                            f"⚔️ <@{discord_id}> your raid tokens are full ({current}/{maximum})! "
+                            f"Time to raid!"
+                        )
+                        print(f"[cap_detect] Pinged {discord_id}")
+                    except discord.Forbidden:
+                        print(f"[cap_detect] Missing permission to send in channel {channel_id}")
                         continue
+                    capped_state[discord_id] = True
+                    state_changed = True
 
-                    player    = player_data.get("player") or {}
-                    progress  = player.get("progress") or {}
-                    guild_raid = progress.get("guildRaid") or {}
-                    tokens    = guild_raid.get("tokens") or {}
-                    current   = tokens.get("current", 0)
-                    maximum   = tokens.get("max", 3)
-                    is_capped = current >= maximum
-                    print(f"[cap_detect] {discord_id}: {current}/{maximum} capped={is_capped}")
+                elif not is_capped and was_capped:
+                    print(f"[cap_detect] {discord_id} spent tokens, resetting state")
+                    capped_state[discord_id] = False
+                    state_changed = True
 
-                    was_capped = capped_state.get(discord_id, False)
-
-                    if is_capped and not was_capped:
-                        try:
-                            await channel.send(
-                                f"⚔️ <@{discord_id}> your raid tokens are full ({current}/{maximum})! "
-                                f"Time to raid!"
-                            )
-                            print(f"[cap_detect] Pinged {discord_id}")
-                        except discord.Forbidden:
-                            print(f"[cap_detect] Missing permission to send in channel {channel_id}")
-                            continue
-                        capped_state[discord_id] = True
-                        state_changed = True
-
-                    elif not is_capped and was_capped:
-                        print(f"[cap_detect] {discord_id} spent tokens, resetting state")
-                        capped_state[discord_id] = False
-                        state_changed = True
-
-                if state_changed:
-                    save_capped_state(server_id, capped_state)
+            if state_changed:
+                save_capped_state(server_id, capped_state)
 
     @cap_detect.before_loop
     async def before_cap_detect(self):
