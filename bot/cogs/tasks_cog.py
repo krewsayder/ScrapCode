@@ -94,7 +94,10 @@ class TasksCog(commands.Cog):
                         print(f"[cap_detect] Failed to fetch data for {discord_id}: {e}")
                         continue
 
-                    tokens    = player_data.get("player", {}).get("progress", {}).get("guildRaid", {}).get("tokens", {})
+                    player    = player_data.get("player") or {}
+                    progress  = player.get("progress") or {}
+                    guild_raid = progress.get("guildRaid") or {}
+                    tokens    = guild_raid.get("tokens") or {}
                     current   = tokens.get("current", 0)
                     maximum   = tokens.get("max", 3)
                     is_capped = current >= maximum
