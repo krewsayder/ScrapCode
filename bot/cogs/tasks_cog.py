@@ -251,7 +251,13 @@ class TasksCog(commands.Cog):
                 print(f"[auto_update] Failed to save unknown player {user_id}: {e}")
 
     async def _refresh_live_leaderboards(self, server_id: int, season: int, guilds: dict):
-        """Edit all live leaderboard messages with fresh data."""
+        """Refresh live leaderboards.
+
+        Same season -> edit the existing messages in place.
+        New season  -> leave the old messages untouched (frozen archive of the
+                       previous season), send a fresh set, and repoint the
+                       live config at the new message IDs.
+        """
         from config import TIER_CHOICES
         from bot.embeds import build_battle_messages, build_cluster_messages, load_leaderboard_file
 
@@ -260,6 +266,7 @@ class TasksCog(commands.Cog):
             return
 
         to_remove = []
+        dirty     = False  # config changed (rollover, season adoption, removals)
 
         for key, config in live.items():
             channel_id  = config.get("channel_id")
@@ -271,6 +278,9 @@ class TasksCog(commands.Cog):
                 to_remove.append(key)
                 continue
 
+            # ------------------------------------------------------------
+            # Build per-tier content for the CURRENT season
+            # ------------------------------------------------------------
             if key.startswith("guild:"):
                 guild_id   = config.get("guild_id")
                 guild_data = guilds.get(guild_id)
@@ -282,32 +292,25 @@ class TasksCog(commands.Cog):
                 data_dir   = get_guild_data_path(server_id, guild_id)
                 data, err  = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
 
+                contents = {}
                 for tier in TIER_CHOICES:
-                    msg_id = message_ids.get(tier.value)
-                    if not msg_id:
-                        continue
-                    try:
-                        msg = await channel.fetch_message(msg_id)
-                        if err or not data:
-                            new_content = f"📊 **{guild_name} — {tier.name} — No data yet**"
-                        else:
-                            messages = build_battle_messages(data, season, tier, server_id, guild_id, guild_name)
-                            new_content = "\n\n".join(messages) if messages else f"📊 **{guild_name} — {tier.name} — No data yet**"
-                        await msg.edit(content=new_content)
-                    except discord.NotFound:
-                        to_remove.append(key)
-                        break
-                    except discord.Forbidden:
-                        print(f"[live_leaderboard] No permission to edit message in channel {channel_id}")
-                        break
-                    except Exception as e:
-                        print(f"[live_leaderboard] Error editing message {msg_id}: {e}")
+                    if err or not data:
+                        contents[tier.value] = f"📊 **{guild_name} — {tier.name} — No data yet**"
+                    else:
+                        messages = build_battle_messages(
+                            data, season, tier, server_id, guild_id, guild_name
+                        )
+                        contents[tier.value] = (
+                            "\n\n".join(messages)
+                            if messages
+                            else f"📊 **{guild_name} — {tier.name} — No data yet**"
+                        )
 
             elif key == "cluster":
                 merged = {}
                 for gid, gdata in guilds.items():
-                    data_dir   = get_guild_data_path(server_id, gid)
-                    data, err  = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
+                    data_dir  = get_guild_data_path(server_id, gid)
+                    data, err = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
                     if err or not data:
                         continue
                     id_to_name = get_player_list(server_id, gid)
@@ -315,49 +318,109 @@ class TasksCog(commands.Cog):
                     for boss_id, encounter_dict in data.get("boss_hits", {}).items():
                         for e_index, tiers in encounter_dict.items():
                             for tier_key, entries in tiers.items():
-                                bucket = merged.setdefault(boss_id, {}).setdefault(e_index, {}).setdefault(tier_key, [])
+                                bucket = (
+                                    merged.setdefault(boss_id, {})
+                                    .setdefault(e_index, {})
+                                    .setdefault(tier_key, [])
+                                )
                                 for entry in entries:
                                     user_id      = entry.get("user_id", "Unknown")
                                     user_display = id_to_name.get(user_id, str(user_id)[:8])
-                                    bucket.append({**entry, "_display": user_display, "_guild": guild_name})
+                                    bucket.append(
+                                        {**entry, "_display": user_display, "_guild": guild_name}
+                                    )
 
                 for boss_id, encounter_dict in merged.items():
                     for e_index, tiers in encounter_dict.items():
                         for tier_key in tiers:
                             limit = 5 if e_index == "0" else 1
-                            tiers[tier_key] = sorted(tiers[tier_key], key=lambda e: e["damage"], reverse=True)[:limit]
+                            tiers[tier_key] = sorted(
+                                tiers[tier_key], key=lambda e: e["damage"], reverse=True
+                            )[:limit]
 
+                contents = {}
+                for tier in TIER_CHOICES:
+                    tier_merged = {
+                        boss_id: {
+                            e_index: tiers[tier.value]
+                            for e_index, tiers in encounter_dict.items()
+                            if tier.value in tiers
+                        }
+                        for boss_id, encounter_dict in merged.items()
+                    }
+                    messages = build_cluster_messages(tier_merged, season, tier)
+                    contents[tier.value] = (
+                        "\n\n".join(messages)
+                        if messages
+                        else f"🌐 **Cluster — {tier.name} — No data yet**"
+                    )
+
+            else:
+                continue  # unknown key, skip
+
+            # ------------------------------------------------------------
+            # Same season -> edit in place. New season -> send fresh set.
+            # ------------------------------------------------------------
+            stored_season = config.get("season")
+
+            if stored_season is None:
+                # Legacy config from before season tracking existed.
+                # Adopt the current season without spawning new messages.
+                config["season"] = season
+                stored_season    = season
+                dirty            = True
+
+            if stored_season == season:
                 for tier in TIER_CHOICES:
                     msg_id = message_ids.get(tier.value)
                     if not msg_id:
                         continue
                     try:
                         msg = await channel.fetch_message(msg_id)
-                        tier_merged = {
-                            boss_id: {
-                                e_index: tiers[tier.value]
-                                for e_index, tiers in encounter_dict.items()
-                                if tier.value in tiers
-                            }
-                            for boss_id, encounter_dict in merged.items()
-                        }
-                        messages = build_cluster_messages(tier_merged, season, tier)
-                        new_content = "\n\n".join(messages) if messages else f"🌐 **Cluster — {tier.name} — No data yet**"
-                        await msg.edit(content=new_content)
+                        await msg.edit(content=contents[tier.value])
                     except discord.NotFound:
                         to_remove.append(key)
                         break
                     except discord.Forbidden:
-                        print(f"[live_leaderboard] No permission to edit cluster message in channel {channel_id}")
+                        print(f"[live_leaderboard] No permission to edit message in channel {channel_id} ({key})")
                         break
                     except Exception as e:
-                        print(f"[live_leaderboard] Error editing cluster message {msg_id}: {e}")
+                        print(f"[live_leaderboard] Error editing message {msg_id} ({key}): {e}")
+
+            else:
+                # Season rollover: old messages stay as a frozen archive.
+                print(f"[live_leaderboard] Season rollover for {key}: {stored_season} -> {season}, sending new messages")
+                new_message_ids = {}
+                failed = False
+                for tier in TIER_CHOICES:
+                    try:
+                        msg = await channel.send(contents[tier.value])
+                        new_message_ids[tier.value] = msg.id
+                    except discord.Forbidden:
+                        print(f"[live_leaderboard] No permission to send rollover messages in channel {channel_id} ({key})")
+                        failed = True
+                        break
+                    except Exception as e:
+                        print(f"[live_leaderboard] Error sending rollover message ({key}): {e}")
+                        failed = True
+                        break
+
+                if failed and not new_message_ids:
+                    # Nothing sent — keep the old config and retry next hour.
+                    continue
+
+                config["messages"] = new_message_ids
+                config["season"]   = season
+                dirty              = True
 
         if to_remove:
             for key in to_remove:
                 live.pop(key, None)
-            save_live_leaderboards(server_id, live)
+            dirty = True
             print(f"[live_leaderboard] Removed broken configs: {to_remove}")
+
+        if dirty:
+            save_live_leaderboards(server_id, live)
 
     @auto_update.before_loop
     async def before_auto_update(self):

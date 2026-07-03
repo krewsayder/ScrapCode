@@ -352,6 +352,7 @@ class AdminCog(commands.Cog):
             "channel_id": channel.id,
             "guild_id":   guild_id,
             "messages":   message_ids,
+            "season":     season,
         }
         save_live_leaderboards(server_id, live)
 
@@ -444,6 +445,7 @@ class AdminCog(commands.Cog):
         live["cluster"] = {
             "channel_id": channel.id,
             "messages":   message_ids,
+            "season":     season,
         }
         save_live_leaderboards(server_id, live)
 
