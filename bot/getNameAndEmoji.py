@@ -69,6 +69,7 @@ def get_mow_emoji(machine_of_war: str) -> str:
         "adeptexorcist":"<:Exorcist:1471171637431898244>",
         "daemonprince":"<:zkar:1471171718121783347>",
         "crawler":"<:Fart_tank:1476626311777878016>",
+        "necroreanimator":"<:reanimator:1518808922989793290>",
 
 
 
