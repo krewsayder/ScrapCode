@@ -15,6 +15,7 @@ def get_clean_boss_name(unit_id: str) -> str:
         # ===========================================
         "silentking": "Szarekh the Silent King",
         "necromenhir":"Menhir",
+        "necroreanimator":"Reanimator",
 
         # ===========================================
         "ghazghkull": "Ghazghkull Thraka",
@@ -28,6 +29,7 @@ def get_clean_boss_name(unit_id: str) -> str:
         "magnus": "Magnus the Red",
         "thousinfernalmaster": "Abraxas",
         "thoussorcerer": "Thaumachus",
+        "genesmagus": "Xybia",
         # ===========================================
         "tervigon": "Tervigon",
         "hive": "Hive Tyrant",
@@ -46,7 +48,7 @@ def get_clean_boss_name(unit_id: str) -> str:
     }
 
     for keyword, clean_name in name_map.items():
-        if keyword in name:
+        if keyword.lower() in name:
             return clean_name
 
     # Fallback: if no keyword matches, just remove "GuildBoss" and "Boss"
@@ -72,7 +74,7 @@ def get_mow_emoji(machine_of_war: str) -> str:
 
     }
     for keyword, emoji in mow_map.items():
-        if keyword in name:
+        if keyword.lower() in name:
             return emoji
 
     return machine_of_war #"❓"
@@ -156,11 +158,13 @@ def get_boss_emoji(unit_id: str) -> str:
 
         # ===========================================
 
-        "genesMagus":"<:Xybia:1476714001550413824>",
+        "genesmagus":"<:Xybia:1476714001550413824>",
 
         # ===========================================
 
         "necrospyder":"<:Aleph:1476626659565244628>",
+
+        "necroreanimator":"<:reanimator:1518808922989793290>",
 
         # ===========================================
 
@@ -269,7 +273,7 @@ def get_boss_emoji(unit_id: str) -> str:
 
     # Loop through the map and return the first match found
     for keyword, emoji in boss_map.items():
-        if keyword in name:
+        if keyword.lower() in name:
             return emoji
 
     # 4. Default if no keywords match
