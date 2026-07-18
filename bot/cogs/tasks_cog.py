@@ -335,7 +335,7 @@ class TasksCog(commands.Cog):
                         for tier_key in tiers:
                             limit = 5 if e_index == "0" else 1
                             tiers[tier_key] = sorted(
-                                tiers[tier_key], key=lambda e: e["damage"], reverse=True
+                                tiers[tier_key], key=lambda e: (-e["damage"], e.get("completed_on", ""))
                             )[:limit]
 
                 contents = {}

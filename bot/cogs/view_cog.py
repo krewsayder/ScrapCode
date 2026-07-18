@@ -178,7 +178,7 @@ class ViewCog(commands.Cog):
             for e_index in encounter_dict:
                 limit = 5 if e_index == "0" else 1
                 encounter_dict[e_index] = sorted(
-                    encounter_dict[e_index], key=lambda e: e["damage"], reverse=True
+                    encounter_dict[e_index], key=lambda e: (-e["damage"], e.get("completed_on", ""))
                 )[:limit]
 
         messages = build_cluster_messages(merged, season, tier)

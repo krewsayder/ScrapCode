@@ -424,7 +424,7 @@ class AdminCog(commands.Cog):
             for e_index, tiers in encounter_dict.items():
                 for tier_key in tiers:
                     limit = 5 if e_index == "0" else 1
-                    tiers[tier_key] = sorted(tiers[tier_key], key=lambda e: e["damage"], reverse=True)[:limit]
+                    tiers[tier_key] = sorted(tiers[tier_key], key=lambda e: (-e["damage"], e.get("completed_on", "")))[:limit]
 
         message_ids = {}
         for tier in TIER_CHOICES:

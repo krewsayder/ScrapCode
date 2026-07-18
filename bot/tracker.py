@@ -64,7 +64,7 @@ def try_insert(entries: list, new_entry: dict, check_roster: bool = False) -> bo
                 # Same player, same roster — only keep the higher damage
                 if damage > existing["damage"]:
                     entries[i] = new_entry
-                    entries.sort(key=lambda e: e["damage"], reverse=True)
+                    entries.sort(key=lambda e: (-e["damage"], e.get("completed_on", "")))
                     return True
                 else:
                     return False  # Lower damage with same roster — skip
@@ -72,7 +72,7 @@ def try_insert(entries: list, new_entry: dict, check_roster: bool = False) -> bo
         # Different roster (or new player) — insert if it qualifies for top N
         if len(entries) < TOP_N or damage > entries[-1]["damage"]:
             entries.append(new_entry)
-            entries.sort(key=lambda e: e["damage"], reverse=True)
+            entries.sort(key=lambda e: (-e["damage"], e.get("completed_on", "")))
             del entries[TOP_N:]
             return True
         return False
@@ -81,7 +81,7 @@ def try_insert(entries: list, new_entry: dict, check_roster: bool = False) -> bo
         # Original logic for Bombs — no roster deduplication
         if len(entries) < TOP_N or damage > entries[-1]["damage"]:
             entries.append(new_entry)
-            entries.sort(key=lambda e: e["damage"], reverse=True)
+            entries.sort(key=lambda e: (-e["damage"], e.get("completed_on", "")))
             del entries[TOP_N:]
             return True
         return False
