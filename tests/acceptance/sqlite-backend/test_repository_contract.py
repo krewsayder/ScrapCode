@@ -228,8 +228,7 @@ def test_guild_with_empty_api_key_round_trips(impl_pair):
     assert loaded.guilds["mech"].api_key == ""
 
 
-@RED
-def test_player_list_migrator_v1_to_v2_inverts_and_v2_is_noop():
+def test_RC13_player_list_migrator_v1_to_v2_inverts_and_v2_is_noop():
     """@property — RC13."""
     v1 = {"Maria Santos": "tacticus-uid-001"}
     v2, was_migrated = PlayerListMigrator.migrate(v1)
@@ -249,8 +248,7 @@ def test_player_list_migrator_v1_to_v2_inverts_and_v2_is_noop():
     assert v2_again == v2
 
 
-@RED
-def test_try_insert_dedup_branches_pinned():
+def test_RC14_try_insert_dedup_branches_pinned():
     """@property — RC14 — the contract the SQL upsert must preserve."""
 
     def _entry(uid, damage, completed_on, *, heroes=None, mow=None):
