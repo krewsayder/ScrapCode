@@ -169,6 +169,12 @@ wrapped with [`asyncio.to_thread`](https://docs.python.org/3/library/asyncio-tas
 to keep the event loop unblocked; token auth via
 `CHRONICL3R_APP_USERNAME/PASSWORD`):
 
+> **Upstream docs (require auth):** Chronicler's own API docs live at
+> <https://www.chronicl3r.com/tacticus-guild-raid/api/v1/docs/> — the page is
+> gated behind the same Chronicler app credentials, not public. It is the source
+> for the deferred **Chronicler API contract** (Gap 4); see
+> [overview.md — External service API docs](overview.md#external-service-api-docs).
+
 | Endpoint | Method | Used by | Purpose |
 |----------|--------|---------|---------|
 | `api/auth/token/` | POST | `chronicl3rClient.authenticate` | Obtain a non-expiring auth token |

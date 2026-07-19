@@ -72,6 +72,20 @@ uses them.
 | `dataclass` | [dataclasses](https://docs.python.org/3/library/dataclasses.html) | `bot/models.py` — `Cluster`, `Guild` |
 | `pytest` / `pytest-asyncio` | [pytest](https://docs.pytest.org/) · [pytest-asyncio](https://pytest-asyncio.readthedocs.io/) | `bot/tests/` — `test_permissions.py`, `test_tracker_tiebreak.py` |
 
+### External service API docs
+
+| Service | Docs URL | Auth | Where used |
+|---------|----------|------|------------|
+| Chronicler | <https://www.chronicl3r.com/tacticus-guild-raid/api/v1/docs/> | **Requires authentication** (Chronicler app credentials — `CHRONICL3R_APP_USERNAME`/`CHRONICL3R_APP_PASSWORD` in `.env`; the docs page itself is gated, not public) | [brief §2.5](brief.md#25-external-calls--tacticus-direct-vs-chronicler-_closes-gap-2--feeds-adr-003), [ADR-003](adr-003-chronicler-first-data-doctrine.md), `bot/services/chronicl3r/client.py` |
+| Tacticus | No public docs URL known | API key per request (`X-API-KEY`) | [brief §2.5](brief.md#25-external-calls--tacticus-direct-vs-chronicler-_closes-gap-2--feeds-adr-003), [ADR-003](adr-003-chronicler-first-data-doctrine.md) |
+
+> The Chronicler docs URL above is the upstream source for the **Chronicler API
+> contract** (architecture-review Gap 4), which this baseline deliberately
+> defers. Recording the link here does **not** write the contract — that is its
+> own kickoff brief. When you write Gap 4, derive the contract from this page
+> (authenticated) plus the endpoints actually called in
+> `bot/services/chronicl3r/client.py`.
+
 > discord.py docs are served at `docs.pycord.dev` (the Pycord fork is the
 > actively-maintained line; the API surface ScrapCode uses — `commands.Cog`,
 > `tasks.loop`, `app_commands` — is the same in both). Pin the installed version
