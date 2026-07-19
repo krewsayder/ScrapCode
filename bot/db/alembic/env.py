@@ -27,7 +27,13 @@ from bot.db.models import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # `disable_existing_loggers=False` keeps application loggers (e.g.
+    # `bot.db.session`) alive when alembic reconfigures logging during a
+    # migration run. Without this, the first `alembic upgrade` in a test
+    # session disables `bot.db.session`, and subsequent probe refusals
+    # (health.startup.refused) are silently dropped — caplog captures
+    # nothing. This is the documented footgun for `logging.config.fileConfig`.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
@@ -51,6 +57,14 @@ def _run_migrations(url: str) -> None:
     )
 
     with connectable.connect() as connection:
+        # ADR-006 D1: WAL pragmas on every connection so migrations run
+        # under the same isolation contract as the runtime path. The
+        # probe (D8 step 1) reads `PRAGMA journal_mode` and asserts `wal`
+        # against a DB migrated here, so the migration MUST set WAL — not
+        # just document it (the prior code only set foreign_keys despite
+        # the module docstring claiming WAL).
+        connection.exec_driver_sql("PRAGMA journal_mode=WAL")
+        connection.exec_driver_sql("PRAGMA synchronous=NORMAL")
         connection.exec_driver_sql("PRAGMA foreign_keys=ON")
         context.configure(
             connection=connection,
@@ -59,6 +73,12 @@ def _run_migrations(url: str) -> None:
         )
         with context.begin_transaction():
             context.run_migrations()
+        # SQLAlchemy 2.0 changed `Connection.__exit__` to NOT auto-commit;
+        # without this explicit commit the alembic_version stamp and the
+        # DDL changes are rolled back when the `with connectable.connect()`
+        # block closes, leaving an empty `alembic_version` table. 02-01 left
+        # the version unstamped; 02-02's probe (D8 step 2) requires the stamp.
+        connection.commit()
 
 
 def run_migrations_offline() -> None:
