@@ -1,0 +1,74 @@
+# pyproject.toml — ScrapCode build/tooling config.
+# This file is the home for tool configuration that previously had no home
+# (the project shipped only `requirements.txt` + `tests/.../pytest.ini`).
+# ADR-006 §Architecture enforcement requires `import-linter` for the
+# hexagonal-boundary import-graph rules and `pytest-archon` for the
+# composition-root `probe()` Protocol check. The DEVOPS wave (D3 = no CI)
+# designs these to drop into a future CI unchanged; local `lint-imports`
+# and `pytest` are the gates today.
+
+[tool.importlinter]
+root_packages = ["bot"]
+include_external_packages = true
+
+# Layered architecture (ADR-006 §Architecture enforcement):
+#   cogs → bot.guilds (the composition root) → bot.repository (ABC) → adapters
+# Cogs MUST NOT reach past the ABC into SQLAlchemy / aiosqlite / bot.db.* /
+# bot.repository_sqlalchemy. The composition-root (bot.guilds) is the only
+# module allowed to import the SQLite adapter.
+[[tool.importlinter.contracts]]
+name = "Cogs depend on ABC only — no SQLAlchemy or bot.db leakage"
+type = "forbidden"
+source_modules = [
+    "bot.cogs.admin_cog",
+    "bot.cogs.bomb_cog",
+    "bot.cogs.fun_cog",
+    "bot.cogs.registration_cog",
+    "bot.cogs.replay_cog",
+    "bot.cogs.tasks_cog",
+    "bot.cogs.token_cog",
+    "bot.cogs.update_cog",
+    "bot.cogs.view_cog",
+]
+forbidden_modules = [
+    "sqlalchemy",
+    "aiosqlite",
+    "bot.db",
+    "bot.repository_sqlalchemy",
+]
+# ADR-006 §Architecture enforcement: cogs MUST NOT DIRECTLY import the
+# SQLite adapter. Indirect imports through `bot.guilds` (the composition
+# root, which conditionally imports the adapter inside `build_repo`) are
+# the intended architecture and are allowed.
+allow_indirect_imports = true
+
+# The bypass modules retired in 04-01/04-02/04-03 MUST NOT DIRECTLY
+# re-introduce `pathlib.Path` (the JSON write helpers are gone) — ADR-006
+# §Architecture enforcement / DEVOPS NIT-4. Indirect imports through
+# `bot.guilds` (the composition root, which legitimately uses pathlib) are
+# allowed.
+[[tool.importlinter.contracts]]
+name = "bot.tracker MUST NOT import pathlib (JSON write helpers retired)"
+type = "forbidden"
+source_modules = ["bot.tracker"]
+forbidden_modules = ["pathlib"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "bot.embeds MUST NOT import pathlib (read path routed through repo)"
+type = "forbidden"
+source_modules = ["bot.embeds"]
+forbidden_modules = ["pathlib"]
+allow_indirect_imports = true
+
+# The replay cog MUST NOT reference replay_index.json — the replay path is
+# routed through the repository (ADR-006 D10/D11). Forbidden import is a
+# proxy for the AST assertion (no `replay_index.json` literal); the
+# `replay_index` symbol itself is not a module, so this contract guards
+# against accidental re-import of any `replay_index`-named helper module.
+[[tool.importlinter.contracts]]
+name = "bot.cogs.replay_cog MUST NOT reference replay_index"
+type = "forbidden"
+source_modules = ["bot.cogs.replay_cog"]
+forbidden_modules = ["replay_index"]
+allow_indirect_imports = true

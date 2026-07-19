@@ -396,6 +396,25 @@ class SqlAlchemyClusterRepository(ClusterRepository):
                     discord_server_id, guild_id, season, entry,
                 ))
 
+    def upsert_guild_hits(self, discord_server_id: int, guild_id: str, season: int,
+                          battle_entries: list[dict], bomb_entries: list[dict]) -> None:
+        """One transaction per guild (ADR-006 D6). Wraps the battle + bomb
+        upserts in a single session_scope; if either raises, both roll back
+        (within-guild atomicity). Cross-guild isolation comes from separate
+        sessions per guild_id. Empty lists are skipped at the top so a
+        no-op cycle does not open a session."""
+        if not battle_entries and not bomb_entries:
+            return
+        with self._db.session_scope() as session:
+            for entry in battle_entries:
+                session.execute(self._battle_upsert_stmt(), self._battle_params(
+                    discord_server_id, guild_id, season, entry,
+                ))
+            for entry in bomb_entries:
+                session.execute(self._bomb_upsert_stmt(), self._bomb_params(
+                    discord_server_id, guild_id, season, entry,
+                ))
+
     # ------------------------------------------------------------------
     # Read-path shaping: order by damage DESC / completed_on ASC, truncate
     # to TOP_N per (boss, encounter, tier). Rows arrive globally sorted by

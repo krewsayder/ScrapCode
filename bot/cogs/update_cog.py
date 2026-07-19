@@ -1,5 +1,3 @@
-import asyncio
-
 import httpx
 import discord
 from discord import app_commands
@@ -15,9 +13,8 @@ TACTICUS_RAID_URL = "https://api.tacticusgame.com/api/v1/guildRaid/{season}"
 
 
 class UpdateCog(commands.Cog):
-    def __init__(self, bot: commands.Bot, file_lock: asyncio.Lock, player_service: PlayerService):
+    def __init__(self, bot: commands.Bot, player_service: PlayerService):
         self.bot            = bot
-        self.file_lock      = file_lock
         self.player_service = player_service
 
     # ==========================================
@@ -64,8 +61,7 @@ class UpdateCog(commands.Cog):
                 response.raise_for_status()
                 api_data = response.json()
 
-            async with self.file_lock:
-                process_api_response(api_data, season, server_id, guild_id)
+            process_api_response(api_data, season, server_id, guild_id)
 
             await self._register_unknown_players(server_id, guild_id, api_data)
 
@@ -118,8 +114,7 @@ class UpdateCog(commands.Cog):
                     response.raise_for_status()
                     api_data = response.json()
 
-                    async with self.file_lock:
-                        process_api_response(api_data, season, server_id, guild_id)
+                    process_api_response(api_data, season, server_id, guild_id)
 
                     await self._register_unknown_players(server_id, guild_id, api_data)
                     results.append(f"✅ **{guild_name}** — updated successfully.")
@@ -146,5 +141,5 @@ class UpdateCog(commands.Cog):
                 print(f"[UpdateCog] Failed to save unknown player {user_id}: {e}")
 
 
-async def setup_update(bot: commands.Bot, file_lock: asyncio.Lock, player_service: PlayerService):
-    await bot.add_cog(UpdateCog(bot, file_lock, player_service))
+async def setup_update(bot: commands.Bot, player_service: PlayerService):
+    await bot.add_cog(UpdateCog(bot, player_service))

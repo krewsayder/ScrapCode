@@ -1,10 +1,22 @@
 import json
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Protocol, runtime_checkable
 
 from bot.models import Cluster, Guild
 from bot.migrations.player_list_migrations import PlayerListMigrator
+
+
+# ADR-006 D8 / §Architecture enforcement: every ClusterRepository adapter
+# wired into the composition root (`bot.guilds.repo`) MUST expose a `probe()`
+# method. The probe is the Earned-Trust startup gate; the composition root
+# refuses to start if the probe raises `ProbeRefusedError`. The JSON impl's
+# probe is a no-op (the probe is skipped on the JSON rollback path). This
+# Protocol is the mypy + runtime-checkable contract asserted at the
+# composition-root boundary.
+@runtime_checkable
+class SupportsProbe(Protocol):
+    def probe(self) -> None: ...
 
 # ADR-007: the ABC carries 4 storage-medium-agnostic season-hit read/write
 # methods. `get_guild_data_path` (JSON-specific — returned a filesystem dir)
@@ -75,6 +87,15 @@ class ClusterRepository(ABC):
                          entries: list[dict]) -> None:
         """Upsert Bomb hit entries with plain top-N (no roster dedup)
         (data-dictionary §2.9 / US-006)."""
+
+    @abstractmethod
+    def upsert_guild_hits(self, discord_server_id: int, guild_id: str, season: int,
+                          battle_entries: list[dict], bomb_entries: list[dict]) -> None:
+        """Upsert one guild's battle + bomb hits in a SINGLE transaction
+        (ADR-006 D6 — one transaction per guild). A failure in either upsert
+        rolls back the whole guild's writes for this cycle, so a mid-cycle
+        crash leaves that guild's pre-cycle state intact. Cross-guild
+        isolation is provided by separate transactions per guild_id."""
 
     # --- ADR-007-pattern replay methods (added in 04-03; ADR-006 D10/D11) ---
     # The replay cog routes through these instead of replay_index.json +
@@ -318,6 +339,23 @@ class JsonClusterRepository(ClusterRepository):
                          .setdefault(tier_key, []))
             try_insert(tier_list, bomb_entry, check_roster=False)
         self._write_json(path, {"boss_hits": boss_hits})
+
+    def upsert_guild_hits(self, discord_server_id: int, guild_id: str, season: int,
+                          battle_entries: list[dict], bomb_entries: list[dict]) -> None:
+        """JSON rollback impl: write battle then bomb. JSON has no
+        transactions, so within-guild atomicity is best-effort (the JSON
+        path is the one-cycle rollback, not the live write path). The
+        SQLite impl wraps both in one session (ADR-006 D6)."""
+        self.upsert_battle_hits(discord_server_id, guild_id, season, battle_entries)
+        self.upsert_bomb_hits(discord_server_id, guild_id, season, bomb_entries)
+
+    def probe(self) -> None:
+        """No-op probe (ADR-006 D8). The probe is the SQLite Earned-Trust
+        gate; the JSON rollback path skips it. Exposed so the composition
+        root's `SupportsProbe` Protocol check passes for both adapters
+        (ADR-006 §Architecture enforcement — every wired adapter exposes
+        probe())."""
+        return None
 
     # --- ADR-007-pattern replay impls (04-03). The JSON impl reads/writes
     # the existing `replay_index.json` at the project root (`self._base.parent`)

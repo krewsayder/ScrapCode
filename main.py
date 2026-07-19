@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import subprocess
+from logging.handlers import RotatingFileHandler
 
 import discord
 from discord.ext import commands
@@ -38,11 +39,18 @@ from bot.services.chronicl3r.player_service import PlayerService
 load_dotenv()
 token = os.getenv("DISCORD_TOKEN")
 
-handler = logging.FileHandler(filename="discord.log", encoding="utf-8", mode="a")
+# ADR-006 D6: `file_lock` (the process-wide asyncio.Lock guarding only
+# process_api_response) is RETIRED — SQLite WAL transactions are the
+# atomicity boundary (one transaction per guild). DEVOPS NIT-4 fold-in:
+# `FileHandler` is replaced by `RotatingFileHandler` (10 MB x 5 files) so
+# `discord.log` no longer grows unbounded (disk-full risk on the single VM).
+handler = RotatingFileHandler(
+    filename="discord.log", encoding="utf-8", mode="a",
+    maxBytes=10 * 1024 * 1024, backupCount=5,
+)
 
-intents   = discord.Intents.default()
-bot       = commands.Bot(command_prefix="!", intents=intents, help_command=None)
-file_lock = asyncio.Lock()
+intents = discord.Intents.default()
+bot     = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 
 # ==========================================
@@ -93,11 +101,11 @@ async def load_cogs():
     chronicl3r_client.authenticate()
     player_service = PlayerService(chronicl3r_client)
 
-    await setup_update(bot, file_lock, player_service)
+    await setup_update(bot, player_service)
     await setup_view(bot)
     await setup_admin(bot, player_service)
     await setup_registration(bot)
-    await setup_tasks(bot, file_lock, player_service)
+    await setup_tasks(bot, player_service)
     await setup_fun(bot)
     await setup_bomb(bot)
     await setup_token(bot)

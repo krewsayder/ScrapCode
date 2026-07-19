@@ -1,5 +1,3 @@
-import os
-
 TRACKED_RARITIES = {"Legendary", "Mythic"}
 TOP_N = 5
 
@@ -94,9 +92,10 @@ def process_api_response(api_data: dict, season: int,
     The `data_dir` parameter is gone — the SQL partition key
     `(season, discord_server_id, guild_id)` replaces it. Entries are filtered
     by tracked rarity (`get_tier_key`) and routed by `damageType` to the
-    repo's `upsert_battle_hits` / `upsert_bomb_hits`. The in-memory
-    `try_insert` dedup is retired from this path — the SQL upsert enforces
-    keep-max(damage) (RC15). No `highest_*_season_*.json` file is written.
+    repo's `upsert_guild_hits` (one transaction per guild — ADR-006 D6).
+    The in-memory `try_insert` dedup is retired from this path — the SQL
+    upsert enforces keep-max(damage) (RC15). No `highest_*_season_*.json`
+    file is written.
     """
     repo = _get_write_repo()
     battle_entries: list[dict] = []
@@ -109,27 +108,23 @@ def process_api_response(api_data: dict, season: int,
             battle_entries.append(entry)
         elif damage_type == "Bomb":
             bomb_entries.append(entry)
-    # One transaction per upsert type (each repo method opens one
-    # session_scope). The single-transaction-per-guild wrap (ADR-006 D6) and
-    # the crash-injection assertion land in 04-05 (AP7); the repo API is
-    # extended then (off-limits to modify in 04-01).
-    repo.upsert_battle_hits(discord_server_id, guild_id, season, battle_entries)
-    repo.upsert_bomb_hits(discord_server_id, guild_id, season, bomb_entries)
+    # One transaction per guild (ADR-006 D6): battle + bomb upserts share a
+    # single session_scope; a mid-guild failure rolls back that guild's whole
+    # write batch. Cross-guild isolation comes from separate calls per
+    # guild_id. The crash-injection assertion (AP7) lands in 04-05.
+    repo.upsert_guild_hits(discord_server_id, guild_id, season, battle_entries, bomb_entries)
 
 
 def _get_write_repo():
-    """Resolve the write-side ClusterRepository from SCRAPCODE_REPO_BACKEND.
+    """Resolve the write-side ClusterRepository from the current env.
 
-    04-01 bridge: the composition-root singleton (`bot.guilds.repo`) is still
-    `JsonClusterRepository` (flipped to env-driven SQLite in 04-04). The write
-    path reads `SCRAPCODE_REPO_BACKEND` so `process_api_response` uses the
-    SQLite impl when the operator has selected it, independent of the
-    import-time singleton. 04-04 replaces this with `from bot.guilds import
-    repo` once the singleton is env-driven.
+    04-04: delegates to `bot.guilds.build_repo()` so the write path re-reads
+    SCRAPCODE_REPO_BACKEND (and the missing-key/file safety net) at call
+    time — the same factory the composition root uses. The hourly
+    `auto_update` loop fires once per guild per hour, so the per-call
+    construction cost is negligible; the benefit is that test fixtures
+    (monkeypatch.setenv) and the operator's rolling-config changes are
+    honored without a process restart. ADR-006 D9.
     """
-    backend = os.getenv("SCRAPCODE_REPO_BACKEND", "json")
-    if backend == "sqlite":
-        from bot.repository_sqlalchemy import SqlAlchemyClusterRepository
-        return SqlAlchemyClusterRepository()
-    from bot.guilds import repo
-    return repo
+    from bot.guilds import build_repo
+    return build_repo()

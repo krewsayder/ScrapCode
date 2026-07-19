@@ -291,13 +291,66 @@ def test_crash_mid_transaction_leaves_db_in_pre_cycle_state(env_vars, sqlite_rep
     raise AssertionError("RED scaffold: crash-injection harness not implemented")
 
 
-@RED
-def test_hourly_auto_update_write_is_one_transaction_per_guild(env_vars, sqlite_repo):
-    """@property @real-io — AP8."""
-    raise AssertionError("RED scaffold: one-transaction-per-guild not implemented")
+def test_hourly_auto_update_write_is_one_transaction_per_guild(env_vars, sqlite_repo, make_tacticus_entry):
+    """@property @real-io — AP8.
+
+    Each guild's hourly writes (battle + bomb) commit as a single
+    transaction (ADR-006 D6). A failure in guild B's writes does NOT roll
+    back guild A's already-committed writes (cross-guild isolation), and a
+    mid-guild failure rolls back that guild's whole write batch (within-guild
+    atomicity — one transaction per guild).
+    """
+    import pytest
+    from bot.models import Cluster, Guild
+    from bot.tracker import process_api_response
+    server = 1458181638453203099
+    guild_a, guild_b = "guildA", "guildB"
+    season = 94
+    sqlite_repo.save(Cluster(
+        discord_server_id=server,
+        guilds={
+            guild_a: Guild(id=guild_a, name="A", api_key="", role_id=0),
+            guild_b: Guild(id=guild_b, name="B", api_key="", role_id=0),
+        },
+    ))
+    # Guild A: valid battle + bomb entries — both succeed in one transaction.
+    valid_a = {"entries": [
+        make_tacticus_entry(damage=12000, user_id="u-a-battle"),
+        make_tacticus_entry(damage_type="Bomb", damage=8000, user_id="u-a-bomb",
+                            hero_details=[], machine_of_war=None),
+    ]}
+    process_api_response(valid_a, season, server, guild_a)
+    # Guild B: a battle entry that would succeed, then a bomb entry that
+    # fails mid-transaction (missing unitId raises KeyError inside
+    # _bomb_params). With one-transaction-per-guild, guild B's battle
+    # writes roll back WITH the failed bomb writes.
+    bad_bomb = make_tacticus_entry(damage_type="Bomb", damage=8000,
+                                   user_id="u-b-bomb", hero_details=[],
+                                   machine_of_war=None)
+    del bad_bomb["unitId"]
+    invalid_b = {"entries": [
+        make_tacticus_entry(damage=12000, user_id="u-b-battle"),
+        bad_bomb,
+    ]}
+    with pytest.raises(KeyError):
+        process_api_response(invalid_b, season, server, guild_b)
+    # Cross-guild isolation: guild A's battle AND bomb survived guild B's failure.
+    battle_a = sqlite_repo.load_battle_hits(server, guild_a, season)
+    bomb_a = sqlite_repo.load_bomb_hits(server, guild_a, season)
+    assert battle_a["boss_hits"]["Avatar"]["0"]["Legendary_0"], \
+        "guild A's battle writes must survive guild B's failure"
+    assert bomb_a["boss_hits"]["Avatar"]["0"]["Legendary_0"], \
+        "guild A's bomb writes must survive guild B's failure"
+    # Within-guild atomicity: guild B's battle writes rolled back with the
+    # failed bomb writes (one transaction per guild).
+    battle_b = sqlite_repo.load_battle_hits(server, guild_b, season)
+    bomb_b = sqlite_repo.load_bomb_hits(server, guild_b, season)
+    assert battle_b == {"boss_hits": {}}, \
+        "guild B's battle writes must roll back with the failed bomb writes (one transaction per guild)"
+    assert bomb_b == {"boss_hits": {}}, \
+        "guild B's failed bomb writes must not leave partial state"
 
 
-@RED
 def test_scrapcode_repo_backend_selects_live_repository(monkeypatch, env_vars):
     """@driving_port — AP9 — composition root reads the env var."""
     monkeypatch.setenv("SCRAPCODE_REPO_BACKEND", "sqlite")
@@ -312,7 +365,6 @@ def test_scrapcode_repo_backend_selects_live_repository(monkeypatch, env_vars):
     assert isinstance(guilds_mod.repo, JsonClusterRepository)
 
 
-@RED
 def test_missing_sqlite_file_falls_back_to_json_for_one_cycle(monkeypatch, tmp_path):
     """@infrastructure-failure — AP10."""
     monkeypatch.setenv("SCRAPCODE_REPO_BACKEND", "sqlite")
@@ -322,6 +374,70 @@ def test_missing_sqlite_file_falls_back_to_json_for_one_cycle(monkeypatch, tmp_p
     from bot.repository import JsonClusterRepository
     assert isinstance(guilds_mod.repo, JsonClusterRepository), \
         "missing SQLite file must fall back to JSON for one cycle"
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — env-driven composition-root factory (ADR-006 D9) + the
+# missing-file/missing-key fallback branch (ADR-006 D9 / DEVOPS safety net).
+# Behavior budget: 4 behaviors (default-sqlite, =json, missing-key fallback,
+# probe Protocol) x 2 = 8; 4 unit tests used.
+# ---------------------------------------------------------------------------
+
+def test_unit_build_repo_default_backend_is_sqlite(monkeypatch, tmp_path):
+    """Unit: SCRAPCODE_REPO_BACKEND unset → factory defaults to sqlite
+    (ADR-006 D9 post-cutover default) and constructs SqlAlchemyClusterRepository.
+    The DB file need not pre-exist when its parent dir does not (first-run)."""
+    from bot.guilds import build_repo
+    from conftest import HERM_FERNET_KEY
+    monkeypatch.delenv("SCRAPCODE_REPO_BACKEND", raising=False)
+    monkeypatch.setenv("SCRAPCODE_DB_KEY", HERM_FERNET_KEY)
+    monkeypatch.setenv("SCRAPCODE_DB_PATH", str(tmp_path / "fresh_dir" / "scrapcode.db"))
+    repo = build_repo()
+    from bot.repository_sqlalchemy import SqlAlchemyClusterRepository
+    assert isinstance(repo, SqlAlchemyClusterRepository)
+
+
+def test_unit_build_repo_json_backend_selects_json(monkeypatch):
+    """Unit: SCRAPCODE_REPO_BACKEND=json → JsonClusterRepository; no SQLite
+    probe is attempted (so a missing SCRAPCODE_DB_KEY is OK)."""
+    from bot.guilds import build_repo
+    monkeypatch.setenv("SCRAPCODE_REPO_BACKEND", "json")
+    monkeypatch.delenv("SCRAPCODE_DB_KEY", raising=False)
+    repo = build_repo()
+    from bot.repository import JsonClusterRepository
+    assert isinstance(repo, JsonClusterRepository)
+
+
+def test_unit_build_repo_sqlite_missing_db_key_falls_back_to_json(monkeypatch, tmp_path, caplog):
+    """Unit: SCRAPCODE_REPO_BACKEND=sqlite but SCRAPCODE_DB_KEY missing —
+    fall back to JsonClusterRepository for one cycle (ADR-006 D9 safety net;
+    the probe is skipped on the JSON path so a missing key does not block
+    rollback). A loud warning is logged."""
+    from bot.guilds import build_repo
+    import logging
+    monkeypatch.setenv("SCRAPCODE_REPO_BACKEND", "sqlite")
+    monkeypatch.setenv("SCRAPCODE_DB_PATH", str(tmp_path / "missing.db"))
+    monkeypatch.delenv("SCRAPCODE_DB_KEY", raising=False)
+    with caplog.at_level(logging.WARNING, logger="bot.guilds"):
+        repo = build_repo()
+    from bot.repository import JsonClusterRepository
+    assert isinstance(repo, JsonClusterRepository), \
+        "missing SCRAPCODE_DB_KEY with backend=sqlite must fall back to JSON"
+    assert any("SCRAPCODE_DB_KEY" in r.getMessage() for r in caplog.records), \
+        "fallback must log a loud warning naming SCRAPCODE_DB_KEY"
+
+
+def test_unit_composition_root_adapters_expose_probe_protocol():
+    """Unit (architecture enforcement, ADR-006 §Architecture enforcement):
+    every ClusterRepository adapter wired into bot.guilds exposes probe()
+    (mypy Protocol + runtime check). The probe is the Earned-Trust gate
+    (ADR-006 D8); the JSON impl's probe is a no-op (the probe is skipped
+    on the JSON path)."""
+    from bot.repository import JsonClusterRepository
+    from bot.repository_sqlalchemy import SqlAlchemyClusterRepository
+    for cls in (JsonClusterRepository, SqlAlchemyClusterRepository):
+        assert callable(getattr(cls, "probe", None)), \
+            f"{cls.__name__} must expose a callable probe() (ADR-006 D8 Protocol)"
 
 
 def test_post_cutover_grep_finds_zero_json_write_helpers_in_retired_modules():

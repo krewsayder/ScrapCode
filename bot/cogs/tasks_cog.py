@@ -1,4 +1,3 @@
-import asyncio
 import httpx
 import discord
 from discord.ext import commands, tasks
@@ -24,9 +23,8 @@ TACTICUS_CURRENT_RAID = "https://api.tacticusgame.com/api/v1/guildRaid"
 
 
 class TasksCog(commands.Cog):
-    def __init__(self, bot: commands.Bot, file_lock, player_service: PlayerService):
+    def __init__(self, bot: commands.Bot, player_service: PlayerService):
         self.bot            = bot
-        self.file_lock      = file_lock
         self.player_service = player_service
         self.cap_detect.start()
         self.auto_update.start()
@@ -213,8 +211,7 @@ class TasksCog(commands.Cog):
                         response.raise_for_status()
                         api_data = response.json()
 
-                        async with self.file_lock:
-                            process_api_response(api_data, season, server_id, guild_id)
+                        process_api_response(api_data, season, server_id, guild_id)
 
                         await self._register_unknown_players(server_id, guild_id, api_data)
                         results.append(f"✅ **{guild_name}** — updated successfully.")
@@ -423,5 +420,5 @@ class TasksCog(commands.Cog):
         await self.bot.wait_until_ready()
 
 
-async def setup_tasks(bot: commands.Bot, file_lock, player_service: PlayerService):
-    await bot.add_cog(TasksCog(bot, file_lock, player_service))
+async def setup_tasks(bot: commands.Bot, player_service: PlayerService):
+    await bot.add_cog(TasksCog(bot, player_service))
