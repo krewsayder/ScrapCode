@@ -141,7 +141,6 @@ def test_RC3_player_list_v2_round_trips_without_invoking_the_migrator(json_repo)
     assert before_mtime == after_mtime, "v2 file was rewritten (migrator should be a noop)"
 
 
-@RED
 def test_load_player_list_returns_v2_dict_shape_cogs_expect(sqlite_repo):
     """@driving_port — RC4."""
     plist = sqlite_repo.load_player_list(1458181638453203099, "neuro")
@@ -177,7 +176,6 @@ def test_RC6_silent_empty_on_corruption_pinned_as_trap_to_retire(json_repo, tmp_
     # Annotated: this is the behavior Slice 02 retires for the SQLite impl.
 
 
-@RED
 def test_corrupted_sqlite_database_raises_not_returns_empty(env_vars, sqlite_db_path, sqlite_repo):
     """@infrastructure-failure @real-io — RC7 — silent-empty trap retired on SQLite."""
     sqlite_db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -186,7 +184,6 @@ def test_corrupted_sqlite_database_raises_not_returns_empty(env_vars, sqlite_db_
         sqlite_repo.load(1458181638453203099)
 
 
-@RED
 def test_empty_sqlite_database_returns_empty_dicts_without_raising(sqlite_repo):
     """@edge — RC8."""
     assert sqlite_repo.load(1458181638453203099).guilds == {}
@@ -195,7 +192,6 @@ def test_empty_sqlite_database_returns_empty_dicts_without_raising(sqlite_repo):
     assert "players" in sqlite_repo.load_player_list(1458181638453203099, "neuro")
 
 
-@RED
 def test_api_key_encrypted_at_rest_decrypted_on_read(env_vars, sqlite_repo):
     """@real-io @adapter-integration — RC9."""
     cluster = Cluster(
@@ -273,7 +269,6 @@ def test_role_tiers_check_constraint_rejects_invalid_tier(alembic_upgraded_db):
     conn.close()
 
 
-@RED
 def test_guild_with_empty_api_key_round_trips(impl_pair):
     """@edge — RC12."""
     repo = impl_pair
@@ -496,3 +491,96 @@ def test_alembic_baseline_creates_all_tables_on_fresh_sqlite_file(alembic_upgrad
     }
     assert expected <= tables, f"alembic missed tables: {expected - tables}"
     assert "battle_hits_simple" not in tables, "battle_hits_simple was created by alembic (ADR-006 D4)"
+
+
+# ---------------------------------------------------------------------------
+# Step 02-03 — parametrized-contract seeding.
+# RC1 (test_every_abc_method_round_trips...) asserts neuro/mech exist after
+# load+save+load. The JSON parametrization gets those from tmp_clusters_tree;
+# the SQLite parametrization needs the same data, so the sqlite side of
+# impl_pair is a SEEDED repo (populated from the JSON tree via the repo's own
+# save methods — not the one-shot migration script, which is 03-XX). The
+# other scenarios (RC4/RC7/RC8/RC9/RC12) use the UNSEEDED `sqlite_repo`
+# fixture from conftest: RC8 asserts an empty DB, RC7 corrupts the DB, RC9
+# saves its own cluster, RC4/RC12 do not depend on pre-existing rows. This
+# fixture overrides conftest's `impl_pair` for this module only (pytest
+# fixture lookup: test-module > conftest).
+# ---------------------------------------------------------------------------
+
+PROD_SERVER = 1458181638453203099
+
+
+@pytest.fixture
+def seeded_sqlite_repo(env_vars, tmp_clusters_tree):
+    """SQLite repo seeded from the synthetic JSON tree (RC1 contract parity)."""
+    from bot.repository_sqlalchemy import SqlAlchemyClusterRepository
+    from bot.repository import JsonClusterRepository
+    repo = SqlAlchemyClusterRepository(
+        db_path=env_vars["SCRAPCODE_DB_PATH"],
+        fernet_key=env_vars["SCRAPCODE_DB_KEY"],
+    )
+    json_repo = JsonClusterRepository(base_path=tmp_clusters_tree)
+    repo.save(json_repo.load(PROD_SERVER))
+    repo.save_player_registrations(PROD_SERVER, json_repo.load_player_registrations(PROD_SERVER))
+    repo.save_capped_state(PROD_SERVER, json_repo.load_capped_state(PROD_SERVER))
+    for guild_id in ("neuro", "mech"):
+        repo.save_player_list(PROD_SERVER, guild_id, json_repo.load_player_list(PROD_SERVER, guild_id))
+    repo.save_live_leaderboards(PROD_SERVER, json_repo.load_live_leaderboards(PROD_SERVER))
+    return repo
+
+
+@pytest.fixture(params=["json", "sqlite"], ids=["json", "sqlite"])
+def impl_pair(request, json_repo, seeded_sqlite_repo):
+    """Module-local override of conftest.impl_pair: the sqlite parametrization
+    uses the SEEDED repo so RC1's neuro/mech assertions hold."""
+    return json_repo if request.param == "json" else seeded_sqlite_repo
+
+
+# ---------------------------------------------------------------------------
+# Step 02-03 unit tests — `bot.db.secrets` crypto helper (driving port = the
+# pure-function public API; Fernet + HKDF-derived HMAC). Behavior budget:
+# 3 behaviors (Fernet round-trip; HMAC determinism; empty-string NULL-safety)
+# x 2 = max 6 unit tests. The __meta__.version shim and empty-DB-returns-empty
+# branch are covered end-to-end by RC4 / RC8 through the ABC driving port;
+# duplicating them here would be Testing Theater.
+# ---------------------------------------------------------------------------
+
+# Hermetic Fernet key — mirrors tests/acceptance/sqlite-backend/conftest.py
+# _SECRETS_FERNET_KEY (32 url-safe base64-encoded bytes; sha256-derived).
+_SECRETS_FERNET_KEY = "uvP1WBf4y1Ycqc1WZz-6baPp1uBwqaesNDmUL6fXfXU="
+
+
+@pytest.mark.parametrize("plaintext", [
+    "tacticus-neuro-key",
+    "a",
+    "tacticus-neuro-key with spaces and unicode: ñ é ü",
+])
+def test_fernet_encrypt_decrypt_round_trips_plaintext(plaintext):
+    """@driving_port — `encrypt_api_key` then `decrypt_api_key` returns the
+    original plaintext (ADR-006 D7). Pure function = its own driving port."""
+    from bot.db.secrets import encrypt_api_key, decrypt_api_key
+    ciphertext = encrypt_api_key(plaintext, _SECRETS_FERNET_KEY)
+    assert ciphertext != plaintext, "encrypt_api_key returned plaintext"
+    assert decrypt_api_key(ciphertext, _SECRETS_FERNET_KEY) == plaintext
+
+
+def test_api_key_hmac_is_deterministic_and_distinct_for_different_plaintexts():
+    """@driving_port — same plaintext + key yields the same HMAC; different
+    plaintexts yield distinct HMACs (ADR-006 D7: deterministic uniqueness)."""
+    from bot.db.secrets import api_key_hmac
+    h1 = api_key_hmac("tacticus-neuro-key", _SECRETS_FERNET_KEY)
+    h2 = api_key_hmac("tacticus-neuro-key", _SECRETS_FERNET_KEY)
+    h3 = api_key_hmac("tacticus-mech-key", _SECRETS_FERNET_KEY)
+    assert h1 is not None
+    assert h1 == h2, "api_key_hmac is not deterministic"
+    assert h1 != h3, "api_key_hmac does not distinguish plaintexts"
+
+
+def test_encrypt_api_key_empty_string_returns_empty_and_hmac_is_none():
+    """@driving_port — an empty api_key round-trips as empty ciphertext and a
+    NULL HMAC (RC12 NULL-safety: the guilds.api_key_hmac UNIQUE NULLABLE
+    column allows multiple empty-key guilds; do NOT encrypt the empty string)."""
+    from bot.db.secrets import encrypt_api_key, decrypt_api_key, api_key_hmac
+    assert encrypt_api_key("", _SECRETS_FERNET_KEY) == ""
+    assert decrypt_api_key("", _SECRETS_FERNET_KEY) == ""
+    assert api_key_hmac("", _SECRETS_FERNET_KEY) is None
