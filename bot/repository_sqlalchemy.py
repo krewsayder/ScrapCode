@@ -14,14 +14,17 @@ parametrized contract (RC1) round-trips. `update_channel_id` is not stored
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 
 from bot.db import models
 from bot.db.models import (
+    BattleHitRow,
+    BombHitRow,
     ClusterRow,
     GuildMemberRoleRow,
     GuildRow,
@@ -35,6 +38,7 @@ from bot.db.secrets import api_key_hmac, decrypt_api_key, encrypt_api_key
 from bot.db.session import Database
 from bot.models import Cluster, Guild
 from bot.repository import ClusterRepository
+from bot.tracker import TOP_N
 
 
 class SqlAlchemyClusterRepository(ClusterRepository):
@@ -332,31 +336,185 @@ class SqlAlchemyClusterRepository(ClusterRepository):
             return [row.discord_server_id for row in rows]
 
     # ------------------------------------------------------------------
-    # 4 new ADR-007 methods — real logic lands in 03-01. This step ships
-    # only the empty-input contract surface so RC1 (which round-trips []
-    # upserts and asserts the `{"boss_hits": ...}` load shape) passes on
-    # both parametrizations.
+    # 4 new ADR-007 methods (Slice 03-01). The write path replaces
+    # `tracker.try_insert`'s in-memory dedup with a SQL `ON CONFLICT ...
+    # DO UPDATE SET damage = MAX(...)` upsert on the battle_hits natural key
+    # (server, guild, season, boss, encounter, tier, roster_key, user_id) —
+    # the keep-max(damage) rule. bomb_hits has no roster dedup (plain top-N
+    # on read). The read path orders by `damage DESC, completed_on ASC` and
+    # truncates to TOP_N=5 per (boss, encounter, tier) partition, preserving
+    # the tiebreak pinned by bot/tests/test_tracker_tiebreak.py. The bare
+    # `{"boss_hits": ...}` shape is what embeds.build_*_messages consume
+    # (ADR-007 §1); the per-file `__meta__` version scheme is retired in SQL.
     # ------------------------------------------------------------------
 
     def load_battle_hits(self, discord_server_id: int, guild_id: str, season: int) -> dict:
-        # 03-01: ORDER BY damage DESC, completed_on ASC LIMIT 5 per partition.
-        # For 02-03 the battle_hits table is untouched; return the empty shape.
-        return {"boss_hits": {}}
+        with self._db.session_scope() as session:
+            rows = session.execute(
+                select(BattleHitRow)
+                .where(
+                    BattleHitRow.discord_server_id == discord_server_id,
+                    BattleHitRow.guild_id == guild_id,
+                    BattleHitRow.season == season,
+                )
+                .order_by(BattleHitRow.damage.desc(), BattleHitRow.completed_on.asc())
+            ).scalars().all()
+            return self._rows_to_boss_hits(rows, self._battle_entry_from_row)
 
     def load_bomb_hits(self, discord_server_id: int, guild_id: str, season: int) -> dict:
-        return {"boss_hits": {}}
+        with self._db.session_scope() as session:
+            rows = session.execute(
+                select(BombHitRow)
+                .where(
+                    BombHitRow.discord_server_id == discord_server_id,
+                    BombHitRow.guild_id == guild_id,
+                    BombHitRow.season == season,
+                )
+                .order_by(BombHitRow.damage.desc(), BombHitRow.completed_on.asc())
+            ).scalars().all()
+            return self._rows_to_boss_hits(rows, self._bomb_entry_from_row)
 
     def upsert_battle_hits(self, discord_server_id: int, guild_id: str, season: int,
                            entries: list[dict]) -> None:
         if not entries:
             return
-        raise NotImplementedError("upsert_battle_hits real logic lands in 03-01")
+        with self._db.session_scope() as session:
+            for entry in entries:
+                session.execute(self._battle_upsert_stmt(), self._battle_params(
+                    discord_server_id, guild_id, season, entry,
+                ))
 
     def upsert_bomb_hits(self, discord_server_id: int, guild_id: str, season: int,
                          entries: list[dict]) -> None:
         if not entries:
             return
-        raise NotImplementedError("upsert_bomb_hits real logic lands in 03-01")
+        with self._db.session_scope() as session:
+            for entry in entries:
+                session.execute(self._bomb_upsert_stmt(), self._bomb_params(
+                    discord_server_id, guild_id, season, entry,
+                ))
+
+    # ------------------------------------------------------------------
+    # Read-path shaping: order by damage DESC / completed_on ASC, truncate
+    # to TOP_N per (boss, encounter, tier). Rows arrive globally sorted by
+    # damage DESC, so the first TOP_N rows appended into each partition
+    # ARE that partition's top-N.
+    # ------------------------------------------------------------------
+
+    def _rows_to_boss_hits(self, rows, entry_fn) -> dict:
+        boss_hits: dict[str, dict] = {}
+        for row in rows:
+            partition = (boss_hits.setdefault(row.boss_id, {})
+                         .setdefault(row.encounter_index, {})
+                         .setdefault(row.tier_key, []))
+            if len(partition) < TOP_N:
+                partition.append(entry_fn(row))
+        return {"boss_hits": boss_hits}
+
+    def _battle_entry_from_row(self, row) -> dict:
+        return {
+            "encounterType": row.encounter_type,
+            "damage": row.damage,
+            "user_id": row.user_id,
+            "completed_on": row.completed_on,
+            "hero_details": [],  # not stored as JSON; dedup uses hero_roster_key
+            "machine_of_war": {"unitId": row.mow_unit_id} if row.mow_unit_id else None,
+        }
+
+    def _bomb_entry_from_row(self, row) -> dict:
+        return {
+            "encounterType": row.encounter_type,
+            "damage": row.damage,
+            "user_id": row.user_id,
+            "completed_on": row.completed_on,
+        }
+
+    # ------------------------------------------------------------------
+    # Write-path: raw INSERT ... ON CONFLICT DO UPDATE keep-max(damage).
+    # battle_hits: completed_on follows the max-damage entry (preserves the
+    # try_insert contract pinned by RC14: same-roster-higher replaces the
+    # whole entry). bomb_hits: completed_on is part of the conflict key, so
+    # the CASE is a no-op — set damage = MAX only.
+    # ------------------------------------------------------------------
+
+    def _battle_upsert_stmt(self):
+        return text(
+            """
+            INSERT INTO battle_hits (
+                discord_server_id, guild_id, season, boss_id, encounter_index,
+                tier_key, user_id, damage, completed_on,
+                hero_roster_key, mow_unit_id, encounter_type
+            ) VALUES (
+                :server, :guild, :season, :boss, :eidx,
+                :tier, :user, :dmg, :completed,
+                :rkey, :mow, :etype
+            )
+            ON CONFLICT (discord_server_id, guild_id, season, boss_id, encounter_index,
+                         tier_key, hero_roster_key, user_id) DO UPDATE SET
+                damage = MAX(excluded.damage, battle_hits.damage),
+                completed_on = CASE WHEN excluded.damage > battle_hits.damage
+                    THEN excluded.completed_on ELSE battle_hits.completed_on END
+            """
+        )
+
+    def _bomb_upsert_stmt(self):
+        return text(
+            """
+            INSERT INTO bomb_hits (
+                discord_server_id, guild_id, season, boss_id, encounter_index,
+                tier_key, user_id, damage, completed_on, encounter_type
+            ) VALUES (
+                :server, :guild, :season, :boss, :eidx,
+                :tier, :user, :dmg, :completed, :etype
+            )
+            ON CONFLICT (discord_server_id, guild_id, season, boss_id, encounter_index,
+                         tier_key, user_id, completed_on) DO UPDATE SET
+                damage = MAX(excluded.damage, bomb_hits.damage)
+            """
+        )
+
+    def _battle_params(self, server, guild, season, entry) -> dict:
+        return {
+            "server": server, "guild": guild, "season": season,
+            "boss": str(entry["unitId"]),
+            "eidx": str(entry.get("encounterIndex", 0)),
+            "tier": entry["tier_key"],
+            "user": entry["userId"],
+            "dmg": entry["damage"],
+            "completed": entry["completedOn"],
+            "rkey": self._roster_key(entry.get("heroDetails", []),
+                                     entry.get("machineOfWarDetails")),
+            "mow": self._mow_unit_id(entry.get("machineOfWarDetails")),
+            "etype": entry.get("encounterType"),
+        }
+
+    def _bomb_params(self, server, guild, season, entry) -> dict:
+        return {
+            "server": server, "guild": guild, "season": season,
+            "boss": str(entry["unitId"]),
+            "eidx": str(entry.get("encounterIndex", 0)),
+            "tier": entry["tier_key"],
+            "user": entry["userId"],
+            "dmg": entry["damage"],
+            "completed": entry["completedOn"],
+            "etype": entry.get("encounterType"),
+        }
+
+    # ------------------------------------------------------------------
+    # roster_key = deterministic serialization of (sorted hero unitIds,
+    # mow_unit_id) — a TEXT column. Order-independent so the same hero set
+    # dedups regardless of API ordering (data-dictionary §2.7). The dedup
+    # uses roster_key only; hero_details are not stored as JSON.
+    # ------------------------------------------------------------------
+
+    def _roster_key(self, hero_details, mow) -> str:
+        heroes = sorted(h.get("unitId", "") for h in (hero_details or []))
+        return json.dumps([heroes, self._mow_unit_id(mow)], separators=(",", ":"))
+
+    def _mow_unit_id(self, mow) -> str | None:
+        if not mow:
+            return None
+        return mow.get("unitId") if isinstance(mow, dict) else None
 
     # ------------------------------------------------------------------
     # ADR-006 D8: startup probe (Earned Trust). Delegates to Database.probe.

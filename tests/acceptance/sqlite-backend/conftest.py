@@ -280,17 +280,26 @@ def make_tacticus_entry():
               damage_type="Battle", damage=12000, user_id="tacticus-uid-001",
               completed_on="2026-07-18T10:00:00Z", encounter_type="Battle",
               hero_details=None, machine_of_war=None):
-        return {
+        from bot.tracker import get_tier_key
+        entry = {
             "unitId": unit_id,
             "encounterIndex": encounter_index,
             "rarity": rarity,
             "set": set_,
             "damageType": damage_type,
             "damageDealt": damage,
+            # Normalized field the repo upsert reads (the entry contract both
+            # ClusterRepository impls accept — see bot.repository.py upsert_*).
+            "damage": damage,
             "userId": user_id,
             "completedOn": completed_on,
             "encounterType": encounter_type,
             "heroDetails": hero_details if hero_details is not None else [{"unitId": "Aethana"}],
             "machineOfWarDetails": machine_of_war,
         }
+        # The repo upsert contract requires a pre-computed tier_key (the JSON
+        # impl reads entry["tier_key"]; the SQLite impl matches). Derived from
+        # rarity + set via the pure tracker.get_tier_key parser.
+        entry["tier_key"] = get_tier_key(entry)
+        return entry
     return _make

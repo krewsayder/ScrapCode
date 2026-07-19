@@ -119,7 +119,6 @@ def test_every_abc_method_round_trips_through_the_repository(impl_pair, tmp_clus
 RED = pytest.mark.skip(reason="RED scaffold — enable one at a time in DELIVER")
 
 
-@RED
 def test_four_new_abc_methods_round_trip_battle_and_bomb_hits(impl_pair, make_tacticus_entry):
     """@driving_port — RC2."""
     repo = impl_pair
@@ -345,8 +344,7 @@ def test_RC14_try_insert_dedup_branches_pinned():
     assert any(e["damage"] == 75 for e in entries)
 
 
-@RED
-def test_upsert_keep_max_on_battle_hits_preserves_try_insert_contract(sqlite_repo, make_tacticus_entry):
+def test_upsert_keep_max_on_battle_hits_preserves_try_insert_contract(battle_hits_sqlite_repo, make_tacticus_entry):
     """@property @real-io — RC15."""
     server, guild, season = 1458181638453203099, "neuro", 94
     base = make_tacticus_entry(damage=12000, hero_details=[{"unitId": "Aethana"}, {"unitId": "Eldryon"}],
@@ -355,30 +353,30 @@ def test_upsert_keep_max_on_battle_hits_preserves_try_insert_contract(sqlite_rep
     # same roster, higher damage — replaces
     higher = make_tacticus_entry(damage=15000, hero_details=[{"unitId": "Aethana"}, {"unitId": "Eldryon"}],
                                 machine_of_war={"unitId": "Khaine"})
-    sqlite_repo.upsert_battle_hits(server, guild, season, [base, higher])
-    battle = sqlite_repo.load_battle_hits(server, guild, season)
+    battle_hits_sqlite_repo.upsert_battle_hits(server, guild, season, [base, higher])
+    battle = battle_hits_sqlite_repo.load_battle_hits(server, guild, season)
     assert battle["boss_hits"]["Avatar"]["0"]["Legendary_0"][0]["damage"] == 15000
 
     # same roster, lower damage — keep-max (row stays at 15000)
     lower = make_tacticus_entry(damage=9000, hero_details=[{"unitId": "Aethana"}, {"unitId": "Eldryon"}],
                                 machine_of_war={"unitId": "Khaine"})
-    sqlite_repo.upsert_battle_hits(server, guild, season, [lower])
-    battle = sqlite_repo.load_battle_hits(server, guild, season)
+    battle_hits_sqlite_repo.upsert_battle_hits(server, guild, season, [lower])
+    battle = battle_hits_sqlite_repo.load_battle_hits(server, guild, season)
     assert battle["boss_hits"]["Avatar"]["0"]["Legendary_0"][0]["damage"] == 15000
 
     # different roster — separate row
     diff = make_tacticus_entry(damage=9000, hero_details=[{"unitId": "Aethana"}, {"unitId": "Tan Gida"}],
                               machine_of_war={"unitId": "Khaine"})
-    sqlite_repo.upsert_battle_hits(server, guild, season, [diff])
-    battle = sqlite_repo.load_battle_hits(server, guild, season)
+    battle_hits_sqlite_repo.upsert_battle_hits(server, guild, season, [diff])
+    battle = battle_hits_sqlite_repo.load_battle_hits(server, guild, season)
     assert len(battle["boss_hits"]["Avatar"]["0"]["Legendary_0"]) == 2
 
     # bomb plain top-N (no roster dedup)
     bombs = [make_tacticus_entry(damage_type="Bomb", damage=d, user_id=f"u{d}",
                                  hero_details=[], machine_of_war=None)
              for d in (100, 90, 80, 70, 60, 50)]
-    sqlite_repo.upsert_bomb_hits(server, guild, season, bombs)
-    bomb = sqlite_repo.load_bomb_hits(server, guild, season)
+    battle_hits_sqlite_repo.upsert_bomb_hits(server, guild, season, bombs)
+    bomb = battle_hits_sqlite_repo.load_bomb_hits(server, guild, season)
     flat = bomb["boss_hits"]["Avatar"]["0"]["Legendary_0"]
     assert len(flat) == TOP_N
     assert [e["damage"] for e in flat] == [100, 90, 80, 70, 60]
@@ -536,6 +534,20 @@ def impl_pair(request, json_repo, seeded_sqlite_repo):
     return json_repo if request.param == "json" else seeded_sqlite_repo
 
 
+@pytest.fixture
+def battle_hits_sqlite_repo(sqlite_repo):
+    """SQLite repo with a minimal cluster + guild row so the battle_hits /
+    bomb_hits FK to guilds is satisfiable. This is a PRECONDITION fixture
+    (the guild must exist before any hit can be written), not the expected
+    end-state — the hits themselves come from the production upsert path."""
+    from bot.models import Cluster, Guild
+    sqlite_repo.save(Cluster(
+        discord_server_id=PROD_SERVER,
+        guilds={"neuro": Guild(id="neuro", name="Neuro", api_key="", role_id=0)},
+    ))
+    return sqlite_repo
+
+
 # ---------------------------------------------------------------------------
 # Step 02-03 unit tests — `bot.db.secrets` crypto helper (driving port = the
 # pure-function public API; Fernet + HKDF-derived HMAC). Behavior budget:
@@ -584,3 +596,69 @@ def test_encrypt_api_key_empty_string_returns_empty_and_hmac_is_none():
     assert encrypt_api_key("", _SECRETS_FERNET_KEY) == ""
     assert decrypt_api_key("", _SECRETS_FERNET_KEY) == ""
     assert api_key_hmac("", _SECRETS_FERNET_KEY) is None
+
+
+# ---------------------------------------------------------------------------
+# Step 03-01 unit tests — battle_hits / bomb_hits upsert-keep-max + read
+# ordering on SqlAlchemyClusterRepository (driving port = the ABC methods
+# upsert_battle_hits / load_battle_hits / upsert_bomb_hits / load_bomb_hits).
+# Behavior budget: 3 behaviors (roster_key normalizes hero order; keep-max
+# stores the max-damage entry's completed_on; equal-damage tiebreak reads
+# earliest completed_on first) x 2 = max 6 unit tests. The keep-max damage
+# replacement, different-roster separate row, and bomb plain top-N behaviors
+# are covered end-to-end by RC15; duplicating them here would be Testing
+# Theater. These 3 pin behaviors RC15 does NOT assert.
+# ---------------------------------------------------------------------------
+
+def test_battle_hits_roster_key_normalizes_hero_order_so_same_set_dedups(battle_hits_sqlite_repo, make_tacticus_entry):
+    """@driving_port @real-io — same heroes in a different order produce the
+    same roster_key, so the ON CONFLICT upsert dedups them to a single row
+    (the roster_key is order-independent per data-dictionary §2.7)."""
+    server, guild, season = 1458181638453203099, "neuro", 94
+    forward = make_tacticus_entry(damage=12000, user_id="u1",
+                                  hero_details=[{"unitId": "Aethana"}, {"unitId": "Eldryon"}],
+                                  machine_of_war={"unitId": "Khaine"})
+    reverse = make_tacticus_entry(damage=15000, user_id="u1",
+                                  hero_details=[{"unitId": "Eldryon"}, {"unitId": "Aethana"}],
+                                  machine_of_war={"unitId": "Khaine"})
+    battle_hits_sqlite_repo.upsert_battle_hits(server, guild, season, [forward, reverse])
+    battle = battle_hits_sqlite_repo.load_battle_hits(server, guild, season)
+    flat = battle["boss_hits"]["Avatar"]["0"]["Legendary_0"]
+    assert len(flat) == 1, "same heroes different order did not dedup via roster_key"
+    assert flat[0]["damage"] == 15000
+
+
+def test_battle_hits_keep_max_stores_the_max_damage_entry_completed_on(battle_hits_sqlite_repo, make_tacticus_entry):
+    """@driving_port @real-io — when a higher-damage hit replaces a lower one
+    on the same roster, the stored completed_on follows the max-damage entry
+    (preserves the try_insert contract pinned by RC14: same-roster-higher
+    replaces the whole entry, not just damage)."""
+    server, guild, season = 1458181638453203099, "neuro", 94
+    lower = make_tacticus_entry(damage=10000, user_id="u1", completed_on="2026-07-18T10:00:00Z",
+                                hero_details=[{"unitId": "Aethana"}], machine_of_war={"unitId": "Khaine"})
+    higher = make_tacticus_entry(damage=15000, user_id="u1", completed_on="2026-07-18T12:00:00Z",
+                                 hero_details=[{"unitId": "Aethana"}], machine_of_war={"unitId": "Khaine"})
+    battle_hits_sqlite_repo.upsert_battle_hits(server, guild, season, [lower, higher])
+    battle = battle_hits_sqlite_repo.load_battle_hits(server, guild, season)
+    entry = battle["boss_hits"]["Avatar"]["0"]["Legendary_0"][0]
+    assert entry["damage"] == 15000
+    assert entry["completed_on"] == "2026-07-18T12:00:00Z", (
+        "completed_on must follow the max-damage entry, not the first insert"
+    )
+
+
+def test_battle_hits_read_tiebreaks_equal_damage_by_earliest_completed_on(battle_hits_sqlite_repo, make_tacticus_entry):
+    """@driving_port @real-io — equal-damage hits across distinct rosters
+    are read ordered by completed_on ASC (the tiebreak pinned by
+    bot/tests/test_tracker_tiebreak.py and data-dictionary §2.7)."""
+    server, guild, season = 1458181638453203099, "neuro", 94
+    later = make_tacticus_entry(damage=10000, user_id="u1", completed_on="2026-07-18T12:00:00Z",
+                                hero_details=[{"unitId": "Aethana"}], machine_of_war={"unitId": "Khaine"})
+    earlier = make_tacticus_entry(damage=10000, user_id="u2", completed_on="2026-07-18T09:00:00Z",
+                                  hero_details=[{"unitId": "Eldryon"}], machine_of_war={"unitId": "Khaine"})
+    battle_hits_sqlite_repo.upsert_battle_hits(server, guild, season, [later, earlier])
+    battle = battle_hits_sqlite_repo.load_battle_hits(server, guild, season)
+    flat = battle["boss_hits"]["Avatar"]["0"]["Legendary_0"]
+    assert [e["completed_on"] for e in flat] == ["2026-07-18T09:00:00Z", "2026-07-18T12:00:00Z"], (
+        "equal-damage ties must read earliest completed_on first"
+    )
