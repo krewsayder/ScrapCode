@@ -671,12 +671,42 @@ def test_replay_cog_helpers_and_forum_constants_removed():
         assert pat not in src, f"{pat} still present in replay_cog.py"
 
 
-@RED
-def test_json_tree_not_modified_after_successful_cutover_cycle(json_repo, tmp_clusters_tree):
-    """@property @real-io — CS10."""
+def test_json_tree_not_modified_after_successful_cutover_cycle(
+    sqlite_repo, tmp_clusters_tree, env_vars, make_tacticus_entry
+):
+    """@property @real-io — CS10 — KPI-3c.
+
+    After a successful cutover cycle against the SQLite backend, NO JSON
+    file mtime in the clusters/ tree changed; the JSON tree remains intact
+    as the read-only rollback fallback (DEVOPS one-cycle read-only fallback).
+
+    The cycle is driven through the production write port
+    `bot.tracker.process_api_response`, which resolves the write repo via
+    `bot.guilds.build_repo()` (SCRAPCODE_REPO_BACKEND=sqlite) and upserts
+    battle + bomb hits via `upsert_guild_hits` (one transaction per guild).
+    The JSON tree is NOT touched on the SQLite path (KPI-3c).
+    """
+    import bot.tracker as tracker_mod
+
     mtimes_before = {p: p.stat().st_mtime_ns
                      for p in tmp_clusters_tree.rglob("*.json")}
-    # RED scaffold: run a full hourly cycle against the SQLite singleton,
-    # then assert no JSON file mtime changed.
-    mtimes_after = {p: p.stat().st_mtime_ns for p in tmp_clusters_tree.rglob("*.json")}
-    assert mtimes_before == mtimes_after, "JSON tree was modified during the cutover cycle"
+    assert mtimes_before, "fixture must seed at least one JSON file"
+
+    # A full hourly cycle: battle + bomb entries for the seeded guild.
+    battle_entries = [make_tacticus_entry(damage=9999, user_id="u-cs10-battle")]
+    bomb_entries = [make_tacticus_entry(damage_type="Bomb", damage=7777,
+                                        user_id="u-cs10-bomb", hero_details=[],
+                                        machine_of_war=None)]
+    tracker_mod.process_api_response(
+        {"entries": battle_entries + bomb_entries},
+        SEASON, PROD_SERVER, GUILD_NEURO,
+    )
+
+    mtimes_after = {p: p.stat().st_mtime_ns
+                    for p in tmp_clusters_tree.rglob("*.json")}
+    assert set(mtimes_before.keys()) == set(mtimes_after.keys()), \
+        "JSON file set changed during the cutover cycle"
+    assert mtimes_before == mtimes_after, (
+        "JSON tree was modified during the cutover cycle — "
+        f"changed: {[p for p in mtimes_after if mtimes_after[p] != mtimes_before[p]]}"
+    )

@@ -11,6 +11,7 @@ refusal paths. The 4 unit tests decompose each step's observable outcome.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
@@ -64,6 +65,57 @@ def _refused_records(caplog):
 def _pass_steps(caplog):
     return {r.step for r in caplog.records
             if getattr(r, "event", None) == "db.probe.pass"}
+
+
+# ---------------------------------------------------------------------------
+# Crash-injection harness (AP7). A REAL subprocess drives the production
+# `upsert_guild_hits` port with a malformed bomb entry that raises mid-
+# transaction; the session_scope rolls back both halves and the subprocess
+# dies (unhandled exception, exit non-zero). The parent reopens the DB and
+# asserts the pre-cycle row counts are unchanged (KPI-3a).
+# ---------------------------------------------------------------------------
+
+_CRASH_SUBPROCESS_SCRIPT = '''"""AP7 crash-injection subprocess. Invoked with a JSON data file path."""
+import json, os, sys
+
+data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+from bot.repository_sqlalchemy import SqlAlchemyClusterRepository
+repo = SqlAlchemyClusterRepository(
+    db_path=os.environ["SCRAPCODE_DB_PATH"],
+    fernet_key=os.environ["SCRAPCODE_DB_KEY"],
+)
+repo.upsert_guild_hits(
+    data["server"], data["guild"], data["season"],
+    data["battle_entries"], data["bomb_entries"],
+)
+'''
+
+
+def _run_crash_subprocess(*, env_vars, tmp_path, server, guild, season,
+                          battle_entries, bomb_entries) -> subprocess.CompletedProcess:
+    """Spawn a subprocess that drives `upsert_guild_hits` with a malformed
+    bomb entry; the subprocess dies mid-transaction (unhandled exception).
+    Returns the CompletedProcess (returncode non-zero)."""
+    worktree_root = Path(__file__).resolve().parents[3]
+    script_path = tmp_path / "_ap7_crash_inject.py"
+    script_path.write_text(_CRASH_SUBPROCESS_SCRIPT, encoding="utf-8")
+    data_path = tmp_path / "_ap7_crash_data.json"
+    data_path.write_text(json.dumps({
+        "server": server, "guild": guild, "season": season,
+        "battle_entries": battle_entries, "bomb_entries": bomb_entries,
+    }), encoding="utf-8")
+    full_env = dict(os.environ)
+    existing_pp = full_env.get("PYTHONPATH", "")
+    full_env["PYTHONPATH"] = (
+        f"{worktree_root}{os.pathsep}{existing_pp}" if existing_pp else str(worktree_root)
+    )
+    full_env["SCRAPCODE_DB_KEY"] = env_vars["SCRAPCODE_DB_KEY"]
+    full_env["SCRAPCODE_DB_PATH"] = env_vars["SCRAPCODE_DB_PATH"]
+    full_env["SCRAPCODE_REPO_BACKEND"] = "sqlite"
+    return subprocess.run(
+        [sys.executable, str(script_path), str(data_path)],
+        capture_output=True, text=True, env=full_env, timeout=60,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -285,10 +337,95 @@ def test_unit_probe_write_rollback_step_leaves_no_row(migrated_db, env_vars):
 # Remaining scenarios — RED scaffold until later DELIVER steps.
 # ---------------------------------------------------------------------------
 
-@RED
-def test_crash_mid_transaction_leaves_db_in_pre_cycle_state(env_vars, sqlite_repo, tmp_path):
-    """@infrastructure-failure @kpi @real-io — AP7 — KPI-3a crash injection."""
-    raise AssertionError("RED scaffold: crash-injection harness not implemented")
+def test_crash_mid_transaction_leaves_db_in_pre_cycle_state(env_vars, sqlite_repo, make_tacticus_entry, tmp_path):
+    """@infrastructure-failure @kpi @real-io — AP7 — KPI-3a crash injection.
+
+    Captures a pre-cycle row-count baseline; an hourly auto_update cycle is
+    mid-transaction when the process is killed hard; on restart, NONE of the
+    partial upserts from that cycle are present; row counts match the
+    pre-cycle baseline; the data-loss trap is retired.
+
+    Crash-injection harness: a REAL subprocess drives `upsert_guild_hits`
+    (the 04-04 one-txn-per-guild port) with 25 battle entries + 1 malformed
+    bomb entry (missing `unitId`). The bomb entry raises `KeyError` inside
+    `_bomb_params` mid-transaction → the session_scope rolls back BOTH
+    halves (battle + bomb) → the subprocess dies (unhandled exception, exit
+    non-zero). The parent then reopens the DB and asserts the pre-cycle
+    row counts are unchanged (the 25 partial battle upserts did NOT land).
+    This proves WAL + one-transaction-per-guild atomicity (ADR-006 D6):
+    a crash mid-guild-cycle leaves that guild's pre-cycle state intact.
+    """
+    import json as _json
+    import sqlite3
+    from bot.models import Cluster, Guild
+    server, guild, season = 1458181638453203099, "neuro", 94
+
+    # Precondition: the guild row must exist (FK target for battle/bomb hits).
+    sqlite_repo.save(Cluster(
+        discord_server_id=server,
+        guilds={guild: Guild(id=guild, name="Neuro", api_key="", role_id=0)},
+    ))
+
+    # Pre-cycle baseline: 3 committed battle hits for the guild/season.
+    baseline_entries = [
+        make_tacticus_entry(damage=1000 + i, user_id=f"u-base-{i}",
+                            hero_details=[{"unitId": f"Hero{i}"}])
+        for i in range(3)
+    ]
+    sqlite_repo.upsert_battle_hits(server, guild, season, baseline_entries)
+
+    def _count_rows():
+        conn = sqlite3.connect(str(env_vars["SCRAPCODE_DB_PATH"]))
+        battle = conn.execute(
+            "SELECT COUNT(*) FROM battle_hits "
+            "WHERE discord_server_id=? AND guild_id=? AND season=?",
+            (server, guild, season),
+        ).fetchone()[0]
+        bomb = conn.execute(
+            "SELECT COUNT(*) FROM bomb_hits "
+            "WHERE discord_server_id=? AND guild_id=? AND season=?",
+            (server, guild, season),
+        ).fetchone()[0]
+        conn.close()
+        return battle, bomb
+
+    baseline_battle, baseline_bomb = _count_rows()
+    assert baseline_battle == 3, "pre-cycle baseline not established"
+
+    # 25 NEW battle entries (distinct roster_keys → would be 25 new rows if
+    # committed) + 1 malformed bomb entry that crashes mid-transaction.
+    crash_battle = [
+        make_tacticus_entry(damage=5000 + i, user_id=f"u-crash-{i}",
+                            hero_details=[{"unitId": f"CrashHero{i}"}])
+        for i in range(25)
+    ]
+    bad_bomb = make_tacticus_entry(damage_type="Bomb", damage=8000,
+                                   user_id="u-crash-bomb", hero_details=[],
+                                   machine_of_war=None)
+    del bad_bomb["unitId"]  # forces KeyError inside _bomb_params mid-session
+
+    result = _run_crash_subprocess(
+        env_vars=env_vars, tmp_path=tmp_path,
+        server=server, guild=guild, season=season,
+        battle_entries=crash_battle, bomb_entries=[bad_bomb],
+    )
+    # The subprocess died mid-transaction (unhandled KeyError → non-zero exit).
+    assert result.returncode != 0, \
+        "crash subprocess exited 0 — the mid-transaction failure did not fire"
+    assert "KeyError" in result.stderr, \
+        f"expected KeyError mid-transaction; got stderr:\n{result.stderr}"
+
+    # On restart: NONE of the partial upserts from the crashed cycle are
+    # present. Row counts match the pre-cycle baseline (KPI-3a).
+    restart_battle, restart_bomb = _count_rows()
+    assert restart_battle == baseline_battle, (
+        f"partial battle upserts leaked after crash: "
+        f"baseline={baseline_battle}, restart={restart_battle}"
+    )
+    assert restart_bomb == baseline_bomb == 0, (
+        f"partial bomb upserts leaked after crash: "
+        f"baseline={baseline_bomb}, restart={restart_bomb}"
+    )
 
 
 def test_hourly_auto_update_write_is_one_transaction_per_guild(env_vars, sqlite_repo, make_tacticus_entry):
