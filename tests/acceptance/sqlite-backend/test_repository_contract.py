@@ -22,6 +22,29 @@ from bot.repository import ClusterRepository, JsonClusterRepository
 from bot.migrations.player_list_migrations import PlayerListMigrator
 from bot.tracker import try_insert, TOP_N
 
+
+# ---------------------------------------------------------------------------
+# Schema-step driving port: a fresh SQLite file upgraded to the Alembic
+# baseline (ADR-006 D3). Used by the schema-constraint scenarios RC10/RC11,
+# which assert behavior at the SQL-constraint boundary (the driving port for
+# a schema step). The repo adapter impl lands in 02-03.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def alembic_upgraded_db(tmp_path: Path) -> Path:
+    """Run `alembic upgrade head` against a fresh SQLite file; return its path."""
+    from alembic.config import Config
+    from alembic import command
+
+    repo_root = Path(__import__("bot").__file__).resolve().parent.parent
+    ini_path = repo_root / "bot" / "db" / "alembic.ini"
+    db_path = tmp_path / "schema.db"
+    cfg = Config(str(ini_path))
+    cfg.set_main_option("script_location", str(repo_root / "bot" / "db" / "alembic"))
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path.as_posix()}")
+    command.upgrade(cfg, "head")
+    return db_path
+
 # ---------------------------------------------------------------------------
 # RC-1 (ENABLED — first scenario): every ABC method round-trips through the
 # repository, parametrized over both impls.
@@ -192,26 +215,61 @@ def test_api_key_encrypted_at_rest_decrypted_on_read(env_vars, sqlite_repo):
     assert loaded.guilds["neuro"].api_key == "tacticus-neuro-key"
 
 
-@RED
-def test_player_registrations_api_key_uniqueness_enforced(sqlite_repo):
-    """@infrastructure-failure — RC10."""
-    first = {"123456789": {"api_key": "shared-key", "guild_id": "neuro"}}
-    sqlite_repo.save_player_registrations(1458181638453203099, first)
-    with pytest.raises(Exception):
-        sqlite_repo.save_player_registrations(
-            1458181638453203099,
-            {**first, "987654321": {"api_key": "shared-key", "guild_id": "mech"}},
-        )
+def test_player_registrations_api_key_uniqueness_enforced(alembic_upgraded_db):
+    """@infrastructure-failure @real-io — RC10.
 
-
-@RED
-def test_role_tiers_check_constraint_rejects_invalid_tier(sqlite_repo):
-    """@infrastructure-failure — RC11."""
+    Schema step driving port: an alembic-upgraded SQLite database. A second
+    `player_registrations` row with the same `api_key_hmac` value fails with
+    a UNIQUE-constraint violation on the `api_key_hmac` column (ADR-006 D7:
+    the 1:1 binding the non-deterministic Fernet ciphertext cannot enforce).
+    """
     import sqlite3
-    conn = sqlite3.connect(sqlite_repo._db_path)
-    with pytest.raises(Exception):
-        conn.execute("INSERT INTO role_tiers (discord_server_id, tier, role_id) VALUES (?, 'superuser', 999)",
-                     (1458181638453203099,))
+    conn = sqlite3.connect(alembic_upgraded_db)
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("INSERT INTO clusters (discord_server_id) VALUES (?)",
+                 (1458181638453203099,))
+    conn.execute(
+        "INSERT INTO guilds (discord_server_id, guild_id, name, api_key, api_key_hmac, role_id) "
+        "VALUES (?, 'neuro', 'Neuro', 'cipher-A', 'hmac-shared', 999)",
+        (1458181638453203099,),
+    )
+    conn.execute(
+        "INSERT INTO guilds (discord_server_id, guild_id, name, api_key, api_key_hmac, role_id) "
+        "VALUES (?, 'mech', 'Mech', 'cipher-B', 'hmac-mech', 888)",
+        (1458181638453203099,),
+    )
+    conn.execute(
+        "INSERT INTO player_registrations (discord_id, discord_server_id, guild_id, api_key, api_key_hmac, is_capped) "
+        "VALUES ('123456789', ?, 'neuro', 'cipher-A', 'hmac-shared', 0)",
+        (1458181638453203099,),
+    )
+    conn.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO player_registrations (discord_id, discord_server_id, guild_id, api_key, api_key_hmac, is_capped) "
+            "VALUES ('987654321', ?, 'mech', 'cipher-A', 'hmac-shared', 0)",
+            (1458181638453203099,),
+        )
+    conn.close()
+
+
+def test_role_tiers_check_constraint_rejects_invalid_tier(alembic_upgraded_db):
+    """@infrastructure-failure @real-io — RC11.
+
+    Schema step driving port: an alembic-upgraded SQLite database. An INSERT
+    into `role_tiers` with `tier='superuser'` fails with a CHECK-constraint
+    violation (data-dictionary §2.1: `tier IN ('admin','officer')`).
+    """
+    import sqlite3
+    conn = sqlite3.connect(alembic_upgraded_db)
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("INSERT INTO clusters (discord_server_id) VALUES (?)",
+                 (1458181638453203099,))
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO role_tiers (discord_server_id, tier, role_id) VALUES (?, 'superuser', 999)",
+            (1458181638453203099,),
+        )
     conn.close()
 
 
@@ -341,3 +399,100 @@ def test_battle_hits_simple_dropped_from_schema_and_tracker():
     # battle_hits_simple table.
     from bot.db import models
     assert not hasattr(models, "BattleHitSimpleRow"), "battle_hits_simple table must not exist"
+
+
+# ---------------------------------------------------------------------------
+# Step 02-01 unit tests — schema-shape declarations (driving port = the ORM
+# metadata). Behavior budget: 5 behaviors (12 model classes declared;
+# player_registrations.api_key_hmac UNIQUE NOT NULL; role_tiers CHECK;
+# no update_channel_id column anywhere; no battle_hits_simple table) -> max 10
+# unit tests. Behavior 2 (UNIQUE) and 3 (CHECK) are exercised end-to-end by
+# RC10/RC11 above; these unit tests pin the metadata declarations that make
+# those acceptance tests pass.
+# ---------------------------------------------------------------------------
+
+EXPECTED_MODEL_CLASSES = (
+    "ClusterRow",
+    "GuildRow",
+    "GuildMemberRoleRow",
+    "RoleTierRow",
+    "PlayerRegistrationRow",
+    "PlayerRow",
+    "BattleHitRow",
+    "BombHitRow",
+    "ReplayEntryRow",
+    "ReplayThreadRow",
+    "LiveLeaderboardRow",
+    "LiveLbMessageRow",
+)
+
+
+def test_models_declare_all_twelve_orm_classes_without_scaffold_markers():
+    """@driving_port — the schema metadata declares the 12 ORM tables and
+    carries zero `__SCAFFOLD__` markers (ADR-006 D3)."""
+    from bot.db import models
+    for name in EXPECTED_MODEL_CLASSES:
+        assert hasattr(models, name), f"missing model class: {name}"
+    assert not hasattr(models, "BattleHitSimpleRow"), "BattleHitSimpleRow must not exist (ADR-006 D4)"
+    assert not hasattr(models, "__SCAFFOLD__"), "__SCAFFOLD__ marker still present in bot.db.models"
+    # Each model class contributes a __table__ to the metadata.
+    base = models.Base
+    table_names = set(base.metadata.tables.keys())
+    expected_tables = {
+        "clusters", "role_tiers", "guilds", "guild_member_roles",
+        "player_registrations", "players", "battle_hits", "bomb_hits",
+        "replay_entries", "replay_threads", "live_leaderboards", "live_lb_messages",
+    }
+    assert expected_tables <= table_names, f"missing tables: {expected_tables - table_names}"
+    assert "battle_hits_simple" not in table_names, "battle_hits_simple table must not be declared"
+
+
+def test_player_registrations_api_key_hmac_is_unique_and_not_null():
+    """@driving_port — the `api_key_hmac` column on `player_registrations`
+    is declared UNIQUE NOT NULL (ADR-006 D7) and `is_capped` is a column
+    (ADR-006 D5)."""
+    from bot.db.models import PlayerRegistrationRow
+    cols = PlayerRegistrationRow.__table__.columns
+    hmac_col = cols["api_key_hmac"]
+    assert hmac_col.nullable is False, "api_key_hmac must be NOT NULL"
+    assert hmac_col.unique is True, "api_key_hmac must be UNIQUE"
+    assert "is_capped" in cols, "is_capped column missing (ADR-006 D5)"
+
+
+def test_role_tiers_check_constraint_pins_admin_and_officer_only():
+    """@driving_port — `role_tiers.tier` has a CHECK constraint restricting
+    values to `admin` / `officer` (data-dictionary §2.1)."""
+    from bot.db.models import RoleTierRow
+    tier_col = RoleTierRow.__table__.columns["tier"]
+    check_sql = " ".join(str(c.sqltext).upper() for c in RoleTierRow.__table__.constraints
+                         if c.__class__.__name__ == "CheckConstraint")
+    assert "TIER" in check_sql, "no CHECK constraint referencing tier"
+    assert "ADMIN" in check_sql and "OFFICER" in check_sql, "CHECK must allow admin and officer"
+
+
+def test_no_update_channel_id_column_in_any_table():
+    """@driving_port — ADR-006 D12: `update_channel_id` is dropped from the
+    SQL schema. No table in the metadata declares it."""
+    from bot.db.models import Base
+    for table_name, table in Base.metadata.tables.items():
+        assert "update_channel_id" not in table.columns, (
+            f"table {table_name} declares update_channel_id (ADR-006 D12 violation)"
+        )
+
+
+def test_alembic_baseline_creates_all_tables_on_fresh_sqlite_file(alembic_upgraded_db):
+    """@driving_port @real-io — `alembic upgrade head` against a fresh
+    SQLite file creates all 12 tables and leaves `battle_hits_simple`
+    absent (ADR-006 D3/D4)."""
+    import sqlite3
+    conn = sqlite3.connect(alembic_upgraded_db)
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
+    conn.close()
+    tables = {r[0] for r in rows}
+    expected = {
+        "clusters", "role_tiers", "guilds", "guild_member_roles",
+        "player_registrations", "players", "battle_hits", "bomb_hits",
+        "replay_entries", "replay_threads", "live_leaderboards", "live_lb_messages",
+    }
+    assert expected <= tables, f"alembic missed tables: {expected - tables}"
+    assert "battle_hits_simple" not in tables, "battle_hits_simple was created by alembic (ADR-006 D4)"
