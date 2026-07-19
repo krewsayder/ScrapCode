@@ -382,10 +382,10 @@ def test_upsert_keep_max_on_battle_hits_preserves_try_insert_contract(battle_hit
     assert [e["damage"] for e in flat] == [100, 90, 80, 70, 60]
 
 
-@RED
 def test_battle_hits_simple_dropped_from_schema_and_tracker():
     """@kpi — RC16."""
-    bot_tracker = Path(__import__("bot.tracker").__file__)
+    import bot.tracker as _tracker_mod
+    bot_tracker = Path(_tracker_mod.__file__)
     src = bot_tracker.read_text(encoding="utf-8")
     assert "BATTLE_SIMPLE_FILE" not in src, "battle_hits_simple write still present in tracker.py"
     # The SQLite schema (inspected via the models) MUST NOT declare a

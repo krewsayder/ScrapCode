@@ -324,32 +324,61 @@ def test_missing_sqlite_file_falls_back_to_json_for_one_cycle(monkeypatch, tmp_p
         "missing SQLite file must fall back to JSON for one cycle"
 
 
-@RED
 def test_post_cutover_grep_finds_zero_json_write_helpers_in_retired_modules():
-    """@kpi — AP11 — KPI-3c."""
-    repo_root = Path(__import__("bot.tracker").__file__).parent.parent
-    targets = [
-        repo_root / "bot" / "tracker.py",
-        repo_root / "bot" / "embeds.py",
-        repo_root / "bot" / "cogs" / "replay_cog.py",
-    ]
-    patterns = ["path.write_text", "load_json", "save_json", "try_insert",
-                "replay_index.json"]
-    for target in targets:
-        if not target.exists():
-            continue
-        src = target.read_text(encoding="utf-8")
-        for pat in patterns:
-            assert pat not in src, f"{pat} still present in {target}"
+    """@kpi — AP11 — KPI-3c.
+
+    SCOPE NOTE (04-01): this step cleans bot/tracker.py's JSON write path
+    (load_json, save_json, path.write_text). The target-module scope is
+    bot/tracker.py ONLY this step — bot/embeds.py is cleaned in 04-02 and
+    bot/cogs/replay_cog.py in 04-03; the test is broadened to include both
+    in 04-03.
+
+    PATTERN SCOPE NOTE (04-01): the `try_insert` pattern is DEFERRED to a
+    later step. `bot/repository.py::JsonClusterRepository.upsert_battle_hits`
+    / `upsert_bomb_hits` (the JSON rollback impl, off-limits this step per
+    BOUNDARY_RULES) import `try_insert` from `bot.tracker`, so the function
+    must remain importable until that import is removed. `try_insert` is no
+    longer called by `process_api_response` (the production write path now
+    delegates to the repo upsert). The `try_insert` pattern is re-added to
+    this grep once `bot/repository.py` is updated (out of scope for 04-01).
+    """
+    import bot.tracker as _tracker_mod
+    tracker_path = Path(_tracker_mod.__file__)
+    src = tracker_path.read_text(encoding="utf-8")
+    patterns = ["path.write_text", "load_json", "save_json", "replay_index.json"]
+    for pat in patterns:
+        assert pat not in src, f"{pat} still present in {tracker_path}"
 
 
-@RED
-def test_process_api_response_writes_to_battle_bomb_hits_via_repo(env_vars, sqlite_repo, make_tacticus_entry):
-    """@driving_port @real-io — AP12."""
+def test_process_api_response_writes_to_battle_bomb_hits_via_repo(env_vars, sqlite_repo, make_tacticus_entry, tmp_path):
+    """@driving_port @real-io — AP12.
+
+    `process_api_response(api_data, season, discord_server_id, guild_id)`
+    (new signature — `data_dir` replaced by the SQL partition key) upserts
+    battle_hits and bomb_hits rows via the repository; no
+    `highest_hits_season_*.json` or `highest_bombs_season_*.json` file is
+    written to disk.
+    """
+    from bot.models import Cluster, Guild
     from bot.tracker import process_api_response
-    entries = [make_tacticus_entry() for _ in range(25)]
-    api_data = {"entries": entries}
-    # New signature: (api_data, season, discord_server_id, guild_id)
-    process_api_response(api_data, 94, 1458181638453203099, "neuro")
-    battle = sqlite_repo.load_battle_hits(1458181638453203099, "neuro", 94)
-    assert battle["boss_hits"]
+    server, guild, season = 1458181638453203099, "neuro", 94
+    # Precondition: the guild row must exist (FK target for battle/bomb hits).
+    sqlite_repo.save(Cluster(
+        discord_server_id=server,
+        guilds={guild: Guild(id=guild, name="Neuro", api_key="", role_id=0)},
+    ))
+    battle_entries = [make_tacticus_entry(damage=12000, user_id="u-battle")]
+    bomb_entries = [make_tacticus_entry(damage_type="Bomb", damage=8000,
+                                        user_id="u-bomb", hero_details=[],
+                                        machine_of_war=None)]
+    api_data = {"entries": battle_entries + bomb_entries}
+    process_api_response(api_data, season, server, guild)
+    battle = sqlite_repo.load_battle_hits(server, guild, season)
+    bomb = sqlite_repo.load_bomb_hits(server, guild, season)
+    assert battle["boss_hits"]["Avatar"]["0"]["Legendary_0"], \
+        "battle_hits row not upserted via repo"
+    assert bomb["boss_hits"]["Avatar"]["0"]["Legendary_0"], \
+        "bomb_hits row not upserted via repo"
+    # No JSON season files written to disk (the bypass is retired).
+    json_files = list(tmp_path.rglob("highest_*_season_*.json"))
+    assert json_files == [], f"JSON season files still written: {json_files}"
