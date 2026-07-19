@@ -77,6 +77,11 @@ _DATA_TABLES_DELETE_ORDER: tuple[str, ...] = (
     "clusters",
 )
 
+# ADR-006 D11: the global `replay_index.json` has no server_id, so the
+# migration assigns EVERY replay entry to the one production discord_server_id.
+# True multi-tenant replay partitioning is deferred (recorded in wave-decisions.md).
+PROD_SERVER_ID = 1458181638453203099
+
 
 def diff_counts(json_counts: dict[str, int], sql_counts: dict[str, int]) -> dict[str, dict]:
     """Build the `tables` portion of the parity report from raw counts.
@@ -130,7 +135,7 @@ def run_migration(*, source: str, db: str, report: str | None = None) -> int:
     fernet_key = os.environ.get("SCRAPCODE_DB_KEY", "")
     repo = SqlAlchemyClusterRepository(db_path=db, fernet_key=fernet_key)
 
-    json_counts = _populate(repo, source_path)
+    json_counts = _populate(repo, source_path, db)
     sql_counts = _compute_sql_counts(db)
     tables = diff_counts(json_counts, sql_counts)
     overall = "PASS" if all(t["status"] == "PASS" for t in tables.values()) else "FAIL"
@@ -160,13 +165,102 @@ def _apply_schema(db: str) -> None:
 # json-derived row counts per table (the parity oracle).
 # ---------------------------------------------------------------------------
 
-def _populate(repo, source_path: Path) -> dict[str, int]:
+def _populate(repo, source_path: Path, db: str) -> dict[str, int]:
     """Populate the DB via repo save methods; return json-derived counts."""
     counts = {name: 0 for name in PARITY_TABLES}
     for server_dir in sorted(p for p in source_path.iterdir() if p.is_dir() and p.name.isdigit()):
         server_id = int(server_dir.name)
         counts = _populate_one_server(repo, server_dir, server_id, counts)
+    counts = _populate_replay(source_path, db, counts)
     return counts
+
+
+# ---------------------------------------------------------------------------
+# Replay population (ADR-006 D10/D11, US-007).
+#
+# `replay_index.json` is the global tenancy leak (ADR-004 §3): it lives at
+# the project root, not under clusters/<server>/. The migration reads it from
+# `source_path.parent` (the operator copies it alongside the clusters/ tree).
+# Every entry is assigned to PROD_SERVER_ID (D11 — the JSON has no server_id).
+# `replay_threads` is seeded from the hardcoded FORUM_CHANNELS / MAP_THREADS
+# constants in bot.cogs.replay_cog (D10 — single source; 04-03 removes them
+# from the cog). Seeding is conditional on replay_index.json existence so an
+# empty source (JP10) produces 0/0 for replay tables too.
+# ---------------------------------------------------------------------------
+
+def _load_replay_constants():
+    """Import FORUM_CHANNELS / MAP_THREADS from bot.cogs.replay_cog.
+
+    `config.py` requires UPDATE_CHANNEL_ID / REPLAY_INDEX_CHANNEL_ID env
+    vars at import time (it does `int(os.getenv(...))`); the migration
+    subprocess does not otherwise use them, so harmless defaults are set
+    to allow importing the constants (ADR-006 D10 single-source).
+    """
+    os.environ.setdefault("UPDATE_CHANNEL_ID", "0")
+    os.environ.setdefault("REPLAY_INDEX_CHANNEL_ID", "0")
+    from bot.cogs.replay_cog import FORUM_CHANNELS, MAP_THREADS
+    return FORUM_CHANNELS, MAP_THREADS
+
+
+def _populate_replay(source_path: Path, db: str,
+                     counts: dict[str, int]) -> dict[str, int]:
+    replay_index_path = source_path.parent / "replay_index.json"
+    if not replay_index_path.exists():
+        return counts
+    replay_index = json.loads(replay_index_path.read_text(encoding="utf-8"))
+    forum_channels, map_threads = _load_replay_constants()
+    conn = sqlite3.connect(db)
+    try:
+        _seed_replay_threads(conn, forum_channels, map_threads, replay_index)
+        entry_count = _insert_replay_entries(conn, replay_index)
+    finally:
+        conn.close()
+    counts["replay_threads"] = sum(len(maps) for maps in map_threads.values())
+    counts["replay_entries"] = entry_count
+    return counts
+
+
+def _seed_replay_threads(conn, forum_channels: dict, map_threads: dict,
+                         replay_index: dict) -> None:
+    for boss, maps in map_threads.items():
+        forum_channel_id = forum_channels.get(boss)
+        for map_name, thread_id in maps.items():
+            index_message_id = _lookup_index_message_id(replay_index, boss, map_name)
+            conn.execute(
+                "INSERT OR IGNORE INTO replay_threads "
+                "(discord_server_id, boss, map_name, forum_channel_id, thread_id, "
+                "index_message_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (PROD_SERVER_ID, boss, map_name, forum_channel_id, thread_id,
+                 index_message_id),
+            )
+    conn.commit()
+
+
+def _lookup_index_message_id(replay_index: dict, boss: str, map_name: str):
+    node = replay_index.get(boss, {}).get(map_name, {})
+    return node.get("index_message_id")
+
+
+def _insert_replay_entries(conn, replay_index: dict) -> int:
+    count = 0
+    for boss, maps in replay_index.items():
+        for map_name, node in maps.items():
+            index_message_id = node.get("index_message_id")
+            for entry in node.get("entries", []):
+                conn.execute(
+                    "INSERT OR IGNORE INTO replay_entries "
+                    "(discord_server_id, boss, map_name, team, tier, position, "
+                    "damage_text, url, comment, submitted_by, index_message_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (PROD_SERVER_ID, boss, map_name,
+                     entry.get("team", ""), entry.get("tier", ""),
+                     entry.get("position", ""), entry.get("damage", ""),
+                     entry.get("url", ""), entry.get("comment", ""),
+                     str(entry.get("submitted_by", "")), index_message_id),
+                )
+                count += 1
+    conn.commit()
+    return count
 
 
 def _populate_one_server(repo, server_dir: Path, server_id: int,
@@ -370,6 +464,29 @@ def _compute_json_counts(source_path: Path) -> dict[str, int]:
                     counts["battle_hits"] += len(_season_file_to_battle_entries(f))
                 for f in data_dir.glob("highest_bombs_season_*.json"):
                     counts["bomb_hits"] += len(_season_file_to_bomb_entries(f))
+    counts = _compute_replay_json_counts(source_path, counts)
+    return counts
+
+
+def _compute_replay_json_counts(source_path: Path,
+                                counts: dict[str, int]) -> dict[str, int]:
+    """Count replay rows the migration will seed (mirrors `_populate_replay`).
+
+    `replay_threads` count = number of (boss, map) pairs in MAP_THREADS when
+    replay_index.json exists (else 0 — JP10 empty source). `replay_entries`
+    count = total entries across the replay_index.json tree.
+    """
+    replay_index_path = source_path.parent / "replay_index.json"
+    if not replay_index_path.exists():
+        return counts
+    replay_index = json.loads(replay_index_path.read_text(encoding="utf-8"))
+    _forum_channels, map_threads = _load_replay_constants()
+    counts["replay_threads"] = sum(len(maps) for maps in map_threads.values())
+    counts["replay_entries"] = sum(
+        len(node.get("entries", []))
+        for maps in replay_index.values()
+        for node in maps.values()
+    )
     return counts
 
 

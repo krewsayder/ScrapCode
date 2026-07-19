@@ -18,6 +18,15 @@ import pytest
 
 RED = pytest.mark.skip(reason="RED scaffold — enable one at a time in DELIVER")
 
+# pytest -k matches against marker names, so the per-scenario JP markers
+# make the AC's `-k 'JP6 or JP7 or JP8 or JP9 or JP10'` filter select exactly
+# the five replay/edge scenarios (test function names don't contain "JPn").
+JP6 = pytest.mark.JP6
+JP7 = pytest.mark.JP7
+JP8 = pytest.mark.JP8
+JP9 = pytest.mark.JP9
+JP10 = pytest.mark.JP10
+
 
 def _run_migration(*, source: Path, db: Path, report: Path | None = None,
                    env: dict | None = None) -> subprocess.CompletedProcess:
@@ -145,13 +154,13 @@ def test_migration_is_idempotent(tmp_clusters_tree, tmp_path, monkeypatch, ferne
     assert first_parity == second_parity
 
 
-@RED
-def test_replay_entries_assigned_to_production_server(tmp_clusters_tree, tmp_path, monkeypatch):
+@JP6
+def test_replay_entries_assigned_to_production_server(tmp_clusters_tree, tmp_path, monkeypatch, fernet_key):
     """@kpi @real-io — JP6."""
     db = tmp_path / "data" / "scrapcode.db"
     report = tmp_path / "parity.json"
     # replay_index.json is at the tmp_path root (the conftest fixture puts it there).
-    monkeypatch.setenv("SCRAPCODE_DB_KEY", "test-key")
+    monkeypatch.setenv("SCRAPCODE_DB_KEY", fernet_key)
     result = _run_migration(source=tmp_clusters_tree, db=db, report=report)
     assert result.returncode == 0
     import sqlite3
@@ -161,39 +170,56 @@ def test_replay_entries_assigned_to_production_server(tmp_clusters_tree, tmp_pat
     assert rows == [(1458181638453203099,)]
 
 
-@RED
-def test_url_uniqueness_scoped_per_server_boss_map(tmp_path, monkeypatch):
-    """@infrastructure-failure @property — JP7."""
+@JP7
+def test_url_uniqueness_scoped_per_server_boss_map(tmp_clusters_tree, tmp_path, monkeypatch, fernet_key):
+    """@infrastructure-failure @property — JP7.
+
+    The migration seeds replay_entries from replay_index.json (one row for
+    the production server, Avatar/GB_Khaine_01/https://replay.example/abc).
+    A second insert with the same (server, boss, map, url) must fail the
+    per-tenant unique constraint; the same url under a different
+    discord_server_id must succeed (per-tenant scope, not global). FK
+    enforcement is left OFF (sqlite default) so the test isolates the
+    unique-constraint scope from the replay_threads FK.
+    """
     db = tmp_path / "data" / "scrapcode.db"
-    db.parent.mkdir(parents=True, exist_ok=True)
-    # Apply schema + insert one row, then attempt a duplicate and a cross-tenant row.
-    # RED scaffold: real impl lands in DELIVER.
+    report = tmp_path / "parity.json"
+    monkeypatch.setenv("SCRAPCODE_DB_KEY", fernet_key)
+    result = _run_migration(source=tmp_clusters_tree, db=db, report=report)
+    assert result.returncode == 0
     import sqlite3
     conn = sqlite3.connect(db)
-    # Schema must exist (provided by the migration); for the scaffold test we
-    # assert the unique-constraint behavior post-migration.
-    with pytest.raises(Exception):
-        # duplicate (server, boss, map, url) insert should fail
+    # Duplicate (server, boss, map, url) insert fails the per-tenant unique
+    # constraint. The migration has already seeded the prod-server row from
+    # replay_index.json. position/comment are included explicitly because
+    # their defaults are ORM-level (not DB-level), so omitting them would
+    # raise NOT NULL — masking the unique-constraint assertion.
+    with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
-            "INSERT INTO replay_entries (discord_server_id, boss, map_name, url) "
-            "VALUES (?, 'Avatar', 'GB_Khaine_01', 'https://replay.example/abc')",
+            "INSERT INTO replay_entries (discord_server_id, boss, map_name, team, tier, "
+            "position, damage_text, url, comment, submitted_by) "
+            "VALUES (?, 'Avatar', 'GB_Khaine_01', 'Neuro', 'Legendary 1', 'LHS', "
+            "'1.33M', 'https://replay.example/abc', '', '123456789')",
             (1458181638453203099,),
         )
-    # cross-tenant same url should succeed
+    # Cross-tenant same url succeeds (per-tenant scope, not global).
     conn.execute(
-        "INSERT INTO replay_entries (discord_server_id, boss, map_name, url) "
-        "VALUES (?, 'Avatar', 'GB_Khaine_01', 'https://replay.example/abc')",
+        "INSERT INTO replay_entries (discord_server_id, boss, map_name, team, tier, "
+        "position, damage_text, url, comment, submitted_by) "
+        "VALUES (?, 'Avatar', 'GB_Khaine_01', 'Neuro', 'Legendary 1', 'LHS', "
+        "'1.33M', 'https://replay.example/abc', '', '123456789')",
         (9876543210,),
     )
+    conn.commit()
     conn.close()
 
 
-@RED
-def test_replay_threads_seeded_from_forum_and_map_constants(tmp_clusters_tree, tmp_path, monkeypatch):
+@JP8
+def test_replay_threads_seeded_from_forum_and_map_constants(tmp_clusters_tree, tmp_path, monkeypatch, fernet_key):
     """@real-io — JP8."""
     db = tmp_path / "data" / "scrapcode.db"
     report = tmp_path / "parity.json"
-    monkeypatch.setenv("SCRAPCODE_DB_KEY", "test-key")
+    monkeypatch.setenv("SCRAPCODE_DB_KEY", fernet_key)
     result = _run_migration(source=tmp_clusters_tree, db=db, report=report)
     assert result.returncode == 0
     import sqlite3
@@ -204,7 +230,7 @@ def test_replay_threads_seeded_from_forum_and_map_constants(tmp_clusters_tree, t
     assert all(r[0] and r[1] for r in rows)
 
 
-@RED
+@JP9
 def test_migration_against_missing_source_fails_loudly(tmp_path, monkeypatch):
     """@infrastructure-failure — JP9."""
     missing = tmp_path / "does-not-exist"
@@ -217,7 +243,7 @@ def test_migration_against_missing_source_fails_loudly(tmp_path, monkeypatch):
     assert str(missing) in result.stderr or str(missing) in result.stdout
 
 
-@RED
+@JP10
 def test_migration_with_empty_clusters_tree_produces_empty_schema(tmp_path, monkeypatch):
     """@edge — JP10."""
     empty_source = tmp_path / "clusters"
@@ -250,8 +276,13 @@ from bot.db.migrations_json_to_sqlite import diff_counts  # noqa: E402
 
 
 def _write_minimal_cluster(tmp_path: Path, *, guilds: dict, player_list: dict | None = None,
-                           server_id: int = 1458181638453203099) -> Path:
-    """Build a minimal clusters/<server>/ tree for unit-level run_migration drives."""
+                           server_id: int = 1458181638453203099,
+                           replay_index: dict | None = None) -> Path:
+    """Build a minimal clusters/<server>/ tree for unit-level run_migration drives.
+
+    `replay_index` is written to `tmp_path/replay_index.json` (the project-root
+    global-leak location the migration reads from `source_path.parent`).
+    """
     base = tmp_path / "clusters"
     server_dir = base / str(server_id)
     server_dir.mkdir(parents=True)
@@ -265,6 +296,8 @@ def _write_minimal_cluster(tmp_path: Path, *, guilds: dict, player_list: dict | 
             gdir = server_dir / guild_id
             gdir.mkdir(parents=True, exist_ok=True)
             (gdir / "player_list.json").write_text(json.dumps(plist), encoding="utf-8")
+    if replay_index is not None:
+        (tmp_path / "replay_index.json").write_text(json.dumps(replay_index), encoding="utf-8")
     return base
 
 
@@ -348,3 +381,155 @@ def test_run_migration_encrypts_api_key_on_insert(tmp_path, monkeypatch, fernet_
     else:
         # Empty api_key is stored as empty string (RC12 — not encrypted).
         assert stored == ""
+
+
+# ---------------------------------------------------------------------------
+# RED_UNIT (03-03) — replay single-server assignment, per-tenant URL
+# uniqueness, replay_threads seed from FORUM_CHANNELS/MAP_THREADS. Drives
+# `run_migration` in-process (port-to-port at the migration-module driving
+# port) with a minimal cluster + replay_index.json, asserts at the SQLite
+# driven-port boundary. Test budget: 3 behaviors x 2 = 6; 3 tests used.
+# ---------------------------------------------------------------------------
+
+PROD_SERVER_ID = 1458181638453203099
+
+
+def _replay_index_with(entries):
+    """Build a replay_index.json shape with one (Avatar, GB_Khaine_01) thread."""
+    return {
+        "Avatar": {
+            "GB_Khaine_01": {
+                "index_message_id": 999999,
+                "entries": entries,
+            }
+        },
+    }
+
+
+def test_run_migration_assigns_all_replay_entries_to_production_server(tmp_path, monkeypatch, fernet_key):
+    """Unit: every replay_entries row gets the production discord_server_id.
+
+    ADR-006 D11 — the JSON has no server_id; the migration assigns ALL
+    entries to the single production server. Two entries in replay_index.json
+    -> two replay_entries rows, both with PROD_SERVER_ID.
+    """
+    monkeypatch.setenv("SCRAPCODE_DB_KEY", fernet_key)
+    entries = [
+        {"team": "Neuro", "tier": "Legendary 1", "position": "LHS",
+         "damage": "1.33M", "url": "https://replay.example/abc",
+         "comment": "", "submitted_by": "123456789"},
+        {"team": "Mech", "tier": "Mythic 1", "position": "RHS",
+         "damage": "2.0M", "url": "https://replay.example/def",
+         "comment": "gg", "submitted_by": "987654321"},
+    ]
+    base = _write_minimal_cluster(
+        tmp_path,
+        guilds={"neuro": {"name": "Neuro", "api_key": "", "role_id": 1, "member_role_ids": []}},
+        replay_index=_replay_index_with(entries),
+    )
+    db = tmp_path / "data" / "scrapcode.db"
+    report = tmp_path / "parity.json"
+    from bot.db.migrations_json_to_sqlite import run_migration
+    rc = run_migration(source=str(base), db=str(db), report=str(report))
+    assert rc == 0
+    import sqlite3
+    conn = sqlite3.connect(db)
+    rows = conn.execute(
+        "SELECT discord_server_id, boss, map_name, url, damage_text, submitted_by "
+        "FROM replay_entries ORDER BY url"
+    ).fetchall()
+    conn.close()
+    assert len(rows) == 2
+    assert all(r[0] == PROD_SERVER_ID for r in rows), "every row assigned to prod server"
+    assert rows[0][1] == "Avatar" and rows[0][2] == "GB_Khaine_01"
+    assert rows[0][4] == "1.33M", "damage kept as free-text (data-dictionary §2.10)"
+    assert rows[1][4] == "2.0M"
+
+
+def test_run_migration_enforces_per_tenant_url_uniqueness(tmp_path, monkeypatch, fernet_key):
+    """Unit: the unique constraint is scoped per (discord_server_id, boss, map_name, url).
+
+    ADR-006 D11 — URL uniqueness is per-tenant, not global. A duplicate
+    (server, boss, map, url) insert raises IntegrityError; the same url
+    under a different discord_server_id inserts successfully.
+    """
+    monkeypatch.setenv("SCRAPCODE_DB_KEY", fernet_key)
+    entries = [
+        {"team": "Neuro", "tier": "Legendary 1", "position": "LHS",
+         "damage": "1.33M", "url": "https://replay.example/abc",
+         "comment": "", "submitted_by": "123456789"},
+    ]
+    base = _write_minimal_cluster(
+        tmp_path,
+        guilds={"neuro": {"name": "Neuro", "api_key": "", "role_id": 1, "member_role_ids": []}},
+        replay_index=_replay_index_with(entries),
+    )
+    db = tmp_path / "data" / "scrapcode.db"
+    report = tmp_path / "parity.json"
+    from bot.db.migrations_json_to_sqlite import run_migration
+    rc = run_migration(source=str(base), db=str(db), report=str(report))
+    assert rc == 0
+    import sqlite3
+    conn = sqlite3.connect(db)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO replay_entries (discord_server_id, boss, map_name, team, tier, "
+            "position, damage_text, url, comment, submitted_by) "
+            "VALUES (?, 'Avatar', 'GB_Khaine_01', 'Neuro', 'Legendary 1', 'LHS', "
+            "'1.33M', 'https://replay.example/abc', '', '123456789')",
+            (PROD_SERVER_ID,),
+        )
+    # Same url under a different server succeeds (per-tenant scope).
+    conn.execute(
+        "INSERT INTO replay_entries (discord_server_id, boss, map_name, team, tier, "
+        "position, damage_text, url, comment, submitted_by) "
+        "VALUES (?, 'Avatar', 'GB_Khaine_01', 'Neuro', 'Legendary 1', 'LHS', "
+        "'1.33M', 'https://replay.example/abc', '', '123456789')",
+        (9876543210,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_run_migration_seeds_replay_threads_from_forum_and_map_constants(tmp_path, monkeypatch, fernet_key):
+    """Unit: replay_threads is seeded from FORUM_CHANNELS/MAP_THREADS (ADR-006 D10).
+
+    Every (boss, map_name) in MAP_THREADS gets one row with the production
+    discord_server_id, the forum_channel_id from FORUM_CHANNELS, and the
+    thread_id from MAP_THREADS. The index_message_id comes from
+    replay_index.json where present (else None).
+    """
+    monkeypatch.setenv("SCRAPCODE_DB_KEY", fernet_key)
+    base = _write_minimal_cluster(
+        tmp_path,
+        guilds={"neuro": {"name": "Neuro", "api_key": "", "role_id": 1, "member_role_ids": []}},
+        replay_index=_replay_index_with([
+            {"team": "Neuro", "tier": "Legendary 1", "position": "LHS",
+             "damage": "1.33M", "url": "https://replay.example/abc",
+             "comment": "", "submitted_by": "123456789"},
+        ]),
+    )
+    db = tmp_path / "data" / "scrapcode.db"
+    report = tmp_path / "parity.json"
+    from bot.db.migrations_json_to_sqlite import run_migration
+    rc = run_migration(source=str(base), db=str(db), report=str(report))
+    assert rc == 0
+    from bot.cogs.replay_cog import FORUM_CHANNELS, MAP_THREADS
+    expected_count = sum(len(maps) for maps in MAP_THREADS.values())
+    import sqlite3
+    conn = sqlite3.connect(db)
+    rows = conn.execute(
+        "SELECT discord_server_id, boss, map_name, forum_channel_id, thread_id, "
+        "index_message_id FROM replay_threads ORDER BY boss, map_name"
+    ).fetchall()
+    conn.close()
+    assert len(rows) == expected_count, "one row per (boss, map_name) in MAP_THREADS"
+    assert all(r[0] == PROD_SERVER_ID for r in rows), "all threads assigned to prod server"
+    # The Avatar/GB_Khaine_01 thread carries the index_message_id from replay_index.json.
+    avatar_row = next(r for r in rows if r[1] == "Avatar" and r[2] == "GB_Khaine_01")
+    assert avatar_row[3] == FORUM_CHANNELS["Avatar"]
+    assert avatar_row[4] == MAP_THREADS["Avatar"]["GB_Khaine_01"]
+    assert avatar_row[5] == 999999, "index_message_id seeded from replay_index.json"
+    # A (boss, map) absent from replay_index.json gets a NULL index_message_id.
+    other_row = next(r for r in rows if r[5] is None)
+    assert other_row is not None, "threads absent from replay_index.json get null index_message_id"
