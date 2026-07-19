@@ -82,6 +82,167 @@ _DATA_TABLES_DELETE_ORDER: tuple[str, ...] = (
 # True multi-tenant replay partitioning is deferred (recorded in wave-decisions.md).
 PROD_SERVER_ID = 1458181638453203099
 
+# ADR-006 D10: the historical hardcoded forum/thread-ID constants
+# that lived in bot/cogs/replay_cog.py are now the seed source for
+# replay_threads. 04-03 removed them from the cog (CS9) and inlined
+# them here -- the migration is the only remaining consumer (the cog
+# reads thread IDs from replay_threads post-cutover). Single source
+# of truth preserved; values are the exact originals.
+FORUM_CHANNELS = {'Avatar': 1481592080940925062,
+ 'Cawl': 1481592218891456583,
+ 'Ghaz': 1481592447845929061,
+ 'Magnus': 1481592865800065037,
+ 'Mortarion': 1481592902059819059,
+ 'Riptide': 1481593074659622912,
+ 'Rogal Dorn': 1481593105831690291,
+ 'Screamer-Killer': 1481593216229707926,
+ 'Szarekh': 1481593184248266792,
+ 'Tervigon': 1481593333192069212,
+ 'Tyrant': 1481593363898695680}
+
+MAP_THREADS = {'Tervigon': {'GB_01': 1481676928090898475,
+              'GB_02': 1481676970612883527,
+              'GB_03': 1481677016473534464,
+              'GB_04': 1481677055337693365,
+              'GB_05': 1481677104038023258,
+              'GB_06': 1481677151622135921,
+              'GB_support_01': 1481677960657375353,
+              'GB_support_02': 1481677995541397715,
+              'GB_support_03': 1481678034489839626,
+              'GB_support_04': 1481678181223366797,
+              'GB_support_05': 1481678254871023800,
+              'GB_support_06': 1481678289730011146},
+ 'Tyrant': {'GB_01': 1481677221348507772,
+            'GB_02': 1481677275597639790,
+            'GB_03': 1481677478711005296,
+            'GB_04': 1481677514018656457,
+            'GB_05': 1481677621606613083,
+            'GB_06': 1481677662199222344,
+            'GB_support_01': 1481678326757331027,
+            'GB_support_02': 1481678362274693252,
+            'GB_support_03': 1481678396483436554,
+            'GB_support_04': 1481678430368956496,
+            'GB_support_05': 1481678466716799183,
+            'GB_support_06': 1481678504574844979},
+ 'Avatar': {'GB_Khaine_01': 1481592319894618304,
+            'GB_Khaine_02': 1481592399720611840,
+            'GB_Khaine_03': 1481595045185589320,
+            'GB_Khaine_04': 1481595099925188660,
+            'Aethana GB_Khaine_support_01': 1481595238060392639,
+            'Eldryon GB_Khaine_support_02': 1481595289839075349,
+            'Aethana GB_Khaine_support_03': 1481595332054749256,
+            'Eldryon GB_Khaine_support_04': 1481595381124173864,
+            'Aethana GB_Khaine_support_05': 1481595429111201795,
+            'Eldryon GB_Khaine_support_06': 1481595469665669182},
+ 'Cawl': {'GB_Belisarius_01': 1481596799201317006,
+          'GB_Belisarius_02': 1481596839865094226,
+          'GB_Belisarius_03': 1481596895716708404,
+          'GB_Belisarius_04': 1481596928599916606,
+          'Tan Gida GB_Belisarius_support_01': 1481596967225262173,
+          'Actus GB_Belisarius_support_02': 1481597012750241882,
+          'Tan Gida GB_Belisarius_support_03': 1481597055670550538,
+          'Actus GB_Belisarius_support_04': 1481597096782991484,
+          'Tan Gida GB_Belisarius_support_05': 1481597132329979915,
+          'Actus GB_Belisarius_support_06': 1481597165045289081},
+ 'Ghaz': {'GB_Dakka_01': 1481597329130786899,
+          'GB_Dakka_02': 1481597359443021885,
+          'GB_Dakka_03': 1481597414111711365,
+          'GB_Dakka_03_1': 1481597446063919136,
+          'GB_Dakka_04': 1481597494038233128,
+          'GB_Dakka_05': 1481597528939167844,
+          'Gibba GB_Dakka_support_01': 1481597584459038730,
+          'Tanksmasha GB_Dakka_support_02': 1481597621134164001,
+          'Gibba GB_Dakka_support_03': 1481597653023195206,
+          'Tanksmasha GB_Dakka_support_04': 1481597684987990056,
+          'Tanksmasha GB_Dakka_support_04_1': 1481597735416102972,
+          'Gibba GB_Dakka_support_05': 1481597769310277733,
+          'Gibba GB_Dakka_support_05_1': 1481597810892738631,
+          'Tanksmasha GB_Dakka_support_06': 1481597843784339597},
+ 'Mortarion': {'GB_Mortarion_01': 1481631207966900226,
+               'GB_Mortarion_02': 1481631262266490900,
+               'GB_Mortarion_03': 1481631296093683832,
+               'GB_Mortarion_04': 1481631337302458461,
+               'Rotbone GB_Mortarion_support_01': 1481631415203401880,
+               'Corrodius GB_Mortarion_support_02': 1481631454890037330,
+               'Rotbone GB_Mortarion_support_03': 1481631494953898075,
+               'Corrodius GB_Mortarion_support_04': 1481631543825793144,
+               'Rotbone GB_Mortarion_support_05': 1481631587618525308,
+               'Corrodius GB_Mortarion_support_06': 1481631616928452628},
+ 'Riptide': {'GB_Riptide_01': 1481633511898222726,
+             'GB_Riptide_02': 1481633548854362245,
+             'GB_Riptide_03': 1481633589455224842,
+             'Sho GB_Riptide_support_01': 1481633675014570066,
+             'Sho GB_Riptide_support_02': 1481633721613291530,
+             'Sho GB_Riptide_support_03': 1481633751652896829,
+             'Sho GB_Riptide_support_04': 1481633778156961882,
+             'Revas GB_Riptide_support_01': 1481633844594741268,
+             'Revas GB_Riptide_support_02': 1481633874470637640,
+             'Revas GB_Riptide_support_03': 1481633904916955226,
+             'Revas GB_Riptide_support_04': 1481633937045590178},
+ 'Magnus': {'GB_Magnus_01': 1481628315767803934,
+            'GB_Magnus_02': 1481628397636681738,
+            'GB_Magnus_03': 1481628448140034080,
+            'GB_Magnus_04': 1481628501575467078,
+            'Abraxas GB_Magnus_support_01': 1481628609838841948,
+            'Thaumachus GB_Magnus_support_02': 1481628689253793802,
+            'Abraxas GB_Magnus_support_03': 1481628746606968925,
+            'Thaumachus GB_Magnus_support_04': 1481628804236705975,
+            'Abraxas GB_Magnus_support_05': 1481628867943989332,
+            'Thaumachus GB_Magnus_support_06': 1481628946289397760},
+ 'Rogal Dorn': {'GB_RogalDorn_01': 1481631818703699989,
+                'GB_RogalDorn_02': 1481631865642287166,
+                'GB_RogalDorn_03': 1481631917261717515,
+                'GB_RogalDorn_04': 1481631944188887223,
+                'GB_RogalDorn_05': 1481631968776028261,
+                'GB_RogalDorn_06': 1486177123147452518,
+                'Sibyll GB_RogalDorn_support_01': 1481632100045033663,
+                'Thad GB_RogalDorn_support_02': 1481632131234005093,
+                'Sibyll GB_RogalDorn_support_03': 1481632160908709989,
+                'Thad GB_RogalDorn_support_04': 1481632195088093184,
+                'Sibyll GB_RogalDorn_support_05': 1481632224037048382,
+                'Thad GB_RogalDorn_support_06': 1481632252772483163},
+ 'Screamer-Killer': {'GB_Screamer_01': 1481640960050860135,
+                     'GB_Screamer_02': 1481640998449844244,
+                     'GB_Screamer_03': 1481641030129422497,
+                     'GB_Screamer_04': 1481641065189474504,
+                     'Neuro GB_Screamer_support_01': 1481641151386882272,
+                     'Neuro GB_Screamer_support_02': 1481641275966099476,
+                     'Neuro GB_Screamer_support_03': 1481641362968285376,
+                     'Neuro GB_Screamer_support_04': 1481641448188284939,
+                     'Neuro GB_Screamer_support_05': 1481641558326513686,
+                     'Neuro GB_Screamer_support_06': 1481641695941496915,
+                     'Neuro GB_Screamer_support_07': 1481641806373589103,
+                     'Neuro GB_Screamer_support_08': 1481641912652795936,
+                     'Winged Prime GB_Screamer_support_01': 1481641206718009435,
+                     'Winged Prime GB_Screamer_support_02': 1481641316206247976,
+                     'Winged Prime GB_Screamer_support_03': 1481641409361481880,
+                     'Winged Prime GB_Screamer_support_04': 1481641496506536138,
+                     'Winged Prime GB_Screamer_support_05': 1481641626945196063,
+                     'Winged Prime GB_Screamer_support_06': 1481641756507377674,
+                     'Winged Prime GB_Screamer_support_07': 1481641863059476480,
+                     'Winged Prime GB_Screamer_support_08': 1481641951349440563},
+ 'Szarekh': {'GB_SK_01': 1481671657293877288,
+             'GB_SK_02': 1481671700021117061,
+             'GB_SK_03': 1481671744350584873,
+             'GB_SK_04': 1481671790072823880,
+             'Left GB_SK_support_01': 1481671844137271349,
+             'Left GB_SK_support_02': 1481671881802121342,
+             'Left GB_SK_support_03': 1481671948248547328,
+             'Left GB_SK_support_04': 1481672061364732227,
+             'Left GB_SK_support_05': 1481672094717579455,
+             'Left GB_SK_support_06': 1481672129056608470,
+             'Left GB_SK_support_07': 1481672167459524830,
+             'Left GB_SK_support_08': 1481672208395931648,
+             'Right GB_SK_support_01': 1481672258224259143,
+             'Right GB_SK_support_02': 1481672302813909254,
+             'Right GB_SK_support_03': 1481672336901148815,
+             'Right GB_SK_support_04': 1481672385756401815,
+             'Right GB_SK_support_05': 1481672424960299029,
+             'Right GB_SK_support_06': 1481672461647876258,
+             'Right GB_SK_support_07': 1481672531067801600,
+             'Right GB_SK_support_08': 1481672568674058271}}
+
+
 
 def diff_counts(json_counts: dict[str, int], sql_counts: dict[str, int]) -> dict[str, dict]:
     """Build the `tables` portion of the parity report from raw counts.
@@ -189,16 +350,14 @@ def _populate(repo, source_path: Path, db: str) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 def _load_replay_constants():
-    """Import FORUM_CHANNELS / MAP_THREADS from bot.cogs.replay_cog.
+    """Return the local FORUM_CHANNELS / MAP_THREADS seed constants.
 
-    `config.py` requires UPDATE_CHANNEL_ID / REPLAY_INDEX_CHANNEL_ID env
-    vars at import time (it does `int(os.getenv(...))`); the migration
-    subprocess does not otherwise use them, so harmless defaults are set
-    to allow importing the constants (ADR-006 D10 single-source).
+    04-03 inlined the historical hardcoded constants (formerly in
+    `bot.cogs.replay_cog`) into this migration module — they are the seed
+    source for `replay_threads` and have no other consumer post-cutover
+    (ADR-006 D10). The cog reads thread IDs from `replay_threads` via the
+    repository; this module is the single source of truth for the seed.
     """
-    os.environ.setdefault("UPDATE_CHANNEL_ID", "0")
-    os.environ.setdefault("REPLAY_INDEX_CHANNEL_ID", "0")
-    from bot.cogs.replay_cog import FORUM_CHANNELS, MAP_THREADS
     return FORUM_CHANNELS, MAP_THREADS
 
 

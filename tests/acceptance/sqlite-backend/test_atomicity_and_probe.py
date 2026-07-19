@@ -327,27 +327,36 @@ def test_missing_sqlite_file_falls_back_to_json_for_one_cycle(monkeypatch, tmp_p
 def test_post_cutover_grep_finds_zero_json_write_helpers_in_retired_modules():
     """@kpi — AP11 — KPI-3c.
 
-    SCOPE NOTE (04-01): this step cleans bot/tracker.py's JSON write path
-    (load_json, save_json, path.write_text). The target-module scope is
-    bot/tracker.py ONLY this step — bot/embeds.py is cleaned in 04-02 and
-    bot/cogs/replay_cog.py in 04-03; the test is broadened to include both
-    in 04-03.
+    SCOPE NOTE (04-03): the JSON write path is retired across ALL THREE
+    bypass modules — bot/tracker.py (04-01), bot/embeds.py (04-02), and
+    bot/cogs/replay_cog.py (04-03). The grep now covers all three. The
+    replay-specific constants/helpers (REPLAY_INDEX_FILE, load_replay_index,
+    save_replay_index, FORUM_CHANNELS, MAP_THREADS) are asserted absent
+    from replay_cog.py by CS9; this test asserts the JSON-write helper
+    patterns are absent from all three retired modules.
 
     PATTERN SCOPE NOTE (04-01): the `try_insert` pattern is DEFERRED to a
     later step. `bot/repository.py::JsonClusterRepository.upsert_battle_hits`
-    / `upsert_bomb_hits` (the JSON rollback impl, off-limits this step per
-    BOUNDARY_RULES) import `try_insert` from `bot.tracker`, so the function
-    must remain importable until that import is removed. `try_insert` is no
-    longer called by `process_api_response` (the production write path now
-    delegates to the repo upsert). The `try_insert` pattern is re-added to
-    this grep once `bot/repository.py` is updated (out of scope for 04-01).
+    / `upsert_bomb_hits` (the JSON rollback impl) import `try_insert` from
+    `bot.tracker`, so the function must remain importable until that import
+    is removed. `try_insert` is no longer called by `process_api_response`
+    (the production write path now delegates to the repo upsert). The
+    `try_insert` pattern is re-added to this grep once `bot/repository.py`
+    is updated (out of scope for 04-03).
     """
     import bot.tracker as _tracker_mod
-    tracker_path = Path(_tracker_mod.__file__)
-    src = tracker_path.read_text(encoding="utf-8")
+    import bot.embeds as _embeds_mod
+    import bot.cogs.replay_cog as _replay_mod
+    modules = [
+        Path(_tracker_mod.__file__),
+        Path(_embeds_mod.__file__),
+        Path(_replay_mod.__file__),
+    ]
     patterns = ["path.write_text", "load_json", "save_json", "replay_index.json"]
-    for pat in patterns:
-        assert pat not in src, f"{pat} still present in {tracker_path}"
+    for mod_path in modules:
+        src = mod_path.read_text(encoding="utf-8")
+        for pat in patterns:
+            assert pat not in src, f"{pat} still present in {mod_path}"
 
 
 def test_process_api_response_writes_to_battle_bomb_hits_via_repo(env_vars, sqlite_repo, make_tacticus_entry, tmp_path):

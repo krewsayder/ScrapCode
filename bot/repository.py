@@ -76,6 +76,58 @@ class ClusterRepository(ABC):
         """Upsert Bomb hit entries with plain top-N (no roster dedup)
         (data-dictionary §2.9 / US-006)."""
 
+    # --- ADR-007-pattern replay methods (added in 04-03; ADR-006 D10/D11) ---
+    # The replay cog routes through these instead of replay_index.json +
+    # hardcoded FORUM_CHANNELS/MAP_THREADS. Per-tenant URL uniqueness is
+    # enforced on (discord_server_id, boss, map_name, url) — the global
+    # uniqueness leak (ADR-004 §3) is closed. Thread IDs come from
+    # replay_threads (seeded in 03-03), closing the hardcoded-thread-ID leak.
+
+    @abstractmethod
+    def load_replay_entries(self, discord_server_id: int, boss: str, map_name: str) -> list[dict]:
+        """Return the replay entries for (server, boss, map_name) in insertion
+        order — the shape `build_index_message` consumes (data-dictionary §2.10)."""
+
+    @abstractmethod
+    def upsert_replay_entry(self, discord_server_id: int, boss: str, map_name: str,
+                            entry: dict) -> None:
+        """Insert one replay entry. Raises `DuplicateReplayUrlError` when the
+        URL already exists for (server, boss, map_name) (ADR-006 D11)."""
+
+    @abstractmethod
+    def delete_replay_entry(self, discord_server_id: int, boss: str, map_name: str,
+                            url: str) -> bool:
+        """Delete the entry with matching URL. Return True if a row was removed,
+        False if no matching entry existed."""
+
+    @abstractmethod
+    def get_replay_thread(self, discord_server_id: int, boss: str, map_name: str) -> dict | None:
+        """Return `{"forum_channel_id", "thread_id", "index_message_id"}` for
+        the (server, boss, map_name) thread, or None if no such thread is
+        registered (ADR-006 D10)."""
+
+    @abstractmethod
+    def set_replay_thread_index_message(self, discord_server_id: int, boss: str,
+                                         map_name: str, index_message_id: int) -> None:
+        """Record the Discord message id of the forum-thread index message for
+        (server, boss, map_name) so subsequent renders edit it in place."""
+
+    @abstractmethod
+    def list_replay_threads(self, discord_server_id: int) -> dict:
+        """Return `{boss: {map_name: {"forum_channel_id", "thread_id"}}}` for
+        every registered (boss, map_name) — drives boss/map autocomplete."""
+
+
+class DuplicateReplayUrlError(Exception):
+    """Raised by `upsert_replay_entry` when (server, boss, map_name, url) is
+    already present (ADR-006 D11 per-tenant URL uniqueness). Carries the
+    (boss, map_name) so the cog can render the byte-for-byte duplicate reply."""
+    def __init__(self, boss: str, map_name: str, url: str):
+        self.boss = boss
+        self.map_name = map_name
+        self.url = url
+        super().__init__(f"Duplicate replay URL for {boss!r}/{map_name!r}: {url!r}")
+
 
 class JsonClusterRepository(ClusterRepository):
     def __init__(self, base_path: Path = Path("clusters")):
@@ -266,3 +318,76 @@ class JsonClusterRepository(ClusterRepository):
                          .setdefault(tier_key, []))
             try_insert(tier_list, bomb_entry, check_roster=False)
         self._write_json(path, {"boss_hits": boss_hits})
+
+    # --- ADR-007-pattern replay impls (04-03). The JSON impl reads/writes
+    # the existing `replay_index.json` at the project root (`self._base.parent`)
+    # so the rollback path stays real. Thread IDs are NOT in the JSON shape
+    # (they were hardcoded constants pre-cutover); the JSON impl returns None
+    # for forum_channel_id/thread_id — the SQLite impl returns replay_threads
+    # rows. This is an acceptable rollback degradation (ADR-006 D9).
+    def _replay_index_file(self) -> Path:
+        return self._base.parent / "replay_index.json"
+
+    def load_replay_entries(self, discord_server_id: int, boss: str, map_name: str) -> list[dict]:
+        data = self._read_json(self._replay_index_file())
+        return list(data.get(boss, {}).get(map_name, {}).get("entries", []))
+
+    def upsert_replay_entry(self, discord_server_id: int, boss: str, map_name: str,
+                            entry: dict) -> None:
+        path = self._replay_index_file()
+        data = self._read_json(path)
+        # Global duplicate-URL scan (pre-cutover semantics for rollback fidelity).
+        for b, maps in data.items():
+            for m, mdata in maps.items():
+                for existing in mdata.get("entries", []):
+                    if existing.get("url") == entry.get("url"):
+                        raise DuplicateReplayUrlError(b, m, entry["url"])
+        map_data = (data.setdefault(boss, {})
+                    .setdefault(map_name, {"index_message_id": None, "entries": []}))
+        map_data["entries"].append(entry)
+        self._write_json(path, data)
+
+    def delete_replay_entry(self, discord_server_id: int, boss: str, map_name: str,
+                            url: str) -> bool:
+        path = self._replay_index_file()
+        data = self._read_json(path)
+        map_data = data.get(boss, {}).get(map_name)
+        if not map_data:
+            return False
+        entries = map_data.get("entries", [])
+        for i, e in enumerate(entries):
+            if e.get("url") == url:
+                del entries[i]
+                self._write_json(path, data)
+                return True
+        return False
+
+    def get_replay_thread(self, discord_server_id: int, boss: str, map_name: str) -> dict | None:
+        data = self._read_json(self._replay_index_file())
+        map_data = data.get(boss, {}).get(map_name)
+        if map_data is None:
+            return None
+        return {
+            "forum_channel_id": None,
+            "thread_id": None,
+            "index_message_id": map_data.get("index_message_id"),
+        }
+
+    def set_replay_thread_index_message(self, discord_server_id: int, boss: str,
+                                         map_name: str, index_message_id: int) -> None:
+        path = self._replay_index_file()
+        data = self._read_json(path)
+        map_data = (data.setdefault(boss, {})
+                    .setdefault(map_name, {"index_message_id": None, "entries": []}))
+        map_data["index_message_id"] = index_message_id
+        self._write_json(path, data)
+
+    def list_replay_threads(self, discord_server_id: int) -> dict:
+        data = self._read_json(self._replay_index_file())
+        return {
+            boss: {
+                map_name: {"forum_channel_id": None, "thread_id": None}
+                for map_name in maps
+            }
+            for boss, maps in data.items()
+        }

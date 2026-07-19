@@ -304,3 +304,27 @@ CS1 is therefore escalated; CS2/CS4/CS5 are green (bomb render has no
 hero line; CS5 was switched to the bomb leaderboard because the
 `is_former` fixture player Jonas Klein carries a Bomb hit, not a Battle
 hit).
+
+## Step 04-03 — ADR-007-pattern replay ABC methods + replay_constants relocation
+
+The `ClusterRepository` ABC had no replay methods (replay was the global
+`replay_index.json` bypass). 04-03 added 6 ADR-007-pattern replay methods
+(`load_replay_entries`, `upsert_replay_entry`, `delete_replay_entry`,
+`get_replay_thread`, `set_replay_thread_index_message`,
+`list_replay_threads`) + a `DuplicateReplayUrlError` typed exception to
+the ABC, with JSON-backed impls on `JsonClusterRepository` (reads/writes
+the existing `replay_index.json` so the rollback path stays real) and
+SQLite impls on `SqlAlchemyClusterRepository` (per-tenant URL uniqueness
+on `(discord_server_id, boss, map_name, url)`). The cog now routes through
+`bot.guilds.repo` (the ABC), NOT `bot.db.*` directly (hexagonal boundary).
+
+The historical hardcoded `FORUM_CHANNELS` / `MAP_THREADS` constants that
+seeded `replay_threads` (03-03) were removed from `bot/cogs/replay_cog.py`
+(CS9) and inlined into `bot/db/migrations_json_to_sqlite.py` — the
+migration is the only remaining consumer (the cog reads thread IDs from
+`replay_threads` post-cutover). The migration test
+(`test_run_migration_seeds_replay_threads_from_forum_and_map_constants`)
+was updated to import the constants from the migration module instead of
+the cog. AP11 was broadened to grep all three retired modules
+(`bot/tracker.py`, `bot/embeds.py`, `bot/cogs/replay_cog.py`) for the
+JSON-write helper patterns.

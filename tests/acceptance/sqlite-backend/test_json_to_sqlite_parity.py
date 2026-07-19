@@ -514,7 +514,7 @@ def test_run_migration_seeds_replay_threads_from_forum_and_map_constants(tmp_pat
     from bot.db.migrations_json_to_sqlite import run_migration
     rc = run_migration(source=str(base), db=str(db), report=str(report))
     assert rc == 0
-    from bot.cogs.replay_cog import FORUM_CHANNELS, MAP_THREADS
+    from bot.db.migrations_json_to_sqlite import FORUM_CHANNELS, MAP_THREADS
     expected_count = sum(len(maps) for maps in MAP_THREADS.values())
     import sqlite3
     conn = sqlite3.connect(db)

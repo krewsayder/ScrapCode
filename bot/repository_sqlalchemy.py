@@ -32,12 +32,14 @@ from bot.db.models import (
     LiveLbMessageRow,
     PlayerRegistrationRow,
     PlayerRow,
+    ReplayEntryRow,
+    ReplayThreadRow,
     RoleTierRow,
 )
 from bot.db.secrets import api_key_hmac, decrypt_api_key, encrypt_api_key
 from bot.db.session import Database
 from bot.models import Cluster, Guild
-from bot.repository import ClusterRepository
+from bot.repository import ClusterRepository, DuplicateReplayUrlError
 from bot.tracker import TOP_N
 
 
@@ -521,6 +523,124 @@ class SqlAlchemyClusterRepository(ClusterRepository):
         if not mow:
             return None
         return mow.get("unitId") if isinstance(mow, dict) else None
+
+    # ------------------------------------------------------------------
+    # ADR-007-pattern replay impls (04-03). The per-tenant URL uniqueness
+    # (discord_server_id, boss, map_name, url) is enforced by the
+    # `uq_replay_entries_url_per_thread` constraint (models.py); the cog
+    # translates `DuplicateReplayUrlError` into the byte-for-byte duplicate
+    # reply (CS7). Thread IDs come from `replay_threads` (seeded in 03-03),
+    # closing the hardcoded-thread-ID leak (ADR-006 D10).
+    # ------------------------------------------------------------------
+
+    def load_replay_entries(self, discord_server_id: int, boss: str, map_name: str) -> list[dict]:
+        with self._db.session_scope() as session:
+            rows = session.execute(
+                select(ReplayEntryRow)
+                .where(
+                    ReplayEntryRow.discord_server_id == discord_server_id,
+                    ReplayEntryRow.boss == boss,
+                    ReplayEntryRow.map_name == map_name,
+                )
+                .order_by(ReplayEntryRow.id.asc())
+            ).scalars().all()
+            return [self._replay_entry_from_row(r) for r in rows]
+
+    def upsert_replay_entry(self, discord_server_id: int, boss: str, map_name: str,
+                            entry: dict) -> None:
+        with self._db.session_scope() as session:
+            existing = session.execute(
+                select(ReplayEntryRow).where(
+                    ReplayEntryRow.discord_server_id == discord_server_id,
+                    ReplayEntryRow.boss == boss,
+                    ReplayEntryRow.map_name == map_name,
+                    ReplayEntryRow.url == entry["url"],
+                )
+            ).first()
+            if existing is not None:
+                raise DuplicateReplayUrlError(boss, map_name, entry["url"])
+            session.add(ReplayEntryRow(
+                discord_server_id=discord_server_id,
+                boss=boss,
+                map_name=map_name,
+                team=entry["team"],
+                tier=entry["tier"],
+                position=entry.get("position", ""),
+                damage_text=entry["damage"],
+                url=entry["url"],
+                comment=entry.get("comment", ""),
+                submitted_by=entry["submitted_by"],
+                index_message_id=entry.get("index_message_id"),
+            ))
+
+    def delete_replay_entry(self, discord_server_id: int, boss: str, map_name: str,
+                            url: str) -> bool:
+        with self._db.session_scope() as session:
+            row = session.execute(
+                select(ReplayEntryRow).where(
+                    ReplayEntryRow.discord_server_id == discord_server_id,
+                    ReplayEntryRow.boss == boss,
+                    ReplayEntryRow.map_name == map_name,
+                    ReplayEntryRow.url == url,
+                )
+            ).scalars().first()
+            if row is None:
+                return False
+            session.delete(row)
+            return True
+
+    def get_replay_thread(self, discord_server_id: int, boss: str, map_name: str) -> dict | None:
+        with self._db.session_scope() as session:
+            row = session.get(ReplayThreadRow,
+                              (discord_server_id, boss, map_name))
+            if row is None:
+                return None
+            return {
+                "forum_channel_id": row.forum_channel_id,
+                "thread_id": row.thread_id,
+                "index_message_id": row.index_message_id,
+            }
+
+    def set_replay_thread_index_message(self, discord_server_id: int, boss: str,
+                                         map_name: str, index_message_id: int) -> None:
+        with self._db.session_scope() as session:
+            row = session.get(ReplayThreadRow,
+                              (discord_server_id, boss, map_name))
+            if row is None:
+                session.add(ReplayThreadRow(
+                    discord_server_id=discord_server_id,
+                    boss=boss,
+                    map_name=map_name,
+                    index_message_id=index_message_id,
+                ))
+            else:
+                row.index_message_id = index_message_id
+
+    def list_replay_threads(self, discord_server_id: int) -> dict:
+        with self._db.session_scope() as session:
+            rows = session.execute(
+                select(ReplayThreadRow).where(
+                    ReplayThreadRow.discord_server_id == discord_server_id
+                )
+            ).scalars().all()
+            result: dict[str, dict] = {}
+            for row in rows:
+                result.setdefault(row.boss, {})[row.map_name] = {
+                    "forum_channel_id": row.forum_channel_id,
+                    "thread_id": row.thread_id,
+                }
+            return result
+
+    def _replay_entry_from_row(self, row) -> dict:
+        return {
+            "team": row.team,
+            "tier": row.tier,
+            "position": row.position or "",
+            "damage": row.damage_text,
+            "url": row.url,
+            "comment": row.comment or "",
+            "submitted_by": row.submitted_by,
+        }
 
     # ------------------------------------------------------------------
     # ADR-006 D8: startup probe (Earned Trust). Delegates to Database.probe.

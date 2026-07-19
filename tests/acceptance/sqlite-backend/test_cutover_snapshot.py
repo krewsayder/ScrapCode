@@ -185,13 +185,37 @@ def test_bomb_leaderboard_render_byte_identical_pre_post_cutover(
     assert json_render == sqlite_render
 
 
-@RED
-def test_replay_index_render_byte_identical_pre_post_cutover(json_repo, sqlite_repo):
-    """@kpi @real-io — CS3."""
-    # RED scaffold: replay rendering goes through replay_cog helpers that
-    # still read replay_index.json pre-cutover; post-cutover reads
-    # replay_entries via the repo.
-    raise AssertionError("RED scaffold: replay render parity not implemented")
+def test_replay_index_render_byte_identical_pre_post_cutover(json_repo, sqlite_repo, env_vars):
+    """@kpi @real-io — CS3.
+
+    Pre-cutover: entries are read from `replay_index.json` via
+    `JsonClusterRepository.load_replay_entries`. Post-cutover: entries are
+    read from `replay_entries` via `SqlAlchemyClusterRepository.load_replay_entries`.
+    The `build_index_message` renderer is a pure function shared by both
+    paths, so byte-identical output proves the SQLite read preserves the
+    JSON entry shape (data-dictionary §2.10) the renderer consumes.
+    """
+    from bot.cogs.replay_cog import build_index_message
+    server, boss, map_name = 1458181638453203099, "Avatar", "GB_Khaine_01"
+    # Seed the replay_threads row (FK target) + the SQLite side with the same
+    # entry the JSON fixture carries, via the production write path (repo
+    # upsert). This is a PRECONDITION (input data), not the expected
+    # end-state — the byte-identical render is computed by production
+    # `build_index_message`.
+    _seed_replay_thread(env_vars["SCRAPCODE_DB_PATH"], server, boss, map_name,
+                        forum_channel_id=1481592080940925062,
+                        thread_id=1481592319894618304)
+    sqlite_repo.upsert_replay_entry(server, boss, map_name, {
+        "team": "Neuro", "tier": "Legendary 1", "position": "LHS",
+        "damage": "1.33M", "url": "https://replay.example/abc",
+        "comment": "", "submitted_by": "123456789",
+    })
+    json_entries   = json_repo.load_replay_entries(server, boss, map_name)
+    sqlite_entries = sqlite_repo.load_replay_entries(server, boss, map_name)
+    json_render   = build_index_message(json_entries)
+    sqlite_render = build_index_message(sqlite_entries)
+    assert json_render == sqlite_render
+    assert json_render, "render must be non-empty for a populated entry"
 
 
 def test_empty_leaderboard_renders_same_no_entries_message(json_repo, sqlite_repo, legendary_0_choice):
@@ -216,28 +240,428 @@ def test_player_marked_is_former_renders_same_suffix(json_repo, sqlite_repo, leg
     assert json_render == sqlite_render
 
 
-@RED
-def test_upload_replay_writes_replay_entries_row_not_json(sqlite_repo, tmp_path):
-    """@driving_port @real-io — CS6."""
-    # RED scaffold: drive replay_cog.upload_replay through the repo. The
-    # scaffold cannot run the cog; the crafter implements a thin driving
-    # harness via the repo + a synthetic Interaction.
-    raise AssertionError("RED scaffold: upload_replay rewire not implemented")
+@pytest.mark.asyncio
+async def test_upload_replay_writes_replay_entries_row_not_json(sqlite_repo, env_vars, tmp_path, monkeypatch):
+    """@driving_port @real-io — CS6.
+
+    Drives `ReplayCog.upload_replay` through a synthetic Discord Interaction
+    + fake bot. The cog routes through `bot.guilds.repo` (monkeypatched to the
+    SQLite repo). Asserts a `replay_entries` row exists with
+    `discord_server_id=1458181638453203099` and that NO `replay_index.json` is
+    written (the retired JSON write path is gone — CS9 greps the cog source).
+    """
+    import bot.guilds as guilds_mod
+    import bot.cogs.replay_cog as replay_mod
+    from bot.cogs.replay_cog import ReplayCog
+    from bot.repository_sqlalchemy import SqlAlchemyClusterRepository
+
+    server, boss, map_name = 1458181638453203099, "Avatar", "GB_Khaine_01"
+    _seed_replay_thread(env_vars["SCRAPCODE_DB_PATH"], server, boss, map_name,
+                        forum_channel_id=1481592080940925062,
+                        thread_id=1481592319894618304)
+
+    # The conftest `tmp_clusters_tree` fixture writes a pre-existing
+    # `replay_index.json` at tmp_path as INPUT data (the pre-cutover state).
+    # Capture its content + mtime BEFORE the cog runs; upload_replay must NOT
+    # touch it (the retired JSON write path is gone post-04-03).
+    json_index_path = tmp_path / "replay_index.json"
+    json_before = json_index_path.read_text(encoding="utf-8") if json_index_path.exists() else ""
+    json_mtime_before = json_index_path.stat().st_mtime_ns if json_index_path.exists() else 0
+
+    original_repo = guilds_mod.repo
+    monkeypatch.setattr(guilds_mod, "repo", sqlite_repo)
+    try:
+        cog = ReplayCog(_FakeBot())
+        interaction = _FakeInteraction(guild_id=server, user_id=123456789)
+        await cog.upload_replay.callback(
+            cog, interaction, boss=boss, map_name=map_name,
+            team=_FakeChoice("Neuro", "Neuro"),
+            tier=_FakeChoice("Legendary 1", "Legendary 1"),
+            damage="1.33M", url="https://replay.example/new",
+            position=_FakeChoice("LHS", "LHS"), comment=None,
+        )
+    finally:
+        guilds_mod.repo = original_repo
+
+    # A replay_entries row was inserted with the prod server id.
+    rows = _replay_entries_rows(env_vars["SCRAPCODE_DB_PATH"], server, boss, map_name)
+    assert any(r["url"] == "https://replay.example/new" for r in rows), \
+        "upload_replay did not insert a replay_entries row"
+    assert rows[-1]["discord_server_id"] == server, "row assigned to wrong server"
+    # The pre-existing replay_index.json is UNCHANGED — upload_replay wrote to
+    # replay_entries, not the retired JSON file.
+    json_after = json_index_path.read_text(encoding="utf-8") if json_index_path.exists() else ""
+    json_mtime_after = json_index_path.stat().st_mtime_ns if json_index_path.exists() else 0
+    assert json_after == json_before, "replay_index.json content was modified by upload_replay"
+    assert json_mtime_after == json_mtime_before, \
+        "replay_index.json mtime was modified by upload_replay"
+    # The success reply was sent.
+    assert any("Replay submitted" in m for m in interaction.followup_messages), \
+        interaction.followup_messages
 
 
-@RED
-def test_duplicate_upload_url_in_same_server_boss_map_rejected(sqlite_repo):
-    """@infrastructure-failure — CS7."""
-    raise AssertionError("RED scaffold: duplicate-URL rejection not implemented")
+@pytest.mark.asyncio
+async def test_duplicate_upload_url_in_same_server_boss_map_rejected(sqlite_repo, env_vars, monkeypatch):
+    """@infrastructure-failure — CS7.
+
+    A duplicate URL in the same (server, boss, map_name) is rejected with the
+    byte-for-byte existing duplicate-URL reply. No new row is inserted.
+    """
+    import bot.guilds as guilds_mod
+    from bot.cogs.replay_cog import ReplayCog
+
+    server, boss, map_name = 1458181638453203099, "Avatar", "GB_Khaine_01"
+    _seed_replay_thread(env_vars["SCRAPCODE_DB_PATH"], server, boss, map_name,
+                        forum_channel_id=1481592080940925062,
+                        thread_id=1481592319894618304)
+    # Pre-existing entry the duplicate collides with.
+    sqlite_repo.upsert_replay_entry(server, boss, map_name, {
+        "team": "Neuro", "tier": "Legendary 1", "position": "LHS",
+        "damage": "1.33M", "url": "https://replay.example/abc",
+        "comment": "", "submitted_by": "123456789",
+    })
+
+    original_repo = guilds_mod.repo
+    monkeypatch.setattr(guilds_mod, "repo", sqlite_repo)
+    try:
+        cog = ReplayCog(_FakeBot())
+        interaction = _FakeInteraction(guild_id=server, user_id=123456789)
+        await cog.upload_replay.callback(
+            cog, interaction, boss=boss, map_name=map_name,
+            team=_FakeChoice("Neuro", "Neuro"),
+            tier=_FakeChoice("Legendary 1", "Legendary 1"),
+            damage="2.0M", url="https://replay.example/abc",
+            position=None, comment=None,
+        )
+    finally:
+        guilds_mod.repo = original_repo
+
+    # Byte-for-byte the existing duplicate-URL reply.
+    expected = "❌ This replay URL has already been submitted under **Avatar / GB_Khaine_01**."
+    assert expected in interaction.followup_messages, interaction.followup_messages
+    # No new row inserted — exactly one row for that URL.
+    rows = [r for r in _replay_entries_rows(env_vars["SCRAPCODE_DB_PATH"], server, boss, map_name)
+            if r["url"] == "https://replay.example/abc"]
+    assert len(rows) == 1, f"duplicate insert leaked a second row: {rows}"
 
 
-@RED
-def test_delete_replay_removes_row_and_re_renders(sqlite_repo):
-    """@driving_port — CS8."""
-    raise AssertionError("RED scaffold: delete_replay rewire not implemented")
+@pytest.mark.asyncio
+async def test_delete_replay_removes_row_and_re_renders(sqlite_repo, env_vars, monkeypatch):
+    """@driving_port — CS8.
+
+    `/delete_replay` removes the `replay_entries` row and re-renders the index
+    message with the remaining entries (the cog calls `load_replay_entries` +
+    `_edit_index_message` after the delete).
+    """
+    import bot.guilds as guilds_mod
+    from bot.cogs.replay_cog import ReplayCog
+
+    server, boss, map_name = 1458181638453203099, "Avatar", "GB_Khaine_01"
+    _seed_replay_thread(env_vars["SCRAPCODE_DB_PATH"], server, boss, map_name,
+                        forum_channel_id=1481592080940925062,
+                        thread_id=1481592319894618304,
+                        index_message_id=999999)
+    sqlite_repo.upsert_replay_entry(server, boss, map_name, {
+        "team": "Neuro", "tier": "Legendary 1", "position": "LHS",
+        "damage": "1.33M", "url": "https://replay.example/del",
+        "comment": "", "submitted_by": "123456789",
+    })
+    sqlite_repo.upsert_replay_entry(server, boss, map_name, {
+        "team": "Mech", "tier": "Legendary 1", "position": "RHS",
+        "damage": "2.0M", "url": "https://replay.example/keep",
+        "comment": "", "submitted_by": "999",
+    })
+
+    fake_bot = _FakeBot(thread_id=1481592319894618304, index_message_id=999999)
+    original_repo = guilds_mod.repo
+    monkeypatch.setattr(guilds_mod, "repo", sqlite_repo)
+    try:
+        cog = ReplayCog(fake_bot)
+        interaction = _FakeInteraction(guild_id=server, user_id=123456789)
+        await cog.delete_replay.callback(
+            cog, interaction, boss=boss, map_name=map_name, url="https://replay.example/del",
+        )
+    finally:
+        guilds_mod.repo = original_repo
+
+    rows = _replay_entries_rows(env_vars["SCRAPCODE_DB_PATH"], server, boss, map_name)
+    assert all(r["url"] != "https://replay.example/del" for r in rows), \
+        "delete_replay did not remove the row"
+    assert any(r["url"] == "https://replay.example/keep" for r in rows), \
+        "delete_replay removed the wrong row"
+    # The index message was re-rendered with the remaining entry.
+    assert any("replay.example/keep" in c for c in fake_bot.edited_contents), \
+        fake_bot.edited_contents
+    assert any("Replay removed" in m for m in interaction.followup_messages), \
+        interaction.followup_messages
 
 
-@RED
+# ---------------------------------------------------------------------------
+# Fake Discord harness for driving ReplayCog without a Discord client.
+# The cog only touches a small surface: interaction.response.defer,
+# interaction.followup.send, interaction.guild_id, interaction.user.id,
+# bot.get_channel/fetch_channel, forum.get_thread/archived_threads,
+# thread.send/fetch_message, message.edit. The fakes record observable
+# outcomes (followup messages, edited message contents) for assertions.
+# ---------------------------------------------------------------------------
+
+class _FakeChoice:
+    def __init__(self, value, name):
+        self.value = value
+        self.name = name
+
+
+class _FakeMessage:
+    def __init__(self, msg_id, bot):
+        self.id = msg_id
+        self.bot = bot
+
+    async def edit(self, content):
+        self.bot.edited_contents.append(content)
+
+
+class _FakeThread:
+    def __init__(self, thread_id, bot, index_message_id=None):
+        self.id = thread_id
+        self.bot = bot
+        self._next_id = 1000000
+        if index_message_id is not None:
+            self._messages = {index_message_id: _FakeMessage(index_message_id, bot)}
+        else:
+            self._messages = {}
+
+    async def send(self, content):
+        msg_id = self._next_id
+        self._next_id += 1
+        msg = _FakeMessage(msg_id, self.bot)
+        self._messages[msg_id] = msg
+        return msg
+
+    async def fetch_message(self, msg_id):
+        if msg_id in self._messages:
+            return self._messages[msg_id]
+        msg = _FakeMessage(msg_id, self.bot)
+        self._messages[msg_id] = msg
+        return msg
+
+
+class _FakeForum:
+    def __init__(self, thread):
+        self._thread = thread
+
+    def get_thread(self, thread_id):
+        return self._thread if self._thread.id == thread_id else None
+
+    async def archived_threads(self):
+        if False:
+            yield  # pragma: no cover — empty async generator
+
+
+class _FakeBot:
+    """Minimal bot that serves a single fake forum/thread for a thread id and
+    records edited index-message contents for assertions."""
+    def __init__(self, thread_id=1481592319894618304, index_message_id=None):
+        self.edited_contents = []
+        self._thread = _FakeThread(thread_id, self, index_message_id)
+        self._forum = _FakeForum(self._thread)
+
+    def get_channel(self, channel_id):
+        return self._forum
+
+    async def fetch_channel(self, channel_id):
+        return self._forum
+
+
+class _FakeResponse:
+    async def defer(self, ephemeral=False):
+        pass
+
+
+class _FakeFollowup:
+    def __init__(self):
+        self.messages = []
+
+    def send(self, content, ephemeral=False):
+        self.messages.append(content)
+        # The cog does not await followup.send's return; return a trivial awaitable.
+        class _Done:
+            def __await__(self_inner):
+                return iter([])
+        return _Done()
+
+
+class _FakeUser:
+    def __init__(self, user_id):
+        self.id = user_id
+
+
+class _FakeInteraction:
+    def __init__(self, guild_id, user_id):
+        self.guild_id = guild_id
+        self.user = _FakeUser(user_id)
+        self.response = _FakeResponse()
+        self.followup = _FakeFollowup()
+        # The cog's autocomplete reads interaction.namespace.boss; the commands
+        # themselves do not touch namespace.
+        class _Ns:
+            boss = None
+        self.namespace = _Ns()
+
+    @property
+    def followup_messages(self):
+        return self.followup.messages
+
+
+def _seed_replay_thread(db_path, server, boss, map_name, *, forum_channel_id,
+                       thread_id, index_message_id=None):
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT OR REPLACE INTO replay_threads "
+        "(discord_server_id, boss, map_name, forum_channel_id, thread_id, "
+        "index_message_id) VALUES (?, ?, ?, ?, ?, ?)",
+        (server, boss, map_name, forum_channel_id, thread_id, index_message_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _replay_entries_rows(db_path, server, boss, map_name):
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT discord_server_id, boss, map_name, url, submitted_by "
+        "FROM replay_entries WHERE discord_server_id=? AND boss=? AND map_name=?",
+        (server, boss, map_name),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Unit tests (RED_UNIT) — per-tenant upload/get/delete delegation + the
+# replay_threads thread-ID lookup. Driving port = the ClusterRepository ABC
+# replay methods. Behavior budget: 4 behaviors (per-tenant insert, per-tenant
+# duplicate rejection, per-tenant delete, thread-ID lookup from
+# replay_threads) x 2 = max 8 unit tests.
+# ---------------------------------------------------------------------------
+
+def test_upsert_replay_entry_writes_per_tenant_row_load_replay_entries_reads_it(sqlite_repo, env_vars):
+    """@driving_port @real-io — per-tenant insert + read delegation."""
+    server, boss, map_name = 1458181638453203099, "Avatar", "GB_Khaine_01"
+    _seed_replay_thread(env_vars["SCRAPCODE_DB_PATH"], server, boss, map_name,
+                        forum_channel_id=1481592080940925062,
+                        thread_id=1481592319894618304)
+    sqlite_repo.upsert_replay_entry(server, boss, map_name, {
+        "team": "Neuro", "tier": "Legendary 1", "position": "LHS",
+        "damage": "1.33M", "url": "https://replay.example/u1",
+        "comment": "c", "submitted_by": "123456789",
+    })
+    entries = sqlite_repo.load_replay_entries(server, boss, map_name)
+    assert len(entries) == 1
+    assert entries[0]["url"] == "https://replay.example/u1"
+    assert entries[0]["team"] == "Neuro"
+
+
+def test_upsert_replay_entry_rejects_duplicate_url_per_server_boss_map(sqlite_repo, env_vars):
+    """@driving_port @infrastructure-failure — per-tenant duplicate rejection."""
+    import pytest
+    from bot.repository import DuplicateReplayUrlError
+    server, boss, map_name = 1458181638453203099, "Avatar", "GB_Khaine_01"
+    _seed_replay_thread(env_vars["SCRAPCODE_DB_PATH"], server, boss, map_name,
+                        forum_channel_id=1481592080940925062,
+                        thread_id=1481592319894618304)
+    entry = {"team": "Neuro", "tier": "Legendary 1", "position": "LHS",
+             "damage": "1.33M", "url": "https://replay.example/dup",
+             "comment": "", "submitted_by": "1"}
+    sqlite_repo.upsert_replay_entry(server, boss, map_name, entry)
+    with pytest.raises(DuplicateReplayUrlError) as exc:
+        sqlite_repo.upsert_replay_entry(server, boss, map_name, entry)
+    assert exc.value.boss == boss and exc.value.map_name == map_name
+
+
+def test_upsert_replay_entry_same_url_different_tenant_is_allowed(sqlite_repo, env_vars):
+    """@driving_port @real-io — per-tenant scoping: the same URL under a
+    different (server, boss, map) does NOT collide (ADR-006 D11 / ADR-004 §3)."""
+    server, boss, map_name = 1458181638453203099, "Avatar", "GB_Khaine_01"
+    _seed_replay_thread(env_vars["SCRAPCODE_DB_PATH"], server, boss, map_name,
+                        forum_channel_id=1481592080940925062,
+                        thread_id=1481592319894618304)
+    other_server = 9876543210
+    _seed_replay_thread(env_vars["SCRAPCODE_DB_PATH"], other_server, boss, map_name,
+                        forum_channel_id=1481592080940925062,
+                        thread_id=1481592319894618304)
+    entry = {"team": "Neuro", "tier": "Legendary 1", "position": "LHS",
+             "damage": "1.33M", "url": "https://replay.example/shared",
+             "comment": "", "submitted_by": "1"}
+    sqlite_repo.upsert_replay_entry(server, boss, map_name, entry)
+    # Same URL under a different tenant must succeed (no global collision).
+    sqlite_repo.upsert_replay_entry(other_server, boss, map_name, entry)
+    assert len(sqlite_repo.load_replay_entries(server, boss, map_name)) == 1
+    assert len(sqlite_repo.load_replay_entries(other_server, boss, map_name)) == 1
+
+
+def test_delete_replay_entry_removes_only_matching_url(sqlite_repo, env_vars):
+    """@driving_port — delete delegation removes the matching URL and no other."""
+    server, boss, map_name = 1458181638453203099, "Avatar", "GB_Khaine_01"
+    _seed_replay_thread(env_vars["SCRAPCODE_DB_PATH"], server, boss, map_name,
+                        forum_channel_id=1481592080940925062,
+                        thread_id=1481592319894618304)
+    for url in ("https://replay.example/a", "https://replay.example/b"):
+        sqlite_repo.upsert_replay_entry(server, boss, map_name, {
+            "team": "Neuro", "tier": "Legendary 1", "position": "", "damage": "1M",
+            "url": url, "comment": "", "submitted_by": "1",
+        })
+    assert sqlite_repo.delete_replay_entry(server, boss, map_name, "https://replay.example/a") is True
+    remaining = sqlite_repo.load_replay_entries(server, boss, map_name)
+    assert [e["url"] for e in remaining] == ["https://replay.example/b"]
+    assert sqlite_repo.delete_replay_entry(server, boss, map_name, "https://replay.example/missing") is False
+
+
+def test_get_replay_thread_returns_thread_id_from_replay_threads_table(sqlite_repo, env_vars):
+    """@driving_port @real-io — thread-ID lookup is sourced from
+    `replay_threads` (ADR-006 D10), not hardcoded constants."""
+    server, boss, map_name = 1458181638453203099, "Avatar", "GB_Khaine_01"
+    _seed_replay_thread(env_vars["SCRAPCODE_DB_PATH"], server, boss, map_name,
+                        forum_channel_id=1481592080940925062,
+                        thread_id=1481592319894618304,
+                        index_message_id=999999)
+    info = sqlite_repo.get_replay_thread(server, boss, map_name)
+    assert info is not None
+    assert info["thread_id"] == 1481592319894618304
+    assert info["forum_channel_id"] == 1481592080940925062
+    assert info["index_message_id"] == 999999
+    # Unknown (boss, map) returns None.
+    assert sqlite_repo.get_replay_thread(server, "Unknown", "nope") is None
+
+
+def test_list_replay_threads_drives_autocomplete_from_replay_threads(sqlite_repo, env_vars):
+    """@driving_port — `list_replay_threads` returns the {boss: {map_name}}
+    tree the cog's boss/map autocomplete filters."""
+    server = 1458181638453203099
+    _seed_replay_thread(env_vars["SCRAPCODE_DB_PATH"], server, "Avatar", "GB_Khaine_01",
+                        forum_channel_id=1481592080940925062, thread_id=1481592319894618304)
+    _seed_replay_thread(env_vars["SCRAPCODE_DB_PATH"], server, "Avatar", "GB_Khaine_02",
+                        forum_channel_id=1481592080940925062, thread_id=1481592399720611840)
+    _seed_replay_thread(env_vars["SCRAPCODE_DB_PATH"], server, "Cawl", "GB_Belisarius_01",
+                        forum_channel_id=1481592218891456583, thread_id=1481596799201317006)
+    tree = sqlite_repo.list_replay_threads(server)
+    assert set(tree["Avatar"]) == {"GB_Khaine_01", "GB_Khaine_02"}
+    assert "GB_Belisarius_01" in tree["Cawl"]
+
+
+def test_set_replay_thread_index_message_persists_index_message_id(sqlite_repo, env_vars):
+    """@driving_port — recording the index message id survives a fresh read
+    (the cog calls this after the first `thread.send`)."""
+    server, boss, map_name = 1458181638453203099, "Avatar", "GB_Khaine_01"
+    _seed_replay_thread(env_vars["SCRAPCODE_DB_PATH"], server, boss, map_name,
+                        forum_channel_id=1481592080940925062,
+                        thread_id=1481592319894618304)
+    sqlite_repo.set_replay_thread_index_message(server, boss, map_name, 42424242)
+    assert sqlite_repo.get_replay_thread(server, boss, map_name)["index_message_id"] == 42424242
+
+
 def test_replay_cog_helpers_and_forum_constants_removed():
     """@kpi — CS9."""
     replay_cog = Path(__import__("bot.cogs.replay_cog", fromlist=["x"]).__file__)
