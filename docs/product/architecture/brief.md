@@ -43,7 +43,13 @@ A single running bot process serves multiple Discord servers; each Discord serve
 Tech stack: Python, `discord.py` (app-commands / slash), `httpx` (async Tacticus
 calls), `requests` (sync Chronicler calls, wrapped in `asyncio.to_thread`),
 `python-dotenv`. Storage is flat JSON files on local disk; logging to a local
-`discord.log` file. See [ADR-002](adr-002-storage-backend-json-legacy.md).
+`discord.log` file. See [ADR-002](adr-002-storage-backend-json-legacy.md). For a
+concise library reference with links to each library's official docs, see the
+[library reference index](overview.md#library-reference-index) in the overview.
+
+> **Doc index:** [overview.md](overview.md) is the one-page entry point and
+> summary. Detailed data reference: [data-dictionary.md](data-dictionary.md).
+> Diagrams: [c4-diagrams.md](c4-diagrams.md).
 
 ---
 
@@ -56,7 +62,9 @@ calls), `requests` (sync Chronicler calls, wrapped in `asyncio.to_thread`),
 1. `load_dotenv()`; read `DISCORD_TOKEN` from env.
 2. Configure logging: a `FileHandler` writing `discord.log` (append, utf-8).
 3. `discord.Intents.default()` (no privileged intents — confirmed by README and
-   `intents` setup). `commands.Bot(command_prefix="!", intents=..., help_command=None)`.
+   `intents` setup). `commands.Bot(command_prefix="!", intents=..., help_command=None)`
+   ([`discord.Bot`](https://docs.pycord.dev/en/stable/api/api.html#discord.Bot) ·
+   [`Intents`](https://docs.pycord.dev/en/stable/api/intents.html)).
 4. Create a single process-wide `asyncio.Lock` named `file_lock` (see
    [§4 Atomicity](#4-data-layout--storage-_closes-gap-1)).
 5. `main()` async context: `async with bot:` → `discord.utils.setup_logging` →
@@ -71,7 +79,9 @@ calls), `requests` (sync Chronicler calls, wrapped in `asyncio.to_thread`),
 
 ### 2.2 Cogs
 
-All cogs live in `bot/cogs/{name}_cog.py`. Each module exports an async
+All cogs live in `bot/cogs/{name}_cog.py`. A "cog" is a
+[`discord.ext.commands.Cog`](https://docs.pycord.dev/en/stable/ext/commands/cogs.html)
+subclass grouping related slash commands; each module exports an async
 `setup_{name}(bot, ...)` that calls `bot.add_cog(...)`. `main.py` imports and
 invokes them in this exact order:
 
@@ -96,17 +106,21 @@ constructed inside the cog from the shared module-level singletons (`repo` in
 `TasksCog.__init__` starts two `discord.ext.tasks` loops and cancels them in
 `cog_unload`:
 
-- **`cap_detect`** — `@tasks.loop(hours=1)`, `before_loop` awaits `bot.wait_until_ready()`.
+- **`cap_detect`** — `@tasks.loop(hours=1)`, `before_loop` awaits `bot.wait_until_ready()`
+  ([`discord.ext.tasks.loop`](https://docs.pycord.dev/en/stable/ext/tasks/loop.html)).
   Iterates **every** server (`repo.list_server_ids()`); for each, loads that
   server's registrations + capped_state + guilds, resolves notification channels,
   fetches each player's Tacticus `/api/v1/player` **in parallel** via
-  `asyncio.gather`, and pings a player in their guild's notification channel when
+  [`asyncio.gather`](https://docs.python.org/3/library/asyncio-task.html#asyncio.gather),
+  and pings a player in their guild's notification channel when
   `tokens.current >= tokens.max` and they were not already marked capped. Persists
   `capped_state` only when it changed.
 
 - **`auto_update`** — `@tasks.loop(hours=1)`, `before_loop` awaits
-  `bot.wait_until_ready()`. Iterates every server; determines the current season
-  from one guild's Tacticus `/api/v1/guildRaid` (current) call; then for each guild
+  `bot.wait_until_ready()`
+  ([`discord.ext.tasks.loop`](https://docs.pycord.dev/en/stable/ext/tasks/loop.html)).
+  Iterates every server; determines the current season from one guild's Tacticus
+  `/api/v1/guildRaid` (current) call; then for each guild
   calls `player_service.validate_if_stale` (Chronicler roster refresh if stale),
   fetches `/api/v1/guildRaid/{season}`, and under `file_lock` runs
   `bot.tracker.process_api_response` to merge hits/bombs into the per-guild
@@ -140,8 +154,8 @@ processed. Per live config (`guild:{guild_id}` or `cluster`):
 Two external systems are called today. The doctrine governing which is used for
 what is pinned in [ADR-003](adr-003-chronicler-first-data-doctrine.md).
 
-**Tacticus-direct** (`api.tacticusgame.com`, `httpx.AsyncClient`, `X-API-KEY`
-header = a per-guild or per-player API key):
+**Tacticus-direct** (`api.tacticusgame.com`, [`httpx.AsyncClient`](https://www.python-httpx.org/async/),
+`X-API-KEY` header = a per-guild or per-player API key):
 
 | Endpoint | Used by | Purpose |
 |----------|--------|---------|
@@ -150,8 +164,10 @@ header = a per-guild or per-player API key):
 | `GET /api/v1/guildRaid` (current) | `auto_update`, `set_live_leaderboard`, `set_live_cluster_leaderboard` | Discover the current season number |
 | `GET /api/v1/guildRaid/{season}` | `auto_update`, `update_leaderboard`, `update_all` | Per-season raid entries (hits + bombs) fed to `process_api_response` |
 
-**Chronicler** (`www.chronicl3r.com`, sync `requests`, wrapped with
-`asyncio.to_thread`; token auth via `CHRONICL3R_APP_USERNAME/PASSWORD`):
+**Chronicler** (`www.chronicl3r.com`, sync [`requests`](https://requests.readthedocs.io/)
+wrapped with [`asyncio.to_thread`](https://docs.python.org/3/library/asyncio-task.html#asyncio.to_thread)
+to keep the event loop unblocked; token auth via
+`CHRONICL3R_APP_USERNAME/PASSWORD`):
 
 | Endpoint | Method | Used by | Purpose |
 |----------|--------|---------|---------|
@@ -551,12 +567,17 @@ supersede. See [ADR-002](adr-002-storage-backend-json-legacy.md).
 
 ### 5.3 How permission checks are invoked
 
-Two equivalent forms, both routing through `bot/permissions.py` (ADR-001/ADR-005):
+Two equivalent forms, both routing through `bot/permissions.py` (ADR-001/ADR-005).
+The decorators wrap the predicates in
+[`app_commands.check`](https://docs.pycord.dev/en/stable/api/app_commands.html);
+a failed check raises
+[`app_commands.CheckFailure`](https://docs.pycord.dev/en/stable/api/app_commands.html#discord.app_commands.CheckFailure),
+which `main.py`'s `on_app_command_error` handler converts into the standard
+ephemeral "You don't have permission" reply:
 
 - **Decorator (preferred for hard gates):**
   `@require_tier("admin")` or `@require_tier("officer")` or
-  `@require_guild_member()`. On failure, `main.py`'s `on_app_command_error`
-  handler replies with the standard "You don't have permission" ephemeral.
+  `@require_guild_member()`.
 - **Inline (used when the command needs a custom denial or a conditional gate):**
   `if not await check_tier(interaction, "officer"): <custom ephemeral reply>`.
   Used by e.g. `view_config`, `registration move`, `scrapcode_help`, and the

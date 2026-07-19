@@ -75,7 +75,7 @@ assumptions future waves inherit.
 
 | Gap | Status | Where |
 |-----|--------|-------|
-| 1 — data layout | **Closed** | brief §4; ADR-002 |
+| 1 — data layout | **Closed** | brief §4; data-dictionary.md; ADR-002 |
 | 2 — runtime model | **Closed** | brief §2 (incl. §2.5 external calls, §2.6 deployment) |
 | 3 — multi-tenancy | **Closed** | brief §3; ADR-004 |
 | 4 — Chronicler API contract | **Deferred** | brief §7 (gates integration roadmap; own kickoff brief) |
@@ -87,13 +87,16 @@ assumptions future waves inherit.
 
 ```
 docs/product/architecture/
-  brief.md                                  # SSOT — Gaps 1,2,3,5 + deployment + drift
-  c4-diagrams.md                            # C4 context, container, TasksCog component (Mermaid)
+  overview.md                                # summary + doc index + library reference + gap status
+  brief.md                                   # SSOT — Gaps 1,2,3,5 + deployment + drift
+  data-dictionary.md                         # per-entity fields, erDiagram, migration mapping
+  c4-diagrams.md                             # context / container / TasksCog (plain Mermaid flowcharts)
   adr-001-permission-checks-single-source.md
   adr-002-storage-backend-json-legacy.md
   adr-003-chronicler-first-data-doctrine.md
   adr-004-multi-tenancy-isolation.md
   adr-005-permission-model-tiers-bypass.md
 docs/feature/scrapcode-architecture-baseline/design/
-  wave-decisions.md                         # this file
+  wave-decisions.md                          # this file
+README.md                                    # repo-root pointer to the architecture docs
 ```
