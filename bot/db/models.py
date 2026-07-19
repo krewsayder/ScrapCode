@@ -35,6 +35,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Integer,
+    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -158,6 +159,13 @@ class BattleHitRow(Base):
     hero_roster_key: Mapped[str] = mapped_column(String(255), nullable=False)
     mow_unit_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     encounter_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Display-only JSON column: the list of {"unitId": "..."} hero dicts from
+    # the API entry's `heroDetails`. NOT part of the dedup unique constraint
+    # (dedup uses `hero_roster_key`); stored only so `load_battle_hits` can
+    # return the data-dictionary §2.7 shape `embeds.build_battle_messages`
+    # renders (`_build_hero_display`). ADR-007 §1: the load shape must match
+    # the JSON impl byte-for-byte (KPI-4 / CS1).
+    hero_details: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     __table_args__ = (
         ForeignKeyConstraint(

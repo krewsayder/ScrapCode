@@ -4,12 +4,11 @@ from discord.ext import commands
 
 from config import TIER_CHOICES
 from bot.permissions import require_tier
-from bot.guilds import load_guilds, get_guild_data_path, get_player_list
+from bot.guilds import load_guilds, get_player_list, repo
 from bot.embeds import (
     build_battle_messages,
     build_bomb_messages,
     build_cluster_messages,
-    load_leaderboard_file,
     guild_autocomplete,
 )
 
@@ -51,11 +50,7 @@ class ViewCog(commands.Cog):
             return
 
         guild_name = guild_data["name"]
-        data_dir   = get_guild_data_path(server_id, guild_id)
-        data, err  = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
-        if err:
-            await interaction.followup.send(f"❌ {err}")
-            return
+        data = repo.load_battle_hits(server_id, guild_id, season)
 
         messages = build_battle_messages(data, season, tier, server_id, guild_id, guild_name)
         if not messages:
@@ -101,11 +96,7 @@ class ViewCog(commands.Cog):
             return
 
         guild_name = guild_data["name"]
-        data_dir   = get_guild_data_path(server_id, guild_id)
-        data, err  = load_leaderboard_file(data_dir / f"highest_bombs_season_{season}.json")
-        if err:
-            await interaction.followup.send(f"❌ {err}")
-            return
+        data = repo.load_bomb_hits(server_id, guild_id, season)
 
         messages = build_bomb_messages(data, season, tier, server_id, guild_id, guild_name)
         if not messages:
@@ -150,9 +141,8 @@ class ViewCog(commands.Cog):
         merged   = {}
 
         for guild_id, guild_data in guilds.items():
-            data_dir  = get_guild_data_path(server_id, guild_id)
-            data, err = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
-            if err or not data:
+            data = repo.load_battle_hits(server_id, guild_id, season)
+            if not data or not data.get("boss_hits"):
                 continue
 
             id_to_name = get_player_list(server_id, guild_id)

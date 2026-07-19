@@ -6,7 +6,6 @@ from discord.ext import commands
 from bot.guilds import (
     load_guilds,
     save_guilds,
-    get_guild_data_path,
     load_live_leaderboards,
     save_live_leaderboards,
     load_player_list,
@@ -87,7 +86,6 @@ class AdminCog(commands.Cog):
             "notification_channel_id": None,
         }
         save_guilds(server_id, guilds)
-        get_guild_data_path(server_id, guild_id)  # creates the data directory
 
         await interaction.followup.send(
             f"✅ Guild **{name}** registered! Fetching player roster...",
@@ -300,7 +298,7 @@ class AdminCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         from config import TIER_CHOICES
-        from bot.embeds import build_battle_messages, load_leaderboard_file
+        from bot.embeds import build_battle_messages
 
         server_id  = interaction.guild_id
         guilds     = load_guilds(server_id)
@@ -327,11 +325,7 @@ class AdminCog(commands.Cog):
             await interaction.followup.send(f"❌ Could not determine current season: {e}", ephemeral=True)
             return
 
-        data_dir  = get_guild_data_path(server_id, guild_id)
-        data, err = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
-        if err:
-            await interaction.followup.send(f"❌ {err} — run `/update_leaderboard` first.", ephemeral=True)
-            return
+        data = repo.load_battle_hits(server_id, guild_id, season)
 
         message_ids = {}
         for tier in TIER_CHOICES:
@@ -380,7 +374,7 @@ class AdminCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         from config import TIER_CHOICES
-        from bot.embeds import build_cluster_messages, load_leaderboard_file
+        from bot.embeds import build_cluster_messages
         from bot.guilds import get_player_list
 
         server_id = interaction.guild_id
@@ -405,9 +399,8 @@ class AdminCog(commands.Cog):
 
         merged = {}
         for gid, gdata in guilds.items():
-            data_dir  = get_guild_data_path(server_id, gid)
-            data, err = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
-            if err or not data:
+            data = repo.load_battle_hits(server_id, gid, season)
+            if not data or not data.get("boss_hits"):
                 continue
             id_to_name = get_player_list(server_id, gid)
             guild_name = gdata["name"]

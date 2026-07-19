@@ -27,6 +27,25 @@ from pathlib import Path
 import pytest
 
 # ---------------------------------------------------------------------------
+# config.py env-var precondition (ADR: 04-02 RED_ACCEPTANCE unblock)
+# ---------------------------------------------------------------------------
+# `config.py` reads `UPDATE_CHANNEL_ID` and `REPLAY_INDEX_CHANNEL_ID` at
+# import time via `int(os.getenv(...))`, raising `TypeError` when either is
+# unset. The cutover render tests import `bot.embeds` (which imports
+# `config`) lazily inside the test body. A session-scoped autouse fixture
+# sets harmless values ("0") BEFORE any test runs, so the import succeeds
+# and the tests fail RED for the real reason (render parity / dead JSON
+# helpers) instead of an env-var `TypeError`. This does NOT modify
+# `config.py`; it satisfies the precondition the production composition
+# root satisfies in deployment (env vars set before the bot starts).
+@pytest.fixture(autouse=True, scope="session")
+def _config_env_precondition():
+    os.environ.setdefault("UPDATE_CHANNEL_ID", "0")
+    os.environ.setdefault("REPLAY_INDEX_CHANNEL_ID", "0")
+    yield
+
+
+# ---------------------------------------------------------------------------
 # Constants / shared domain values
 # ---------------------------------------------------------------------------
 

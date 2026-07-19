@@ -6,7 +6,6 @@ from discord.ext import commands, tasks
 from config import UPDATE_CHANNEL_ID
 from bot.guilds import (
     load_guilds,
-    get_guild_data_path,
     get_player_list,
     load_player_registrations,
     load_capped_state,
@@ -258,7 +257,7 @@ class TasksCog(commands.Cog):
                        live config at the new message IDs.
         """
         from config import TIER_CHOICES
-        from bot.embeds import build_battle_messages, build_cluster_messages, load_leaderboard_file
+        from bot.embeds import build_battle_messages, build_cluster_messages
 
         live = load_live_leaderboards(server_id)
         if not live:
@@ -288,12 +287,11 @@ class TasksCog(commands.Cog):
                     continue
 
                 guild_name = guild_data["name"]
-                data_dir   = get_guild_data_path(server_id, guild_id)
-                data, err  = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
+                data = repo.load_battle_hits(server_id, guild_id, season)
 
                 contents = {}
                 for tier in TIER_CHOICES:
-                    if err or not data:
+                    if not data or not data.get("boss_hits"):
                         contents[tier.value] = f"📊 **{guild_name} — {tier.name} — No data yet**"
                     else:
                         messages = build_battle_messages(
@@ -308,9 +306,8 @@ class TasksCog(commands.Cog):
             elif key == "cluster":
                 merged = {}
                 for gid, gdata in guilds.items():
-                    data_dir  = get_guild_data_path(server_id, gid)
-                    data, err = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
-                    if err or not data:
+                    data = repo.load_battle_hits(server_id, gid, season)
+                    if not data or not data.get("boss_hits"):
                         continue
                     id_to_name = get_player_list(server_id, gid)
                     guild_name = gdata["name"]

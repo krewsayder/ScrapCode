@@ -417,7 +417,7 @@ class SqlAlchemyClusterRepository(ClusterRepository):
             "damage": row.damage,
             "user_id": row.user_id,
             "completed_on": row.completed_on,
-            "hero_details": [],  # not stored as JSON; dedup uses hero_roster_key
+            "hero_details": row.hero_details or [],  # display-only JSON column (0002)
             "machine_of_war": {"unitId": row.mow_unit_id} if row.mow_unit_id else None,
         }
 
@@ -443,17 +443,19 @@ class SqlAlchemyClusterRepository(ClusterRepository):
             INSERT INTO battle_hits (
                 discord_server_id, guild_id, season, boss_id, encounter_index,
                 tier_key, user_id, damage, completed_on,
-                hero_roster_key, mow_unit_id, encounter_type
+                hero_roster_key, mow_unit_id, encounter_type, hero_details
             ) VALUES (
                 :server, :guild, :season, :boss, :eidx,
                 :tier, :user, :dmg, :completed,
-                :rkey, :mow, :etype
+                :rkey, :mow, :etype, :heroes
             )
             ON CONFLICT (discord_server_id, guild_id, season, boss_id, encounter_index,
                          tier_key, hero_roster_key, user_id) DO UPDATE SET
                 damage = MAX(excluded.damage, battle_hits.damage),
                 completed_on = CASE WHEN excluded.damage > battle_hits.damage
-                    THEN excluded.completed_on ELSE battle_hits.completed_on END
+                    THEN excluded.completed_on ELSE battle_hits.completed_on END,
+                hero_details = CASE WHEN excluded.damage > battle_hits.damage
+                    THEN excluded.hero_details ELSE battle_hits.hero_details END
             """
         )
 
@@ -474,6 +476,7 @@ class SqlAlchemyClusterRepository(ClusterRepository):
         )
 
     def _battle_params(self, server, guild, season, entry) -> dict:
+        hero_details = entry.get("heroDetails", [])
         return {
             "server": server, "guild": guild, "season": season,
             "boss": str(entry["unitId"]),
@@ -482,10 +485,13 @@ class SqlAlchemyClusterRepository(ClusterRepository):
             "user": entry["userId"],
             "dmg": entry["damage"],
             "completed": entry["completedOn"],
-            "rkey": self._roster_key(entry.get("heroDetails", []),
-                                     entry.get("machineOfWarDetails")),
+            "rkey": self._roster_key(hero_details, entry.get("machineOfWarDetails")),
             "mow": self._mow_unit_id(entry.get("machineOfWarDetails")),
             "etype": entry.get("encounterType"),
+            # `hero_details` is a JSON column; raw text() binding does not
+            # engage the ORM's JSON type processor, so serialize manually.
+            # The ORM read (`row.hero_details`) deserializes back to a list.
+            "heroes": json.dumps(hero_details) if hero_details else None,
         }
 
     def _bomb_params(self, server, guild, season, entry) -> dict:

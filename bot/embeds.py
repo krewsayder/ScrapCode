@@ -1,6 +1,4 @@
 import asyncio
-import json
-from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -8,22 +6,6 @@ from discord import app_commands
 from config import LABELS
 from bot.getNameAndEmoji import get_boss_emoji, get_clean_boss_name, get_mow_emoji
 from bot.guilds import get_player_list, load_guilds
-
-
-# ==========================================
-# FILE HELPER
-# ==========================================
-
-def load_leaderboard_file(file_path: Path) -> tuple[dict | None, str | None]:
-    """Load a leaderboard JSON file. Returns (data, error_message)."""
-    if not file_path.exists():
-        return None, "No data file found."
-    try:
-        return json.loads(file_path.read_text(encoding='utf-8')), None
-    except json.JSONDecodeError:
-        return None, "Leaderboard file is corrupted."
-    except Exception as e:
-        return None, f"Unexpected error reading file: {e}"
 
 
 # ==========================================

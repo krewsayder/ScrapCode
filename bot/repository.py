@@ -6,12 +6,14 @@ from typing import Optional
 from bot.models import Cluster, Guild
 from bot.migrations.player_list_migrations import PlayerListMigrator
 
-# ADR-007: the ABC grows 4 storage-medium-agnostic season-hit read/write
-# methods. `get_guild_data_path` is JSON-specific and is deprecated in
-# Slice 02 / removed in Slice 04 (US-008). The dict shape returned by the
-# load_* methods is the existing `{"boss_hits": ...}` shape that
+# ADR-007: the ABC carries 4 storage-medium-agnostic season-hit read/write
+# methods. `get_guild_data_path` (JSON-specific — returned a filesystem dir)
+# was removed from the ABC in Slice 04 once the 4 cog read sites +
+# `embeds.load_leaderboard_file` were rewired to `load_battle_hits` /
+# `load_bomb_hits` (US-008 / 04-02). The dict shape returned by the load_*
+# methods is the existing `{"boss_hits": ...}` shape that
 # `bot/embeds.build_battle_messages` / `build_bomb_messages` and
-# `bot/tracker.process_api_response` consume today.
+# `bot/tracker.process_api_response` consume today (data-dictionary §2.7/§2.9).
 
 
 class ClusterRepository(ABC):
@@ -44,9 +46,6 @@ class ClusterRepository(ABC):
 
     @abstractmethod
     def save_live_leaderboards(self, discord_server_id: int, data: dict) -> None: ...
-
-    @abstractmethod
-    def get_guild_data_path(self, discord_server_id: int, guild_id: str) -> Path: ...
 
     @abstractmethod
     def list_server_ids(self) -> list[int]: ...
@@ -186,11 +185,6 @@ class JsonClusterRepository(ClusterRepository):
         path = self._server_path(discord_server_id) / "live_leaderboards.json"
         self._write_json(path, data)
 
-    def get_guild_data_path(self, discord_server_id: int, guild_id: str) -> Path:
-        path = self._guild_path(discord_server_id, guild_id) / "data"
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
     def list_server_ids(self) -> list[int]:
         if not self._base.exists():
             return []
@@ -204,10 +198,13 @@ class JsonClusterRepository(ClusterRepository):
     # These keep the parametrized contract tests green against the JSON impl
     # (rollback path / `SCRAPCODE_REPO_BACKEND=json`) and preserve the
     # existing on-disk shape (data-dictionary §2.7 / §2.9).
+    # `get_guild_data_path` was removed from the ABC in Slice 04 (ADR-007 §2);
+    # the JSON impl inlines the data-dir path here instead.
 
     def _season_file(self, discord_server_id: int, guild_id: str, season: int,
                      kind: str) -> Path:
-        data_dir = self.get_guild_data_path(discord_server_id, guild_id)
+        data_dir = self._guild_path(discord_server_id, guild_id) / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
         if kind == "battle":
             return data_dir / f"highest_hits_season_{season}.json"
         if kind == "bomb":

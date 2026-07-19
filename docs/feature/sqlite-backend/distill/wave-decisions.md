@@ -254,3 +254,53 @@ ADR-006 D11. `replay_threads` is seeded from the hardcoded
 `FORUM_CHANNELS` / `MAP_THREADS` constants in `bot/cogs/replay_cog.py`
 (ADR-006 D10), closing the ADR-004 §3 hardcoded-thread-ID leak in the same
 slice that closes the `replay_index.json` leak.
+
+## Step 04-02 — ADR-007 §2 post-cutover: `get_guild_data_path` removed
+
+ADR-007 §2 disposition completed in this step:
+
+- `ClusterRepository.get_guild_data_path` removed from the ABC and from
+  `JsonClusterRepository` (the JSON impl inlines the data-dir path in
+  `_season_file` instead). `bot/embeds.load_leaderboard_file` removed
+  (ADR-007 §3). The 5 cog read sites in `view_cog`, `admin_cog`,
+  `tasks_cog` rewired to `repo.load_battle_hits` / `load_bomb_hits`.
+- **Contract test note (ADR-007 §2 "Post-cutover"):** grep of
+  `tests/acceptance/sqlite-backend/` for `get_guild_data_path` returns 0
+  matches — no parametrized contract test asserted `get_guild_data_path`
+  on the ABC (RC1 round-trips the other 14 ABC methods; it never
+  exercised `get_guild_data_path`). There is therefore no assertion to
+  remove; the removal of the ABC method is verified by the absence of
+  import-time `AttributeError` in the suite + the green RC1/RC2
+  parametrization over both impls. `bot/guilds.get_guild_data_path` (the
+  thin wrapper) and `SqlAlchemyClusterRepository.get_guild_data_path`
+  (raises `NotImplementedError`) remain as dead code; both are removed
+  in Slice 04-04 (`bot/guilds.py` is 04-04 territory) — recorded here so
+  the 04-04 crafter knows to grep-clean them.
+
+## Step 04-02 — CS1 BLOCKER (render parity needs `hero_details` in SQLite)
+
+`test_battle_leaderboard_render_byte_identical_pre_post_cutover` (CS1,
+battle byte-identical render parity) is **RED and blocked** on a 03-01
+design decision: `SqlAlchemyClusterRepository._battle_entry_from_row`
+returns `hero_details: []` (the `battle_hits` schema stores only
+`hero_roster_key` for dedup, not the hero list). `build_battle_messages`
+renders `_build_hero_display(entry.get("hero_details", []))`, so the
+JSON render shows `Aethana Eldryon | Khaine` while the SQLite render
+shows `❌ | Khaine` — byte-difference on the hero line.
+
+`discuss/user-stories.md` line 734 explicitly says "`hero_details` and
+`machine_of_war` can be JSON columns for display, but the dedup uses
+`roster_key` only" — i.e. the design permits storing `hero_details` for
+display. The 03-01 step chose to drop it (RC15 only pinned `damage`,
+not `hero_details`), so the deviation from data-dictionary §2.7 (which
+lists `hero_details` in the load shape) went undetected.
+
+Fixing CS1 requires storing `hero_details` (JSON column) on
+`battle_hits`: changes to `bot/db/models.py`, an alembic migration, and
+`bot/repository_sqlalchemy.py` (`_battle_entry_from_row` +
+`_battle_params`). All three are OFF-LIMITS to 04-02 per BOUNDARY_RULES
+("Do NOT touch ... `bot/repository_sqlalchemy.py`, or `bot/db/*`").
+CS1 is therefore escalated; CS2/CS4/CS5 are green (bomb render has no
+hero line; CS5 was switched to the bomb leaderboard because the
+`is_former` fixture player Jonas Klein carries a Bomb hit, not a Battle
+hit).
