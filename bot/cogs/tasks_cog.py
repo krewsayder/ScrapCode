@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 import discord
 from discord.ext import commands, tasks
