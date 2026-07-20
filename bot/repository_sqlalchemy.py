@@ -39,7 +39,14 @@ from bot.db.models import (
 from bot.db.secrets import api_key_hmac, decrypt_api_key, encrypt_api_key
 from bot.db.session import Database
 from bot.models import Cluster, Guild
-from bot.repository import ClusterRepository, DuplicateReplayUrlError
+from bot.repository import (
+    BattleHitEntry,
+    BombHitEntry,
+    ClusterRepository,
+    DuplicateReplayUrlError,
+    ReplayEntry,
+    ReplayThreadInfo,
+)
 from bot.tracker import TOP_N
 
 
@@ -432,7 +439,7 @@ class SqlAlchemyClusterRepository(ClusterRepository):
                 partition.append(entry_fn(row))
         return {"boss_hits": boss_hits}
 
-    def _battle_entry_from_row(self, row) -> dict:
+    def _battle_entry_from_row(self, row) -> BattleHitEntry:
         return {
             "encounterType": row.encounter_type,
             "damage": row.damage,
@@ -442,7 +449,7 @@ class SqlAlchemyClusterRepository(ClusterRepository):
             "machine_of_war": {"unitId": row.mow_unit_id} if row.mow_unit_id else None,
         }
 
-    def _bomb_entry_from_row(self, row) -> dict:
+    def _bomb_entry_from_row(self, row) -> BombHitEntry:
         return {
             "encounterType": row.encounter_type,
             "damage": row.damage,
@@ -650,7 +657,7 @@ class SqlAlchemyClusterRepository(ClusterRepository):
                 }
             return result
 
-    def _replay_entry_from_row(self, row) -> dict:
+    def _replay_entry_from_row(self, row) -> ReplayEntry:
         return {
             "team": row.team,
             "tier": row.tier,

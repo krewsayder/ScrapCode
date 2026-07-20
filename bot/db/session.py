@@ -193,9 +193,9 @@ class Database:
             mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
             conn.close()
         except sqlite3.DatabaseError as exc:
-            self._refuse("wal_mode", "open_failed", detail=str(exc))
-            return
-        except sqlite3.OperationalError as exc:
+            # Catches both DatabaseError and its subclass OperationalError
+            # (the prior separate branch was unreachable — Python evaluates
+            # except clauses in order and DatabaseError catches first).
             self._refuse("wal_mode", "open_failed", detail=str(exc))
             return
         if mode != "wal":

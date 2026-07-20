@@ -13,7 +13,7 @@ from bot.guilds import (
     add_guild_member_role,
     repo,
 )
-from bot.embeds import guild_autocomplete
+from bot.embeds import guild_autocomplete, encounter_limit
 from bot.permissions import require_tier, check_tier
 from bot.services.chronicl3r.player_service import PlayerService
 
@@ -416,7 +416,7 @@ class AdminCog(commands.Cog):
         for boss_id, encounter_dict in merged.items():
             for e_index, tiers in encounter_dict.items():
                 for tier_key in tiers:
-                    limit = 5 if e_index == "0" else 1
+                    limit = encounter_limit(e_index)
                     tiers[tier_key] = sorted(tiers[tier_key], key=lambda e: (-e["damage"], e.get("completed_on", "")))[:limit]
 
         message_ids = {}

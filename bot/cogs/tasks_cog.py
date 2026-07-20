@@ -15,6 +15,7 @@ from bot.guilds import (
 )
 from bot.tracker import process_api_response
 from bot.guilds import load_player_list
+from bot.embeds import encounter_limit
 from bot.services.chronicl3r.player_service import PlayerService
 
 TACTICUS_PLAYER_URL   = "https://api.tacticusgame.com/api/v1/player"
@@ -326,7 +327,7 @@ class TasksCog(commands.Cog):
                 for boss_id, encounter_dict in merged.items():
                     for e_index, tiers in encounter_dict.items():
                         for tier_key in tiers:
-                            limit = 5 if e_index == "0" else 1
+                            limit = encounter_limit(e_index)
                             tiers[tier_key] = sorted(
                                 tiers[tier_key], key=lambda e: (-e["damage"], e.get("completed_on", ""))
                             )[:limit]

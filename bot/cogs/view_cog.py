@@ -10,6 +10,7 @@ from bot.embeds import (
     build_bomb_messages,
     build_cluster_messages,
     guild_autocomplete,
+    encounter_limit,
 )
 
 
@@ -166,7 +167,7 @@ class ViewCog(commands.Cog):
 
         for boss_id, encounter_dict in merged.items():
             for e_index in encounter_dict:
-                limit = 5 if e_index == "0" else 1
+                limit = encounter_limit(e_index)
                 encounter_dict[e_index] = sorted(
                     encounter_dict[e_index], key=lambda e: (-e["damage"], e.get("completed_on", ""))
                 )[:limit]

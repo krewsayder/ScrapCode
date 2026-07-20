@@ -6,6 +6,7 @@ from discord.ext import commands
 
 from config import TIER_CHOICES
 from bot.permissions import require_guild_member
+from bot.repository import ReplayEntry
 import bot.guilds as guilds
 
 # ADR-006 D10/D11 + ADR-004 §3 closure (04-03): the cog no longer reads or
@@ -202,7 +203,7 @@ class ReplayCog(commands.Cog):
             return
 
         print(f"[replay] Thread found: {thread}, proceeding...")
-        entry = {
+        entry: ReplayEntry = {
             "team":         team.value,
             "tier":         tier.name,
             "position":     position.value if position else "",

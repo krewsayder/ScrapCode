@@ -1,10 +1,75 @@
 import json
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional, Protocol, runtime_checkable
+from typing import NotRequired, Optional, Protocol, TypedDict, runtime_checkable
 
 from bot.models import Cluster, Guild
 from bot.migrations.player_list_migrations import PlayerListMigrator
+
+
+# ---------------------------------------------------------------------------
+# TypedDict contracts for the dict shapes the ABC returns / accepts.
+#
+# These are L4 documentation-as-type contracts for the cog layer. The ABC
+# method signatures stay `dict` (runtime callers pass plain dicts); the
+# TypedDicts give cogs and adapters a named field set the data-dictionary
+# §2.7/§2.9/§2.10 describes prose-wise today. Internal adapter helpers and
+# cog-local variables annotate against these so mypy can flag field-name
+# drift the moment a column rename or schema change lands.
+# ---------------------------------------------------------------------------
+
+
+class BattleHitEntry(TypedDict):
+    """One Battle hit row in the data-dictionary §2.7 load shape.
+
+    `machine_of_war` is `{"unitId": ...}` or None (matches the API's
+    `machineOfWarDetails` shape that `process_api_response` forwards).
+    """
+
+    encounterType: str | None
+    damage: int
+    user_id: str
+    completed_on: str
+    hero_details: list
+    machine_of_war: dict | None
+
+
+class BombHitEntry(TypedDict):
+    """One Bomb hit row in the data-dictionary §2.9 load shape."""
+
+    encounterType: str | None
+    damage: int
+    user_id: str
+    completed_on: str
+
+
+class ReplayEntry(TypedDict):
+    """One replay entry in the data-dictionary §2.10 shape.
+
+    `index_message_id` is optional: the cog does not set it on upload
+    (the repo records it on the thread row via a separate call); the
+    JSON rollback impl preserves it when present in `replay_index.json`.
+    """
+
+    team: str
+    tier: str
+    position: str
+    damage: str
+    url: str
+    comment: str
+    submitted_by: str
+    index_message_id: NotRequired[int | None]
+
+
+class ReplayThreadInfo(TypedDict):
+    """The thread-info dict returned by `get_replay_thread` / listed by
+    `list_replay_threads` (data-dictionary §2.10). `forum_channel_id` and
+    `thread_id` are None on the JSON rollback path (ADR-006 D9 acceptable
+    degradation)."""
+
+    forum_channel_id: int | None
+    thread_id: int | None
+    index_message_id: NotRequired[int | None]
 
 
 # ADR-006 D8 / §Architecture enforcement: every ClusterRepository adapter

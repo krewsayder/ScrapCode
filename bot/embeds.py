@@ -6,6 +6,21 @@ from discord import app_commands
 from config import LABELS
 from bot.getNameAndEmoji import get_boss_emoji, get_clean_boss_name, get_mow_emoji
 from bot.guilds import get_player_list, load_guilds
+from bot.tracker import TOP_N
+
+# Encounter-index rendering limits (data-dictionary §2.7).
+# Encounter "0" is the primary encounter and renders TOP_N entries; every
+# other encounter renders a single top entry. The same constant pair is
+# reused by the cogs that pre-truncate merged cluster data before passing
+# it to build_cluster_messages.
+ENCOUNTER_PRIMARY_INDEX = "0"
+ENCOUNTER_PRIMARY_LIMIT = TOP_N
+ENCOUNTER_NONPRIMARY_LIMIT = 1
+
+
+def encounter_limit(e_index: str) -> int:
+    """Return the per-encounter render limit (TOP_N for the primary encounter, 1 otherwise)."""
+    return ENCOUNTER_PRIMARY_LIMIT if e_index == ENCOUNTER_PRIMARY_INDEX else ENCOUNTER_NONPRIMARY_LIMIT
 
 
 # ==========================================
@@ -87,7 +102,7 @@ def build_battle_messages(
             if tier_key not in tiers:
                 continue
 
-            limit = 5 if e_index == "0" else 1
+            limit = encounter_limit(e_index)
             encounter_label = LABELS.get(e_index, f"Encounter {e_index}")
             boss_lines.append(f"**{encounter_label}**")
 
@@ -143,7 +158,7 @@ def build_bomb_messages(
             encounter_label = LABELS.get(e_index, f"Encounter {e_index}")
             boss_lines.append(f"**{encounter_label}**")
 
-            for rank, entry in enumerate(tiers[tier_key][:5], start=1):
+            for rank, entry in enumerate(tiers[tier_key][:TOP_N], start=1):
                 user_id      = entry.get("user_id", "Unknown")
                 user_display = id_to_name.get(user_id, str(user_id)[:8])
                 boss_lines.append(
