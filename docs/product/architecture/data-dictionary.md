@@ -103,9 +103,12 @@ One entry per in-game guild. `guild_id` is a short slug produced by
 **Migration:** `guilds` table, PK `(discord_server_id, guild_id)`, FK
 `discord_server_id → clusters`. `member_role_ids` becomes a child table
 `(discord_server_id, guild_id, role_id)` (or a `int[]`/JSON column in Postgres).
-`api_key` should move to a secrets store. `guild_id` is the natural key but is a
-*human-chosen slug* — keep it as a unique natural key, not a surrogate PK, unless
-you also want a surrogate.
+`api_key` is encrypted at rest (Fernet; key from `SCRAPCODE_DB_KEY` via HKDF — see
+ADR-006 D7). Add an `api_key_hmac` column: deterministic HMAC-SHA256 of `api_key`
+(key from `SCRAPCODE_DB_KEY`), `UNIQUE NOT NULL`, enforcing the 1:1
+guild→api_key binding that Fernet's non-deterministic ciphertext cannot enforce
+directly. `guild_id` is the natural key but is a *human-chosen slug* — keep it as a
+unique natural key, not a surrogate PK, unless you also want a surrogate.
 
 ### 2.3 Player registrations — `clusters/{id}/player_registrations.json`
 
@@ -124,8 +127,11 @@ Maps a Discord user to their Tacticus API key + which game guild they belong to
 
 **Migration:** `player_registrations` table, PK `discord_id`, FK
 `guild_id → guilds(guild_id)` (scoped to the same `discord_server_id` — enforce
-with a composite FK `(discord_server_id, guild_id)`). `api_key` → secrets store.
-Unique constraint on `api_key` (1:1 with discord user).
+with a composite FK `(discord_server_id, guild_id)`). `api_key` is encrypted at
+rest (Fernet; key from `SCRAPCODE_DB_KEY` via HKDF — see ADR-006 D7). Add an
+`api_key_hmac` column: deterministic HMAC-SHA256 of `api_key`, `UNIQUE NOT NULL`,
+enforcing the 1:1 discord-user→api_key binding that Fernet's non-deterministic
+ciphertext cannot enforce directly.
 
 ### 2.4 Capped state — `clusters/{id}/capped_state.json`
 

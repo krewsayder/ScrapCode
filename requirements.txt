@@ -3,5 +3,9 @@ python-dotenv
 httpx
 requests
 pytest
-pytest
 pytest-asyncio
+# SQLite backend (ADR-006): ORM + migrations + async driver + at-rest encryption
+sqlalchemy>=2.0
+alembic
+aiosqlite
+cryptography

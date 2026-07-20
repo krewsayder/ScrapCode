@@ -654,3 +654,165 @@ left for later:
 None. This is a brownfield baseline with no DISCUSS or SPIKE artifacts to
 contradict. The baseline *establishes* the assumptions future waves will inherit;
 it does not alter any prior-wave assumption.
+
+---
+
+## Application Architecture — `sqlite-backend` (DESIGN wave)
+
+> This section is appended by the DESIGN wave for feature `sqlite-backend`
+> (branch `docs/architecture-baseline` → feature work). The as-built baseline
+> above (§§1–8) is unchanged. Decisions recorded here are normative for the
+> feature; see [ADR-006](adr-006-sqlite-storage-backend.md) and
+> [ADR-007](adr-007-repo-read-methods-get-guild-data-path-deprecation.md) for
+> the full decision text, alternatives, and consequences.
+
+### A. Scope and quality-attribute priorities
+
+A backend data-layer swap: replace the flat JSON files documented in §4 with
+a SQLite database via SQLAlchemy 2.0 (ORM) + Alembic (migrations) + aiosqlite
+(async). Single process, single VM, single Discord server in production
+(ADR-004). The domain model (`bot/models.py`) is **unchanged** — this is a
+storage swap behind the existing `ClusterRepository` ABC.
+
+Quality-attribute priorities, in order: **atomicity > parity/zero-regression
+> testability > maintainability > time-to-market**. Scalability is explicitly
+NOT a priority (one process, one VM, one server).
+
+### B. Architecture pattern
+
+**Modular monolith with dependency-inversion (ports-and-adapters).** The
+`ClusterRepository` ABC is the port; `JsonClusterRepository` (existing) and
+`SqlAlchemyClusterRepository` (new) are the two driven adapters. The
+application/domain layer (cogs, `bot/guilds.py` wrappers, `bot/models.py`
+dataclasses) depends only on the ABC. This matches the as-built pattern
+(ADR-002 §4: "the repository is already abstract") and the team size.
+
+### C. Correction to §4 (brief undercount)
+
+A DESIGN-wave codebase audit surfaced a contradiction in §4's prose: the
+season files are not only read/written by `bot/tracker.py` — they are also
+read directly by `bot/embeds.py::load_leaderboard_file`, called from
+`view_cog.py`, `admin_cog.py`, and `tasks_cog.py` via
+`repo.get_guild_data_path(...)` (5 call sites total, not 1). The
+data-dictionary §2.7 / §2.9 are correct ("Readers: `tracker.load_json`,
+embeds"); §4's prose undercounts. This is resolved by ADR-007: the ABC grows
+`load_battle_hits` / `load_bomb_hits` / `upsert_battle_hits` /
+`upsert_bomb_hits` and `get_guild_data_path` is deprecated then removed in
+Slice 04. The §4 prose is left intact (as-built snapshot); this section is
+the correction.
+
+### D. Component boundaries
+
+| Component (status) | Responsibility | Depends on (inward only) |
+|--------------------|----------------|---------------------------|
+| `bot/db/models.py` (NEW) | SQLAlchemy 2.0 declarative ORM models for the 8 easy entities + `battle_hits` + `bomb_hits` + `replay_entries` + `replay_threads` (data-dictionary §4). No `update_channel_id`; no `battle_hits_simple` (ADR-006 D4). | `sqlalchemy` only. |
+| `bot/db/session.py` (NEW) | `Database` factory: async engine + session factory, WAL pragmas, startup `probe()` (ADR-006 D8), `session_scope()` context manager. Reads `SCRAPCODE_DB_PATH` / `SCRAPCODE_DB_KEY` from env. | `sqlalchemy`, `aiosqlite`, `bot/db/models.py`, `cryptography.fernet`. |
+| `bot/db/alembic/` (NEW) | Alembic env + baseline schema revision + data-migration revision + `replay_threads` seed (ADR-006 D10). | `bot/db/models.py`. |
+| `bot/db/migrations_json_to_sqlite.py` (NEW, one-shot) | Reads operator-copied `clusters/` tree, runs `PlayerListMigrator._migrate_v1_to_v2` once per v1 file, populates all tables, Fernet-encrypts `api_key` on insert, emits parity report. Idempotent + `alembic downgrade` reversible. | `bot/db/models.py`, `bot/migrations/player_list_migrations.py`, `cryptography.fernet`. |
+| `bot/repository_sqlalchemy.py` (NEW) | `SqlAlchemyClusterRepository(ClusterRepository)` — second impl. 11 existing ABC methods + 4 new read/write methods (ADR-007). Decrypts `api_key` on read. | `bot/repository.py` (ABC), `bot/db/session.py`, `bot/db/models.py`, `cryptography.fernet`. |
+| `bot/repository.py` (MODIFIED) | ABC gains 4 new methods (ADR-007); `get_guild_data_path` deprecated in Slice 02, removed in Slice 04. | `abc`, `bot.models`. |
+| `bot/guilds.py` (MODIFIED) | Composition root. Singleton `repo` (line 7) reads `SCRAPCODE_REPO_BACKEND` env (`json\|sqlite`, default `sqlite` post-cutover). Runs `probe()` on the SQLite impl before start. | One of the two impls based on env. |
+| `bot/tracker.py` (MODIFIED, Slice 04) | `process_api_response(api_data, season, discord_server_id, guild_id)` — `data_dir` removed; reads/writes via `repo.upsert_battle_hits` / `upsert_bomb_hits`. `load_json` / `save_json` / `try_insert` / `BATTLE_SIMPLE_FILE` write removed. `get_tier_key` / `get_roster_key` remain. | `bot.repository` ABC. |
+| `bot/embeds.py` (MODIFIED, Slice 04) | `load_leaderboard_file` removed; `build_battle_messages` / `build_bomb_messages` consume dicts from `repo.load_battle_hits` / `load_bomb_hits`. | `bot.guilds` (wrappers). |
+| `bot/cogs/replay_cog.py` (MODIFIED, Slice 04) | Reads/writes `replay_entries` / `replay_threads` via the repo. `REPLAY_INDEX_FILE` / `load_replay_index` / `save_replay_index` / `FORUM_CHANNELS` / `MAP_THREADS` removed; thread IDs from `replay_threads` (ADR-006 D10). | `bot.guilds`. |
+| `bot/cogs/{view,admin,tasks}_cog.py` (MODIFIED, Slice 04) | Read sites rewired from `get_guild_data_path` + `load_leaderboard_file` to `repo.load_battle_hits` / `load_bomb_hits` (ADR-007). | `bot.guilds`. |
+| `main.py` (MODIFIED, Slice 04) | `file_lock = asyncio.Lock()` (line 45) removed; `setup_update` / `setup_tasks` no longer receive it (ADR-006 D6). | — |
+
+Genuinely new components are limited to `bot/db/{models,session,alembic/,
+migrations_json_to_sqlite.py}` and `bot/repository_sqlalchemy.py`. Every
+other modification is a rewire of an existing module. See ADR-006 §D3 for
+the per-component justification.
+
+### E. Transaction strategy
+
+SQLite in **WAL mode** (`PRAGMA journal_mode=WAL; synchronous=NORMAL;
+foreign_keys=ON`). The hourly `auto_update` multi-file write (today:
+scattered `save_player_list` / `save_guilds` / `save_capped_state` /
+`save_live_leaderboards` calls outside `file_lock`) becomes **one
+transaction per guild** (US-010). A crash mid-cycle leaves that guild's
+pre-cycle state intact (transaction rollback). The `file_lock`
+process-wide `asyncio.Lock` is retired (ADR-006 D6) — WAL snapshot
+isolation handles the two concurrent hourly loops (`cap_detect` and
+`auto_update` fire at the top of each hour with no offset, brief §2.3).
+All DB I/O is async via aiosqlite so the discord.py event loop is not
+blocked.
+
+### F. Secrets
+
+Both `guilds.api_key` and `player_registrations.api_key` are stored as
+Fernet ciphertext; the Fernet key is `SCRAPCODE_DB_KEY` from `.env`,
+never logged (ADR-006 D7). Decrypt-on-read in
+`SqlAlchemyClusterRepository` keeps cogs unchanged (they see plaintext).
+The 1:1 `api_key` uniqueness constraint (data-dictionary §2.3) is enforced
+on a deterministic HMAC-SHA256 column (`api_key_hmac`), not on the
+ciphertext (Fernet ciphertexts are non-deterministic).
+
+### G. Startup probe (Earned Trust)
+
+`bot/db/session.py::probe()` runs at composition time and MUST succeed
+before the bot starts (ADR-006 D8): (1) asserts WAL mode; (2) asserts
+`alembic_version.version_num` matches the compiled head; (3) round-trips
+a known plaintext through Fernet with `SCRAPCODE_DB_KEY`; (4) inserts +
+rolls back a throwaway row in `clusters`. Failure raises a structured
+`health.startup.refused` event and the bot refuses to start. The probe
+contract is enforced at three layers (principle 12): mypy Protocol at the
+composition root, an AST pre-commit hook asserting `probe` is defined on
+the adapter, and a CI gold-test runner injecting a corrupted DB / wrong
+Fernet key / stale alembic version / read-only filesystem.
+
+### H. External integrations
+
+No NEW external integrations are introduced by this feature. The existing
+external integrations (Tacticus API, Chronicler — §2.5) are unchanged.
+Contract-test annotation (principle 10): the existing Tacticus + Chronicler
+integrations remain the highest-risk boundary; this feature does not touch
+them and does not add to the contract-test surface. The handoff to
+platform-architect includes: "No new external integrations; existing
+Tacticus + Chronicler contract-test recommendations unchanged."
+
+### I. Architecture enforcement
+
+Style: modular monolith with dependency-inversion (ports-and-adapters).
+Language: Python. Tools: **import-linter** (module-boundary rules) +
+**pytest-archon** (composition-root Protocol check). Rules: `bot/cogs/*`
+MUST NOT import `sqlalchemy` / `aiosqlite` / `bot.db.*` /
+`bot.repository_sqlalchemy`; `bot.tracker.py` MUST NOT import
+`pathlib.Path` after Slice 04; `bot.cogs/replay_cog.py` MUST NOT reference
+`replay_index.json`; `bot.embeds` MUST NOT import `pathlib.Path` after
+Slice 04; the composition root MUST pass the `probe()` Protocol check. See
+ADR-006 §"Architecture enforcement" for the full rule set.
+
+### J. Development paradigm
+
+**OOP.** The codebase is OOP (ABCs, dataclasses, repository pattern); the
+new components follow the same paradigm (declarative ORM models, a
+repository class, a factory). Routes DELIVER to
+`@nw-software-crafter`. Recorded for the orchestrator in
+`docs/feature/sqlite-backend/design/wave-decisions.md`.
+
+### K. C4 diagrams
+
+Updated diagrams in [c4-diagrams.md](c4-diagrams.md): a new Container
+diagram showing the SQLite container + SQLAlchemy/Alembic components + the
+repo port; a new Component diagram for the data layer (port + 2 impls +
+migration + probe). The System Context diagram (§1) is unchanged — no
+new external system is introduced.
+
+### L. Traceability to user stories
+
+| ADR-006 / ADR-007 decision | Driving stories |
+|----------------------------|-----------------|
+| D1 storage stack | US-003, US-004 |
+| D2 architecture pattern | US-001, US-004 |
+| D3 component boundaries | US-003, US-004, US-005, US-008, US-009, US-010 |
+| D4 `battle_hits_simple` dropped | US-006, US-008 |
+| D5 `capped_state` column | US-003 |
+| D6 `file_lock` retired | US-010 |
+| D7 Fernet `api_key` | US-003, US-005 |
+| D8 startup probe | US-004, US-010 |
+| D9 env-driven singleton | US-010 |
+| D10 `FORUM_CHANNELS` → `replay_threads` seed | US-007, US-009 (scope expansion) |
+| D11 replay tenancy | US-007 |
+| D12 `update_channel_id` dropped; v1→v2 once | US-003, US-005 |
+| D13 OOP paradigm | (paradigm routing) |
+| ADR-007 ABC read methods + `get_guild_data_path` deprecation | US-008 (scope expansion) |

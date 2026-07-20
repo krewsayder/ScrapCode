@@ -1,0 +1,112 @@
+# environments.yaml — feature `sqlite-backend` (DEVOPS wave)
+#
+# Consumed by DISTILL (Mandate 4 — Environmental Realism). The target
+# environments here are Python runtime states of a single Discord bot
+# process, NOT OS installs. There is no CI (DEVOPS D3); the gate is local
+# pytest. The platform is one Linux VM managed by systemd (DEVOPS D1/D2),
+# with dev work on WSL2 and macOS.
+#
+# See platform-architecture.md for the operational runbook.
+
+target_environments:
+  - name: clean
+    description: |
+      Cold start: fresh .venv, empty SQLite DB (schema created by
+      `alembic upgrade head`, no rows), no JSON `clusters/` tree present.
+      Exercises the empty-database code path: probe passes on a fresh
+      schema, `load_*` returns empty dicts (no silent-empty; legit empty),
+      on-demand leaderboards render "no entries" messages.
+    platform: [linux, wsl, macos]
+    preconditions:
+      - "Python 3.11 installed"
+      - ".venv created and requirements.txt installed"
+      - "SCRAPCODE_DB_KEY set in .env (Fernet key)"
+      - "SCRAPCODE_DB_PATH points at a non-existent file path (will be created)"
+      - "clusters/ directory absent"
+
+  - name: with-existing-json-data
+    description: |
+      The dry-run / parity environment (US-005). The production `clusters/`
+      tree is copied down from the VM (operator scp) into the working
+      directory. The JSON->SQLite data migration runs against this COPY
+      (never against `/opt/discord-bot/clusters/` directly — ADR-006
+      constraint). This is the env that produces the KPI-2 parity report.
+      `SCRAPCODE_REPO_BACKEND=json` so the bot (if started) reads from
+      the JSON tree; the migration script reads the same tree and writes
+      to a separate SQLite file.
+    platform: [linux, wsl, macos]
+    preconditions:
+      - "Production clusters/ tree copied into the working directory"
+      - "SCRAPCODE_DB_KEY set in .env"
+      - "SCRAPCODE_DB_PATH points at a fresh (empty or pre-migrated) SQLite file"
+      - "SCRAPCODE_REPO_BACKEND=json (so the bot does not race the migration)"
+      - "Bot process NOT running during the migration run"
+
+  - name: with-stale-config
+    description: |
+      The probe-failure env (ADR-006 D8 step 2). A SQLite DB exists with an
+      `alembic_version.version_num` that does NOT match the compiled head
+      (e.g. an older DB from a prior release, or a DB manually stamped
+      to a previous revision). Exercises the probe's stale-version
+      refusal path: starting the bot with `SCRAPCODE_REPO_BACKEND=sqlite`
+      MUST raise `health.startup.refused` and the process MUST exit
+      non-zero (systemd `failed` state) rather than starting on a
+      half-migrated DB.
+    platform: [linux, wsl, macos]
+    preconditions:
+      - "SQLite DB exists at SCRAPCODE_DB_PATH"
+      - "DB stamped at an older alembic revision: `alembic stamp <old-rev>` or a DB from a prior release"
+      - "Code at a newer revision (head != stamped version)"
+      - "SCRAPCODE_REPO_BACKEND=sqlite (probe is NOT skipped)"
+      - "SCRAPCODE_DB_KEY matches the key the DB was encrypted with (isolates the stale-version failure to step 2, not step 3)"
+
+coexistence_matrix:
+  - tool: pre-commit
+    must_not_break: true
+    note: |
+      No pre-commit hooks are configured today (the repo has no
+      `.pre-commit-config.yaml`). If the operator adds pre-commit later
+      (e.g. the AST `probe` assertion hook from ADR-006 §"Architecture
+      enforcement"), it MUST NOT break the local `pytest` gate. The
+      contract test suite (KPI-1) is the source of truth; pre-commit is
+      a fast early-feedback layer, not a substitute.
+  - tool: husky
+    must_not_break: true
+    note: "Not installed; same coexistence contract as pre-commit if added."
+  - tool: systemd
+    must_not_break: true
+    note: |
+      The `discord-bot` systemd unit is the deploy mechanism. The
+      probe's refusal-to-start MUST surface as a systemd `failed` state,
+      NOT be masked by `Restart=always` looping. See platform-architecture.md
+      §5 for the `Restart=on-failure` drop-in recommendation.
+  - tool: pip-venv
+    must_not_break: true
+    note: |
+      The existing `/opt/discord-bot/.venv/` is reused. `pip install -r
+      requirements.txt` into it is the deploy step. The venv is
+      gitignored (`.gitignore` line 3) and shipped with the repo checkout
+      on the VM, per brief §2.6.
+
+platform_coverage:
+  Linux:
+    - "Ubuntu 22.04 LTS (the production VM, discord-bot-vm)"
+    - "Ubuntu 24.04 LTS (acceptable upgrade target)"
+  WSL:
+    - "WSL2 on Windows 11 (primary dev environment for Krewsayder)"
+  macOS:
+    - "macOS 14+ (secondary dev environment)"
+  Python:
+    - "3.11 (matches the venv on the VM; aiosqlite + SQLAlchemy 2.0 async require 3.8+, tested on 3.11)"
+  CI:
+    - "None (DEVOPS D3 — local pytest only; see ci-cd-pipeline.md)"
+
+deployment_assumptions:
+  - "Installation is IDEMPOTENT: the JSON->SQLite migration is upsert-based (US-006 dedup logic, keep-max(damage) on conflict); running it twice against the same source + DB produces the same row state. Safe to re-run."
+  - "Uninstall removes ONLY sqlite-backend artifacts: the `data/scrapcode.db*` files, the `bot/db/` package, `bot/repository_sqlalchemy.py`, and the new alembic revision. It does NOT touch the `clusters/` JSON tree (kept read-only as the rollback fallback for one cycle per ADR-006 D9)."
+  - "The `probe()` startup gate coexists with the existing `discord.log` FileHandler — probe results are emitted as structured JSON records to the same log file, not a separate sink (observability-design.md §2). No new log handler is introduced."
+  - "The probe is SKIPPED when `SCRAPCODE_REPO_BACKEND=json` (the rollback path), so a missing/invalid `SCRAPCODE_DB_KEY` does not block a JSON-backend rollback."
+  - "A failed deploy auto-stops the service: probe failure → non-zero exit → systemd `failed` state. The bot does NOT run in a half-migrated state."
+  - "WAL mode sidecars (`scrapcode.db-wal`, `scrapcode.db-shm`) must be backed up and restored TOGETHER with the main DB file (platform-architecture.md §6)."
+  - "`SCRAPCODE_DB_KEY` loss renders `api_key` columns unrecoverable; the key is backed up with `DISCORD_TOKEN` in the operator's `.env` backup, not in the DB."
+  - "The one-cycle read-only JSON fallback (US-010) means the `clusters/` tree is NOT deleted during cutover; deletion is a separate explicit step after one clean hourly cycle on SQLite."
