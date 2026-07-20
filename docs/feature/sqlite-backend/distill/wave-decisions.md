@@ -328,3 +328,55 @@ was updated to import the constants from the migration module instead of
 the cog. AP11 was broadened to grep all three retired modules
 (`bot/tracker.py`, `bot/embeds.py`, `bot/cogs/replay_cog.py`) for the
 JSON-write helper patterns.
+
+## DELIVER Phase 4 — adversarial review findings
+
+The Phase-4 code review (`nw-software-crafter-reviewer`) over the full
+feature diff found 5 items. Disposition:
+
+- **FIXED — dead `import asyncio` in `bot/embeds.py` (LOW).** The symbol was
+  never referenced (the file uses `async`/`await` syntax, not `asyncio.*`).
+  Removed.
+- **FIXED — TOCTOU in `SqlAlchemyClusterRepository.upsert_replay_entry`
+  (MEDIUM).** The SELECT-then-INSERT fast-path duplicate check could lose to
+  a concurrent insert; the resulting `IntegrityError` was not caught by the
+  cog's `except DuplicateReplayUrlError`. The INSERT is now `flush()`-ed
+  inside a `try/except IntegrityError` that re-raises `DuplicateReplayUrlError`
+  — the `uq_replay_entries_url_per_thread` constraint is the real guard; the
+  typed exception is the only thing the cog ever sees. (The repo methods are
+  synchronous, so two async-cog uploads can't truly interleave on one event
+  loop today — this is defense-in-depth for a future async/multi-process path.)
+- **DOCUMENTED — migration `guild_id` case-sensitivity (HIGH, latent /
+  production-unreachable).** `_populate_player_lists` / `_populate_season_hits`
+  build filesystem paths from the lowercased slug while `_compute_json_counts`
+  uses the original-case key. On a case-sensitive FS (the Linux prod VM) a
+  mixed-case guild slug dir (e.g. `IronWarriors/`) is missed by the populate
+  path, skipped, and the parity report still says PASS (0=0) — silent data
+  loss for that guild's player list + season hits. **Production-unreachable**
+  because `register_guild` produces slugs via `.strip().lower().replace(" ","_")`
+  (data-dictionary §2.2), so real slugs are always lowercase. The correct fix
+  is to look up the filesystem path with the original-case dir name while
+  saving with the lowercased slug (pass a `guild_dirs: {lowercase: original}`
+  mapping into the two `_populate_*` helpers). This was NOT applied because
+  (a) it is unverifiable in this environment — the test suite runs on Windows
+  (case-insensitive FS), so the fix would be a no-op in the suite; (b) the
+  obvious early-validation guard (reject non-lowercase slugs) would break JP4,
+  which deliberately uses mixed-case slugs (`Neuro` + `neuro`) to test the
+  collision-fail. **Follow-up:** apply the path-lookup fix on a Linux box with
+  a mixed-case-slug fixture, or add a Linux-only CI job that exercises it.
+- **Not applied (optional L2) — `_season_file_to_battle_entries` /
+  `_season_file_to_bomb_entries` near-duplication.** The 4-level nested
+  iteration is identical; only the field set differs. A shared helper taking
+  a field-mapping fn would dedup it. Left as-is — the duplication is mild and
+  the two functions are clear as standalone units.
+- **Not applied (optional L2) — `_compute_json_counts` re-implements the
+  `_populate_*` file-reading logic.** This is the root cause of the
+  case-sensitivity finding above. Deriving the parity oracle from the counts
+  `_populate` actually inserted (rather than re-reading the tree) would
+  eliminate the divergence risk. Same follow-up as the case-sensitivity item.
+
+Two earlier defects were caught and fixed during execution (before Phase 4):
+`hero_details` dropped from `battle_hits` in 03-01 (restored via Alembic 0002
+in 04-02 — CS1 caught it) and `import asyncio` dropped from `tasks_cog.py`
+during the 04-01 rewire (restored in `fb34e93` — the Phase-3 refactor flagged
+it; the suite missed it because no test exercises the `cap_detect` loop body).

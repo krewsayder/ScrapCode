@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import delete, select, text
+from sqlalchemy.exc import IntegrityError
 
 from bot.db import models
 from bot.db.models import (
@@ -585,19 +586,28 @@ class SqlAlchemyClusterRepository(ClusterRepository):
             ).first()
             if existing is not None:
                 raise DuplicateReplayUrlError(boss, map_name, entry["url"])
-            session.add(ReplayEntryRow(
-                discord_server_id=discord_server_id,
-                boss=boss,
-                map_name=map_name,
-                team=entry["team"],
-                tier=entry["tier"],
-                position=entry.get("position", ""),
-                damage_text=entry["damage"],
-                url=entry["url"],
-                comment=entry.get("comment", ""),
-                submitted_by=entry["submitted_by"],
-                index_message_id=entry.get("index_message_id"),
-            ))
+            # The SELECT-then-INSERT is a fast-path duplicate check for the
+            # friendly reply; the `uq_replay_entries_url_per_thread` constraint
+            # is the real guard. Flush inside a try so a TOCTOU duplicate (or
+            # any IntegrityError on the URL constraint) is translated to the
+            # typed exception the cog catches — never a raw IntegrityError.
+            try:
+                session.add(ReplayEntryRow(
+                    discord_server_id=discord_server_id,
+                    boss=boss,
+                    map_name=map_name,
+                    team=entry["team"],
+                    tier=entry["tier"],
+                    position=entry.get("position", ""),
+                    damage_text=entry["damage"],
+                    url=entry["url"],
+                    comment=entry.get("comment", ""),
+                    submitted_by=entry["submitted_by"],
+                    index_message_id=entry.get("index_message_id"),
+                ))
+                session.flush()
+            except IntegrityError:
+                raise DuplicateReplayUrlError(boss, map_name, entry["url"])
 
     def delete_replay_entry(self, discord_server_id: int, boss: str, map_name: str,
                             url: str) -> bool:
