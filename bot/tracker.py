@@ -109,7 +109,14 @@ def process_api_response(api_data: dict, season: int,
         tier_key = get_tier_key(entry)
         if tier_key is None:
             continue
+        # The repo upsert contract reads two normalized fields that raw
+        # Tacticus API entries do not carry: `tier_key` (derived from
+        # rarity + set) and `damage` (the API field is `damageDealt`). The
+        # JSON era built new entry dicts with these normalized; the SQL
+        # upsert takes the raw entry, so stamp them here. See conftest.py
+        # make_tacticus_entry / make_entry for the documented contract.
         entry["tier_key"] = tier_key
+        entry["damage"] = entry["damageDealt"]
         damage_type = entry.get("damageType")
         if damage_type == "Battle":
             battle_entries.append(entry)

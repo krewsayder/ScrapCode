@@ -657,10 +657,12 @@ def test_process_api_response_stamps_tier_key_on_raw_api_entries(env_vars, sqlit
     as the outer dict key, so entries never held the field. The SQL upsert
     takes a flat list, so ``process_api_response`` must stamp it itself.
 
-    This test builds a raw entry (no ``tier_key``) and asserts the upsert
-    lands — proving the writer, not the fixture, supplies the key. Before the
-    fix this raised ``KeyError: 'tier_key'`` and every ``auto_update`` cycle
-    failed silently with ``[auto_update] <guild> failed: 'tier_key'``.
+    This test builds a raw entry (no ``tier_key``, no ``damage`` — only the
+    API's ``damageDealt``) and asserts the upsert lands, proving the writer,
+    not the fixture, supplies both normalized fields. Before the fix this
+    raised ``KeyError: 'tier_key'`` and then ``KeyError: 'damage'``, and every
+    ``auto_update`` cycle failed silently with
+    ``[auto_update] <guild> failed: 'tier_key'`` / ``'damage'``.
     """
     from bot.models import Cluster, Guild
     from bot.tracker import process_api_response
@@ -669,8 +671,9 @@ def test_process_api_response_stamps_tier_key_on_raw_api_entries(env_vars, sqlit
         discord_server_id=server,
         guilds={guild: Guild(id=guild, name="Neuro", api_key="", role_id=0)},
     ))
-    # Raw Tacticus API entry — deliberately NO "tier_key" field. get_tier_key
-    # derives "Legendary_0" from rarity="Legendary" + set=0.
+    # Raw Tacticus API entry — deliberately NO "tier_key" and NO "damage"
+    # (the API field is "damageDealt"). get_tier_key derives "Legendary_0"
+    # from rarity="Legendary" + set=0; the upsert reads entry["damage"].
     raw_entry = {
         "unitId": "Avatar",
         "encounterIndex": 0,
@@ -678,7 +681,6 @@ def test_process_api_response_stamps_tier_key_on_raw_api_entries(env_vars, sqlit
         "set": 0,
         "damageType": "Battle",
         "damageDealt": 12000,
-        "damage": 12000,
         "userId": "u-raw",
         "completedOn": "2026-07-25T14:45:19Z",
         "encounterType": "Battle",
@@ -686,7 +688,13 @@ def test_process_api_response_stamps_tier_key_on_raw_api_entries(env_vars, sqlit
         "machineOfWarDetails": None,
     }
     assert "tier_key" not in raw_entry, "fixture must not pre-stamp tier_key"
+    assert "damage" not in raw_entry, "fixture must not pre-normalize damage"
     process_api_response({"entries": [raw_entry]}, season, server, guild)
     battle = sqlite_repo.load_battle_hits(server, guild, season)
     assert battle["boss_hits"]["Avatar"]["0"]["Legendary_0"], \
         "process_api_response did not stamp tier_key — raw entry not upserted"
+    # The stamped damage (from damageDealt) must reach the row, proving the
+    # damage normalization landed — not just that a row exists.
+    row = battle["boss_hits"]["Avatar"]["0"]["Legendary_0"][0]
+    assert row["damage"] == 12000, \
+        f"process_api_response did not normalize damageDealt -> damage: {row}"
