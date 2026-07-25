@@ -308,7 +308,7 @@ sudo systemctl status discord-bot --no-pager   # expect Active: active (running)
 mv clusters/ clusters-retired-$(date +%Y%m%d)
 #     (keep it tarred somewhere for one more cycle if paranoid; then delete)
 # C4. Confirm the bot is still up and the next hourly cycle runs clean:
-sudo journalctl -u discord-bot -n 100 --no-paper | grep -i error
+sudo journalctl -u discord-bot -n 100 --no-pager | grep -i error
 ```
 
 ## 9. Data migration runbook (Slice 03 detail, US-005)

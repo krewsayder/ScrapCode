@@ -3,7 +3,7 @@
 This module is the Earned-Trust gate for the SQLite backend. It provides:
 
   - `Database` — the SQLAlchemy 2.0 engine factory. Reads `SCRAPCODE_DB_PATH`
-    (default `clusters.db`) and `SCRAPCODE_DB_KEY` (a Fernet key) from env.
+    (default `data/scrapcode.db`) and `SCRAPCODE_DB_KEY` (a Fernet key) from env.
     Sets WAL pragmas (`journal_mode=WAL; synchronous=NORMAL; foreign_keys=ON`)
     on every runtime connection via a `connect` event listener.
   - `Database.session_scope()` — a synchronous context manager yielding a
@@ -122,7 +122,12 @@ class Database:
     """
 
     def __init__(self, db_path: str | None = None, fernet_key: str | None = None) -> None:
-        self._db_path: str = db_path or os.getenv("SCRAPCODE_DB_PATH", "clusters.db")
+        # Default MUST match the one in `bot/guilds.py:build_repo` — that is the
+        # path the D9 missing-file safety net stats before deciding whether to
+        # fall back to JSON. If the two disagree, the safety net checks one file
+        # while the engine opens (and `create_all`s) another, producing a
+        # silently empty database.
+        self._db_path: str = db_path or os.getenv("SCRAPCODE_DB_PATH", "data/scrapcode.db")
         self._fernet_key: str = fernet_key or os.getenv("SCRAPCODE_DB_KEY", "")
         self._engine: Engine | None = None
         self._session_factory: sessionmaker | None = None

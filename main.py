@@ -8,6 +8,15 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
+# MUST run before any `bot.*` import. `bot/guilds.py` builds the repository
+# singleton in its module body (`repo = build_repo()`), reading
+# SCRAPCODE_REPO_BACKEND / SCRAPCODE_DB_KEY / SCRAPCODE_DB_PATH at import
+# time. The cog imports below reach `bot.guilds` transitively, so a
+# `load_dotenv()` placed after them leaves those vars unset at the moment
+# the singleton is constructed — `build_repo()` then takes its D9 safety-net
+# fallback and the bot silently runs on JSON with SCRAPCODE_REPO_BACKEND=sqlite.
+load_dotenv()
+
 from bot import VERSION
 
 
@@ -36,7 +45,6 @@ from bot.services.chronicl3r.player_service import PlayerService
 # CONFIGURATION & INITIALIZATION
 # ==========================================
 
-load_dotenv()
 token = os.getenv("DISCORD_TOKEN")
 
 # ADR-006 D6: `file_lock` (the process-wide asyncio.Lock guarding only
