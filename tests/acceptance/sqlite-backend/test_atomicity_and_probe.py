@@ -644,3 +644,49 @@ def test_process_api_response_writes_to_battle_bomb_hits_via_repo(env_vars, sqli
     # No JSON season files written to disk (the bypass is retired).
     json_files = list(tmp_path.rglob("highest_*_season_*.json"))
     assert json_files == [], f"JSON season files still written: {json_files}"
+
+
+def test_process_api_response_stamps_tier_key_on_raw_api_entries(env_vars, sqlite_repo, tmp_path):
+    """@driving_port @real-io — regression for the 2026-07-25 cutover defect.
+
+    The repo upsert contract reads ``entry["tier_key"]`` (both
+    ClusterRepository impls). ``make_tacticus_entry`` pre-stamps it, so the
+    test above passes regardless of whether ``process_api_response`` sets it.
+    Production feeds ``process_api_response`` raw Tacticus API entries that
+    carry no ``tier_key`` field — the JSON era used ``get_tier_key``'s return
+    as the outer dict key, so entries never held the field. The SQL upsert
+    takes a flat list, so ``process_api_response`` must stamp it itself.
+
+    This test builds a raw entry (no ``tier_key``) and asserts the upsert
+    lands — proving the writer, not the fixture, supplies the key. Before the
+    fix this raised ``KeyError: 'tier_key'`` and every ``auto_update`` cycle
+    failed silently with ``[auto_update] <guild> failed: 'tier_key'``.
+    """
+    from bot.models import Cluster, Guild
+    from bot.tracker import process_api_response
+    server, guild, season = 1458181638453203099, "neuro", 94
+    sqlite_repo.save(Cluster(
+        discord_server_id=server,
+        guilds={guild: Guild(id=guild, name="Neuro", api_key="", role_id=0)},
+    ))
+    # Raw Tacticus API entry — deliberately NO "tier_key" field. get_tier_key
+    # derives "Legendary_0" from rarity="Legendary" + set=0.
+    raw_entry = {
+        "unitId": "Avatar",
+        "encounterIndex": 0,
+        "rarity": "Legendary",
+        "set": 0,
+        "damageType": "Battle",
+        "damageDealt": 12000,
+        "damage": 12000,
+        "userId": "u-raw",
+        "completedOn": "2026-07-25T14:45:19Z",
+        "encounterType": "Battle",
+        "heroDetails": [{"unitId": "Aethana"}],
+        "machineOfWarDetails": None,
+    }
+    assert "tier_key" not in raw_entry, "fixture must not pre-stamp tier_key"
+    process_api_response({"entries": [raw_entry]}, season, server, guild)
+    battle = sqlite_repo.load_battle_hits(server, guild, season)
+    assert battle["boss_hits"]["Avatar"]["0"]["Legendary_0"], \
+        "process_api_response did not stamp tier_key — raw entry not upserted"

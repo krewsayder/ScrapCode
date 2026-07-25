@@ -101,8 +101,15 @@ def process_api_response(api_data: dict, season: int,
     battle_entries: list[dict] = []
     bomb_entries: list[dict] = []
     for entry in api_data.get("entries", []):
-        if get_tier_key(entry) is None:
+        # The repo upsert contract reads entry["tier_key"] (both
+        # ClusterRepository impls); the JSON era used get_tier_key's return as
+        # the outer dict key, so entries never carried the field. The SQL
+        # upsert takes a flat list, so stamp it here. See conftest.py
+        # make_tacticus_entry / make_entry for the documented contract.
+        tier_key = get_tier_key(entry)
+        if tier_key is None:
             continue
+        entry["tier_key"] = tier_key
         damage_type = entry.get("damageType")
         if damage_type == "Battle":
             battle_entries.append(entry)
