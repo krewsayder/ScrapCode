@@ -200,16 +200,64 @@ uniqueness constraint doing its job, not missing data.
 ## Step 7 — Observation cycle
 
 Leave `clusters/` in place, untouched, for one full hourly cycle
-(`auto_update` + `cap_detect`). Then:
+(`auto_update` + `cap_detect`).
+
+**Scope your checks to the current process.** After a restart the journal
+holds lines from the *previous* process too, and a failed cycle from the
+old PID looks identical to one from the new. On 2026-07-25 an operator saw
+`failed: 'damage'` (old PID) and `updated.` (new PID) in the same
+`--since "5 min ago"` window and had to disentangle them by PID. Scope to
+the current process's lifetime, not a row count or a wall-clock window:
 
 ```bash
-sudo journalctl -u discord-bot -n 200 --no-pager | grep -iE 'error|refused|falling back'
+SINCE="$(systemctl show -p ActiveEnterTimestamp --value discord-bot)"
+sudo journalctl -u discord-bot --since "$SINCE" --no-pager \
+  | grep -iE 'failed:|error|refused|falling back'
 ```
 
-**Prove a durable write before retiring anything.** Row counts alone will not
-show one: the repository writes by delete-and-reinsert and by upsert, so a
-healthy cycle can leave every count unchanged while the WAL grows. Name a value
-the bot must have written after cutover instead:
+**Match the real failure format.** The task loops print failures as
+`[auto_update] <guild> failed: <detail>` and `[cap_detect] ... failed: ...`
+— the word `failed`, not `error`. A grep for `error|refused|falling back`
+alone returned clean on 2026-07-25 while every `auto_update` cycle threw
+`KeyError('tier_key')` then `KeyError('damage')`: those lines contain none
+of those three words. `failed:` must be in the pattern. Expect no output.
+
+**Prove the hit-write path explicitly — `last_validated` is not enough.**
+`MAX(players.last_validated)` (below) is stamped by
+`PlayerService.refresh_guild` on every successful roster refresh, so it
+confirms the *roster* write path only. On 2026-07-25 it advanced every
+cycle while the *hit* write path
+(`tracker.process_api_response` → `repo.upsert_guild_hits`) threw every
+cycle — the gate passed and the bot silently wrote no battle/bomb hits for
+hours. The hit path is the one that broke; require it by name.
+
+The hit-write proof is the `[auto_update] <guild> updated.` line, printed
+(`tasks_cog.py:221`) only after `process_api_response` returns without
+raising — i.e. the upsert transaction committed:
+
+```bash
+sudo journalctl -u discord-bot --since "$SINCE" --no-pager \
+  | grep '\[auto_update\].*updated\.'
+```
+
+Expect one `updated.` per guild. Any `failed:` line from the same process
+(see the grep above) means that guild's hits did not commit — do not retire
+`clusters/`.
+
+As an independent cross-check, snapshot the current season's `battle_hits`
+across one cycle and compare. A *changed* count is proof of a fresh write;
+an *unchanged* count is **inconclusive**, not clean — the upsert dedups by
+natural key, so re-writing the same hits leaves the count flat, and a cycle
+with no new damage writes nothing. Use this to confirm `updated.`, not to
+replace it:
+
+```bash
+.venv/bin/python -c "import sqlite3; print(sqlite3.connect('data/scrapcode.db').execute('SELECT COUNT(*) FROM battle_hits WHERE season=<current>').fetchone()[0])"
+# ...wait one auto_update cycle, run again, compare...
+```
+
+Then confirm the roster write path too — `last_validated` later than the
+bot start:
 
 ```bash
 .venv/bin/python - <<'PYEOF'
@@ -221,16 +269,12 @@ c.close()
 PYEOF
 ```
 
-`last_validated` is stamped by `PlayerService.refresh_guild` on every successful
-roster refresh. If the maximum is later than the moment you started the bot, the
-write path is confirmed against disk. If it still matches migration time, the
-loops have not written — find out why before giving up your rollback source.
+Note that a failing Tacticus API produces quiet logs *and* no writes, so
+"an hour with no `failed:` lines" can still mean the loops never ran. The
+`updated.` line is positive evidence they did; silence is not.
 
-Note that a failing Tacticus API produces quiet logs *and* no writes, so "an
-hour with no errors" can mean the loops never ran. Check the timestamp, not the
-silence.
-
-Clean? Retire the JSON tree:
+Gate to retire: every guild printed `updated.`, no `failed:` from the
+current process, and `last_validated` advanced. Then retire the JSON tree:
 
 ```bash
 mv clusters/ clusters-retired-$(date +%Y%m%d)
