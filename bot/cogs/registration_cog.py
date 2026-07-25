@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 import discord
 from discord import app_commands
@@ -9,6 +11,102 @@ from bot.embeds import guild_autocomplete, resolve_members
 from bot.permissions import require_guild_member, require_tier, check_tier
 
 TACTICUS_PLAYER_URL = "https://api.tacticusgame.com/api/v1/player"
+
+# Bounded concurrency for bulk key validation. Avoids the resource-exhaustion
+# pattern of firing one client per registration simultaneously (the shape that
+# makes cap_detect's 108-at-once bursts fragile). One shared AsyncClient + a
+# semaphore caps in-flight requests.
+_VALIDATE_CONCURRENCY = 10
+
+# HTTP statuses Tacticus returns for an invalid key. The live `register`
+# command checks only 401, but revoked/expired keys have been observed returning
+# 403 (verified on 2026-07-25) — treat both as "dead".
+_DEAD_KEY_STATUSES = (401, 403)
+
+
+async def _probe_api_keys(
+    api_keys: dict[str, str],
+) -> dict[str, tuple[int | None, str | None]]:
+    """Probe each ``{discord_id: api_key}`` against the Tacticus player endpoint.
+
+    Returns ``{discord_id: (status_code, error_type)}`` where ``status_code`` is
+    the HTTP status (int) or ``None`` on a transport error, and ``error_type``
+    is ``type(e).__name__`` on an exception or ``None``. A single shared
+    ``httpx.AsyncClient`` is used with a semaphore so at most
+    ``_VALIDATE_CONCURRENCY`` requests are in flight at once, and the exception
+    type is preserved (not discarded as ``{e}``). Entries with a falsy key are
+    skipped.
+    """
+    if not api_keys:
+        return {}
+
+    sem = asyncio.Semaphore(_VALIDATE_CONCURRENCY)
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        async def _check(discord_id: str, key: str) -> tuple[str, int | None, str | None]:
+            async with sem:
+                try:
+                    resp = await client.get(
+                        TACTICUS_PLAYER_URL,
+                        headers={"accept": "application/json", "X-API-KEY": key},
+                    )
+                    return discord_id, resp.status_code, None
+                except Exception as e:
+                    return discord_id, None, type(e).__name__
+
+        outcomes = await asyncio.gather(
+            *[_check(d, k) for d, k in api_keys.items() if k]
+        )
+
+    return {d: (code, err) for d, code, err in outcomes}
+
+
+def _format_key_validation(
+    results: dict[str, tuple[int | None, str | None]],
+    name_map: dict[str, str],
+    guild_name: str,
+) -> str:
+    """Render probe results as an officer-facing summary string.
+
+    ``results`` comes from :func:`_probe_api_keys`; ``name_map`` maps a
+    ``discord_id`` to a display name, falling back to the raw ID when absent.
+    Classifies each result as valid (200), dead key (401/403), unreachable
+    (transport error), or other API error, and lists the non-valid categories by
+    name so an officer knows exactly who to chase.
+    """
+    valid       = [d for d, (c, _) in results.items() if c == 200]
+    dead        = [d for d, (c, _) in results.items() if c in _DEAD_KEY_STATUSES]
+    unreachable = [d for d, (c, _) in results.items() if c is None]
+    other       = [
+        d for d, (c, _) in results.items()
+        if c is not None and c != 200 and c not in _DEAD_KEY_STATUSES
+    ]
+
+    def _label(discord_id: str) -> str:
+        return name_map.get(discord_id, f"`{discord_id}`")
+
+    lines = [
+        f"🔍 **Key validation — {guild_name}** ({len(results)} checked)",
+        f"✅ Valid: {len(valid)}",
+    ]
+    if dead:
+        lines.append(
+            f"❌ Dead key — ask to re-register: {len(dead)} — "
+            + ", ".join(_label(d) for d in dead)
+        )
+    if unreachable:
+        lines.append(
+            "⚠️ Could not check (network/timeout): "
+            + ", ".join(f"{_label(d)} ({results[d][1]})" for d in unreachable)
+        )
+    if other:
+        lines.append(
+            "⚠️ API error: "
+            + ", ".join(f"{_label(d)} (HTTP {results[d][0]})" for d in other)
+        )
+    if not dead and not unreachable and not other:
+        lines.append("All keys valid ✅")
+    return "\n".join(lines)
 
 
 class RegistrationCog(commands.Cog):
@@ -324,6 +422,67 @@ class RegistrationCog(commands.Cog):
                     inline=False,
                 )
             await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ==========================================
+    # SLASH COMMAND: REGISTRATION VALIDATE_KEYS
+    # ==========================================
+
+    @reg.command(
+        name="validate_keys",
+        description="Check registered Tacticus API keys for a guild; report dead ones.",
+    )
+    @require_tier("officer")
+    @app_commands.describe(guild_id="Guild to validate (required)")
+    @app_commands.autocomplete(guild_id=guild_autocomplete)
+    async def validate_keys(
+        self,
+        interaction: discord.Interaction,
+        guild_id: str,
+    ):
+        """Officer-only bulk key check. Probes every registration in a guild
+        against the Tacticus player endpoint and reports which keys are dead
+        (401/403), which couldn't be reached (with the exception type), and which
+        hit an API error — naming the members so an officer knows who to chase.
+        Bounded concurrency; no key is ever printed."""
+        await interaction.response.defer(ephemeral=True)
+
+        server_id = interaction.guild_id
+        guilds = load_guilds(server_id)
+        if guild_id not in guilds:
+            await interaction.followup.send(
+                f"❌ Guild `{guild_id}` not found. Please select a valid guild from the list.",
+                ephemeral=True,
+            )
+            return
+        guild_name = guilds[guild_id]["name"]
+
+        registrations = load_player_registrations(server_id)
+        filtered = {
+            d: v for d, v in registrations.items()
+            if isinstance(v, dict) and v.get("guild_id") == guild_id
+        }
+        if not filtered:
+            await interaction.followup.send(
+                f"❌ No registered players in **{guild_name}**.",
+                ephemeral=True,
+            )
+            return
+
+        # Resolve display names live (cache=False) so dead keys name a person,
+        # and departed members are flagged rather than silently dropped.
+        present, gone = await resolve_members(interaction.guild, list(filtered))
+        name_map = {d: m.display_name for d, m in present}
+        for d in gone:
+            name_map[d] = f"`{d}` (left server)"
+
+        api_keys = {d: v.get("api_key") for d, v in filtered.items()}
+        no_key = [d for d, v in filtered.items() if not v.get("api_key")]
+        results = await _probe_api_keys({d: k for d, k in api_keys.items() if k})
+
+        msg = _format_key_validation(results, name_map, guild_name)
+        if no_key:
+            msg += "\n⚠️ No key on file: " + ", ".join(name_map[d] for d in no_key)
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 async def setup_registration(bot: commands.Bot):
