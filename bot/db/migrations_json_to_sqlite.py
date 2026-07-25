@@ -523,12 +523,12 @@ def _populate_season_hits(repo, server_dir: Path, server_id: int,
             season = _season_from_filename(season_file.name, "highest_hits_season_", ".json")
             entries = _season_file_to_battle_entries(season_file)
             repo.upsert_battle_hits(server_id, guild_id, season, entries)
-            counts["battle_hits"] += len(entries)
+            counts["battle_hits"] += len({_battle_dedup_key(e) for e in entries})
         for season_file in sorted(data_dir.glob("highest_bombs_season_*.json")):
             season = _season_from_filename(season_file.name, "highest_bombs_season_", ".json")
             entries = _season_file_to_bomb_entries(season_file)
             repo.upsert_bomb_hits(server_id, guild_id, season, entries)
-            counts["bomb_hits"] += len(entries)
+            counts["bomb_hits"] += len({_bomb_dedup_key(e) for e in entries})
     return counts
 
 
@@ -561,6 +561,38 @@ def _season_file_to_battle_entries(path: Path) -> list[dict]:
                         "encounterType": hit.get("encounterType"),
                     })
     return entries
+
+
+def _battle_dedup_key(entry: dict) -> tuple:
+    """The `uq_battle_hits_*` tuple, minus (server, guild, season).
+
+    Mirrors `SqlAlchemyClusterRepository._battle_params` — including the
+    order-independent roster key — so the parity oracle counts what the
+    table can actually hold. Callers sum per file, and one file is exactly
+    one (server, guild, season), so per-file distinct counts sum to the
+    global distinct count.
+    """
+    heroes = tuple(sorted(h.get("unitId", "") for h in (entry.get("heroDetails") or [])))
+    mow = entry.get("machineOfWarDetails")
+    mow_id = mow.get("unitId") if isinstance(mow, dict) else None
+    return (
+        str(entry["unitId"]), str(entry.get("encounterIndex", 0)), entry["tier_key"],
+        heroes, mow_id, entry["userId"],
+    )
+
+
+def _bomb_dedup_key(entry: dict) -> tuple:
+    """The `uq_bomb_hits_*` tuple, minus (server, guild, season).
+
+    Mirrors `SqlAlchemyClusterRepository._bomb_params`. Bombs have no roster
+    column, so `(user_id, completed_on)` is all that separates two hits in a
+    partition — which is why duplicate JSON entries collapse here and not in
+    the battle path.
+    """
+    return (
+        str(entry["unitId"]), str(entry.get("encounterIndex", 0)), entry["tier_key"],
+        entry["userId"], entry["completedOn"],
+    )
 
 
 def _season_file_to_bomb_entries(path: Path) -> list[dict]:
@@ -620,9 +652,13 @@ def _compute_json_counts(source_path: Path) -> dict[str, int]:
             data_dir = server_dir / gid / "data"
             if data_dir.exists():
                 for f in data_dir.glob("highest_hits_season_*.json"):
-                    counts["battle_hits"] += len(_season_file_to_battle_entries(f))
+                    counts["battle_hits"] += len(
+                        {_battle_dedup_key(e) for e in _season_file_to_battle_entries(f)}
+                    )
                 for f in data_dir.glob("highest_bombs_season_*.json"):
-                    counts["bomb_hits"] += len(_season_file_to_bomb_entries(f))
+                    counts["bomb_hits"] += len(
+                        {_bomb_dedup_key(e) for e in _season_file_to_bomb_entries(f)}
+                    )
     counts = _compute_replay_json_counts(source_path, counts)
     return counts
 

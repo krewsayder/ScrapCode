@@ -71,6 +71,48 @@ def test_easy_entity_row_counts_match_json_derived_counts(
         assert counts["status"] == "PASS"
 
 
+def test_duplicate_bomb_entries_collapse_to_one_row_and_still_reach_parity(
+    tmp_clusters_tree, tmp_path, monkeypatch, fernet_key
+):
+    """@kpi @real-io — regression: production cutover 2026-07-25.
+
+    Bomb hits are stored as a flat top-5 list per (boss, encounter, tier)
+    with no dedup key, so the tracker re-appends the same hit on every poll
+    until the list fills. Production held 1805 bomb entries of which only
+    382 were distinct — five byte-identical copies in nearly every
+    partition.
+
+    `bomb_hits` is unique on (server, guild, season, boss, encounter, tier,
+    user_id, completed_on), so those copies correctly collapse to one row.
+    The parity oracle counted raw JSON list length, so it read the correct
+    collapse as a 1805-vs-382 MISMATCH and failed the cutover.
+
+    The oracle now counts distinct unique-key tuples — what the table can
+    actually hold. `battle_hits` never tripped this only because its roster
+    key keeps otherwise-identical entries distinct; it is counted the same
+    way now so the same pollution cannot hide there either.
+    """
+    server_dir = tmp_clusters_tree / "1458181638453203099"
+    bomb_file = server_dir / "neuro" / "data" / "highest_bombs_season_94.json"
+    raw = json.loads(bomb_file.read_text(encoding="utf-8"))
+    partition = raw["boss_hits"]["Avatar"]["0"]["Legendary_0"]
+    assert len(partition) == 1
+    # Five byte-identical copies, exactly as production accumulated them.
+    partition.extend(json.loads(json.dumps(partition[0])) for _ in range(4))
+    bomb_file.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+
+    db = tmp_path / "data" / "scrapcode.db"
+    report = tmp_path / "parity.json"
+    monkeypatch.setenv("SCRAPCODE_DB_KEY", fernet_key)
+    result = _run_migration(source=tmp_clusters_tree, db=db, report=report)
+
+    assert result.returncode == 0, f"migration failed: {result.stdout}\n{result.stderr}"
+    parity = json.loads(report.read_text(encoding="utf-8"))
+    assert parity["overall"] == "PASS"
+    # The oracle counts the 5 copies as the 1 row they become, not as 5.
+    assert parity["tables"]["bomb_hits"] == {"json": 1, "sql": 1, "status": "PASS"}
+
+
 # ---------------------------------------------------------------------------
 # Remaining scenarios skipped until DELIVER.
 # ---------------------------------------------------------------------------
