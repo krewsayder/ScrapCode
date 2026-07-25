@@ -129,7 +129,33 @@ To abandon the cutover instead, run that cleanup and start the bot on JSON:
 `sudo systemctl start discord-bot`. Nothing has changed — `clusters/` was only
 ever read from a copy.
 
-## Step 5 — Promote and start
+## Step 5 — Verify the database, then promote
+
+Run this **before** promoting, while the file is still named `-tmp` and costs
+nothing to discard. `probe()` (ADR-006 D8) is implemented but not wired into
+startup, so nothing refuses a bad database at boot — this is that gate, by hand.
+
+```bash
+ls -la data/          # -wal / -shm must NOT be present; see below
+.venv/bin/python - <<'PYEOF'
+import sqlite3
+c = sqlite3.connect('data/scrapcode-tmp.db')
+print("integrity :", c.execute("PRAGMA integrity_check").fetchone()[0])
+print("journal   :", c.execute("PRAGMA journal_mode").fetchone()[0])
+print("alembic   :", c.execute("SELECT version_num FROM alembic_version").fetchone()[0])
+for t in ("clusters", "guilds", "players", "player_registrations",
+          "battle_hits", "bomb_hits", "replay_threads", "replay_entries"):
+    print("   %-20s %d" % (t, c.execute("SELECT COUNT(*) FROM %s" % t).fetchone()[0]))
+c.close()
+PYEOF
+```
+
+Expect `integrity : ok`, `journal : wal`, `alembic : 0002` (the compiled head),
+and counts matching the parity report. If `scrapcode-tmp.db-wal` or `-shm`
+exist, the migration did not close cleanly — do **not** move the `.db` alone,
+or you promote a database missing its most recent writes.
+
+Then promote:
 
 ```bash
 mv data/scrapcode-tmp.db data/scrapcode.db
@@ -139,19 +165,37 @@ sudo systemctl start discord-bot
 
 ## Step 6 — Confirm you are actually on SQLite
 
+**Do not use `grep ... discord.log` for this.** `build_repo()` runs at import
+time, before `bot.run()` installs the `RotatingFileHandler`, so a D9 fallback
+warning goes to stderr and lands in the journal — never in `discord.log`. A
+clean grep there proves nothing. Same for `on_ready`, which uses `print`.
+
+Check the file descriptors instead. This is positive evidence: if the bot had
+taken the JSON fallback it would never open this file.
+
 ```bash
-grep -i 'falling back to JsonClusterRepository' discord.log && echo "!! STILL ON JSON !!"
-sudo systemctl status discord-bot --no-pager
-sudo journalctl -u discord-bot -n 50 --no-pager | grep -i 'logged in as'
+PID=$(systemctl show -p MainPID --value discord-bot)
+sudo ls -l /proc/$PID/fd | grep -i scrapcode || echo 'NO DB HANDLE — ON JSON'
+sudo journalctl -u discord-bot -n 50 --no-pager \
+  | grep -iE 'logged in as|synced|falling back'
 ```
 
-**The grep must find nothing.** If it prints, you are running on JSON: do not
-proceed, and do not retire `clusters/`. Check that `.env` has all three
-`SCRAPCODE_*` vars and that `data/scrapcode.db` exists and is non-empty.
+Expect descriptors for `scrapcode.db`, `-wal` and `-shm`; `Logged in as ...`;
+and no `falling back`. (Quote that fallback string with **single** quotes if you
+add an `&& echo` — `!!` inside double quotes is history-expanded by interactive
+bash into your previous command.)
+
+If you see `NO DB HANDLE`, you are on JSON: do not proceed and do not retire
+`clusters/`. Check that `.env` has all three `SCRAPCODE_*` vars and that
+`data/scrapcode.db` exists and is non-empty.
 
 Then smoke-check in Discord: `/view_leaderboard`, `/view_bombs`, `/get_replay`.
 On-demand commands reflect the new backend immediately; live leaderboards lag up
 to an hour.
+
+Expect `/view_bombs` to render **fewer** rows than it did on JSON — one line per
+partition where identical copies used to repeat. That is the `bomb_hits`
+uniqueness constraint doing its job, not missing data.
 
 ## Step 7 — Observation cycle
 
@@ -161,6 +205,30 @@ Leave `clusters/` in place, untouched, for one full hourly cycle
 ```bash
 sudo journalctl -u discord-bot -n 200 --no-pager | grep -iE 'error|refused|falling back'
 ```
+
+**Prove a durable write before retiring anything.** Row counts alone will not
+show one: the repository writes by delete-and-reinsert and by upsert, so a
+healthy cycle can leave every count unchanged while the WAL grows. Name a value
+the bot must have written after cutover instead:
+
+```bash
+.venv/bin/python - <<'PYEOF'
+import sqlite3
+c = sqlite3.connect('data/scrapcode.db')
+print("max players.last_validated:",
+      c.execute("SELECT MAX(last_validated) FROM players").fetchone()[0])
+c.close()
+PYEOF
+```
+
+`last_validated` is stamped by `PlayerService.refresh_guild` on every successful
+roster refresh. If the maximum is later than the moment you started the bot, the
+write path is confirmed against disk. If it still matches migration time, the
+loops have not written — find out why before giving up your rollback source.
+
+Note that a failing Tacticus API produces quiet logs *and* no writes, so "an
+hour with no errors" can mean the loops never ran. Check the timestamp, not the
+silence.
 
 Clean? Retire the JSON tree:
 
