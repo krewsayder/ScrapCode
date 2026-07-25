@@ -147,6 +147,53 @@ def test_load_player_list_returns_v2_dict_shape_cogs_expect(sqlite_repo):
     assert "players" in plist
 
 
+def test_same_tacticus_player_may_belong_to_two_guilds(impl_pair):
+    """@driving_port — regression: production cutover 2026-07-25.
+
+    A player who transfers guilds stays in the old guild's player_list as
+    `is_former=true` while going active in the new one, so one
+    tacticus_user_id legitimately appears under two guild_ids. The JSON
+    layout permits this implicitly — one player_list.json per guild — so
+    the SQLite schema must permit it too.
+
+    The original schema put the PK on `players.tacticus_user_id` alone
+    (carried over from data-dictionary.md, which specified that key). The
+    second guild's write then died with
+    `UNIQUE constraint failed: players.tacticus_user_id`, aborting the real
+    cutover migration. The fixture tree hid it: neuro holds uid-001/002 and
+    mech holds uid-003, three disjoint ids, so no test ever wrote the same
+    player twice.
+    """
+    repo = impl_pair
+    server = 1458181638453203099
+    repo.save(repo.load(server))  # seed clusters/guilds so the FK resolves
+
+    shared = "tacticus-uid-transferred"
+    left_behind = {
+        "__meta__": {"version": 2},
+        "players": {shared: {
+            "display_name": "Transferred Player",
+            "last_validated": "2026-07-01T00:00:00Z",
+            "is_former": True,
+        }},
+    }
+    newly_joined = {
+        "__meta__": {"version": 2},
+        "players": {shared: {
+            "display_name": "Transferred Player",
+            "last_validated": "2026-07-25T12:00:00Z",
+            "is_former": False,
+        }},
+    }
+
+    repo.save_player_list(server, "neuro", left_behind)
+    repo.save_player_list(server, "mech", newly_joined)
+
+    # Both rows persist, and the second write does not clobber the first.
+    assert repo.load_player_list(server, "neuro") == left_behind
+    assert repo.load_player_list(server, "mech") == newly_joined
+
+
 def test_RC5_list_server_ids_enumerates_only_numeric_dirs(json_repo, tmp_clusters_tree):
     """RC5 — only numeric server directories."""
     # Add a stray non-numeric entry beside the server dir

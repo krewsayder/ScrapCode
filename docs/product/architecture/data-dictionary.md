@@ -212,7 +212,7 @@ flag. Versioned via `__meta__.version`; `PlayerListMigrator`
 | `last_validated` | str (ISO8601 UTC) | no | `1970-01-01T00:00:00Z` (post-migration) | `PlayerService.validate_if_stale` (stale check) | `PlayerService.refresh_guild`/`ensure_player_in_list` | `STALE_AFTER_HOURS = 1`. Epoch sentinel forces a real refresh after migration. Store as `TIMESTAMPTZ` in SQL. |
 | `is_former` | bool | no | `false` | `get_player_list` (appends "(former)"), `get_display_name`, `admin._config_guilds` (active count) | `PlayerService.refresh_guild` (sets true when absent from roster; rewritten each refresh) | `refresh_guild` rewrites the whole entry each cycle, so a returning player is un-flagged. Not a tombstone. |
 
-**Migration:** `players` table, PK `tacticus_user_id`, FK
+**Migration:** `players` table, PK `(discord_server_id, guild_id, tacticus_user_id)`, FK
 `(discord_server_id, guild_id) → guilds`. `last_validated` → `TIMESTAMPTZ`. The
 `__meta__` version scheme can be retired (SQL schema versioning instead), but the
 v1→v2 data must still be migrated once.
@@ -439,7 +439,7 @@ ADR):
 | Registration | `player_registrations.json` | `player_registrations` | `discord_id` | composite FK `(server_id, guild_id) → guilds`; unique `api_key` |
 | Capped state | `capped_state.json` | column on `player_registrations` (`is_capped`) or `capped_state` table | `discord_id` | 1:1 with registration; derived |
 | Live LB | `live_leaderboards.json` | `live_leaderboards` (+ `live_lb_messages` child) | surrogate; `guild:` rows FK `guild_id` | `messages` → child table `(config_id, tier_value, message_id)` |
-| Player list | `player_list.json` | `players` | `tacticus_user_id` | FK `(server_id, guild_id) → guilds`; `last_validated` TIMESTAMPTZ |
+| Player list | `player_list.json` | `players` | `(server_id, guild_id, tacticus_user_id)` | FK `(server_id, guild_id) → guilds`; `last_validated` TIMESTAMPTZ. **Not** keyed on `tacticus_user_id` alone — one file per guild means a transferred player appears in both guilds' lists. |
 | Battle detailed | `highest_hits_season_{n}.json` | `battle_hits` | `(server, guild, season, boss, encounter, tier, roster_key, user_id)` | FK `user_id → players` (nullable until backfilled); upsert keep max(damage) |
 | Battle simple | `highest_hits_simple_season_{n}.json` | `battle_hits_simple` (or drop if unused) | as above minus roster | confirm read-path before migrating |
 | Bombs | `highest_bombs_season_{n}.json` | `bomb_hits` | `(server, guild, season, boss, encounter, tier, user_id, completed_on)` | FK `user_id → players` |

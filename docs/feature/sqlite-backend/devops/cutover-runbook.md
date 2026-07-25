@@ -66,12 +66,35 @@ grep -q '^SCRAPCODE_DB_KEY=' .env || \
   .venv/bin/python -c "from cryptography.fernet import Fernet; print('SCRAPCODE_DB_KEY='+Fernet.generate_key().decode())" >> .env
 grep -q '^SCRAPCODE_DB_PATH=' .env      || echo 'SCRAPCODE_DB_PATH=data/scrapcode.db' >> .env
 grep -q '^SCRAPCODE_REPO_BACKEND=' .env || echo 'SCRAPCODE_REPO_BACKEND=sqlite' >> .env
-
-tail -3 .env                  # eyeball the result
 ```
+
+Verify **without printing the key** — never `cat` or `tail` `.env` in a terminal
+whose scrollback you might paste somewhere. This runs the same Fernet
+round-trip as probe step 3, so a bad key fails here rather than midway through
+the migration:
+
+```bash
+grep -E '^SCRAPCODE_(DB_PATH|REPO_BACKEND)=' .env
+set -a; . ./.env; set +a
+.venv/bin/python -c "
+from cryptography.fernet import Fernet; import os
+k = os.environ.get('SCRAPCODE_DB_KEY','')
+f = Fernet(k.encode()); assert f.decrypt(f.encrypt(b'x')) == b'x'
+print('fernet key valid, len', len(k))"
+```
+
+Expect the two `SCRAPCODE_` lines and `fernet key valid, len 44`.
 
 **Back up `SCRAPCODE_DB_KEY` alongside `DISCORD_TOKEN`.** It is not in the
 database. A DB backup without this key cannot decrypt any `api_key` column.
+The step-1 tarball was taken *before* the key existed, so it does **not**
+contain it — take a fresh snapshot now, and put the key in a password manager
+rather than trusting this one VM:
+
+```bash
+cp .env ~/scrapcode-env-postkey-$(date +%Y%m%dT%H%M%S).bak
+chmod 600 ~/scrapcode-env-postkey-*.bak
+```
 
 ## Step 4 — Migrate
 
@@ -90,9 +113,21 @@ grep '"overall"' data/parity-cutover.json     # MUST be "PASS"
 
 **Gate.** If exit is non-zero or `overall` is not `PASS`, stop. The production
 DB path is untouched. Read `data/parity-cutover.json` — it names the mismatched
-table. Clean up with `rm -f data/scrapcode-tmp.db; rm -rf clusters-migration-copy/`
-and restart the bot on JSON (`sudo systemctl start discord-bot`); nothing has
-changed yet.
+table. (On a crash rather than a parity failure the report is not written at
+all; the traceback is the diagnosis.)
+
+To retry after fixing the cause, always start from a clean slate — the temp DB
+holds a partial schema and partial rows, and re-running over it produces
+misleading errors:
+
+```bash
+rm -f data/scrapcode-tmp.db data/parity-cutover.json
+rm -rf clusters-migration-copy/
+```
+
+To abandon the cutover instead, run that cleanup and start the bot on JSON:
+`sudo systemctl start discord-bot`. Nothing has changed — `clusters/` was only
+ever read from a copy.
 
 ## Step 5 — Promote and start
 

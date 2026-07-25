@@ -7,7 +7,7 @@ Per ADR-006 D3 + data-dictionary §4. Tables:
   guilds                         (server_id, guild_id)      api_key_hmac UNIQUE
   guild_member_roles             (server_id, guild_id, role_id)
   player_registrations           (PK discord_id)            api_key_hmac UNIQUE NOT NULL, is_capped
-  players                        (PK tacticus_user_id)
+  players                        (PK server_id, guild_id, tacticus_user_id)
   battle_hits                    surrogate PK, unique (server,guild,season,boss,encounter,tier,roster_key,user_id)
   bomb_hits                      surrogate PK, unique (server,guild,season,boss,encounter,tier,user_id,completed_on)
   replay_threads                 (server_id, boss, map_name)
@@ -127,9 +127,18 @@ class PlayerRegistrationRow(Base):
 class PlayerRow(Base):
     __tablename__ = "players"
 
+    # The PK is the (server, guild, player) triple, NOT tacticus_user_id alone.
+    # The JSON layout is one player_list.json per guild, so the same Tacticus
+    # player legitimately appears in two guilds' lists — a player who transfers
+    # stays in the old guild's file as is_former=true while going active in the
+    # new one. A PK on tacticus_user_id alone rejects that with
+    # `UNIQUE constraint failed: players.tacticus_user_id` at migration time.
+    # Both access paths in repository_sqlalchemy already scope every read and
+    # delete by (discord_server_id, guild_id), so the wider key is transparent
+    # to callers. No FK anywhere references players.
+    discord_server_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    guild_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     tacticus_user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    discord_server_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    guild_id: Mapped[str] = mapped_column(String(64), nullable=False)
     display_name: Mapped[str] = mapped_column(String(128), nullable=False)
     last_validated: Mapped[str] = mapped_column(String(32), nullable=False)
     is_former: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

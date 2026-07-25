@@ -101,9 +101,9 @@ def upgrade() -> None:
     # players --------------------------------------------------------------
     op.create_table(
         "players",
-        sa.Column("tacticus_user_id", sa.String(length=64), nullable=False),
         sa.Column("discord_server_id", sa.Integer(), nullable=False),
         sa.Column("guild_id", sa.String(length=64), nullable=False),
+        sa.Column("tacticus_user_id", sa.String(length=64), nullable=False),
         sa.Column("display_name", sa.String(length=128), nullable=False),
         sa.Column("last_validated", sa.String(length=32), nullable=False),
         sa.Column("is_former", sa.Boolean(), nullable=False),
@@ -112,7 +112,13 @@ def upgrade() -> None:
             ["guilds.discord_server_id", "guilds.guild_id"],
             ondelete="CASCADE", name="fk_players_guild",
         ),
-        sa.PrimaryKeyConstraint("tacticus_user_id", name="pk_players"),
+        # (server, guild, player) — NOT tacticus_user_id alone. One
+        # player_list.json per guild means the same Tacticus player validly
+        # appears in two guilds (transferred: is_former in the old, active in
+        # the new). See PlayerRow in bot/db/models.py.
+        sa.PrimaryKeyConstraint(
+            "discord_server_id", "guild_id", "tacticus_user_id", name="pk_players"
+        ),
     )
 
     # battle_hits ----------------------------------------------------------
