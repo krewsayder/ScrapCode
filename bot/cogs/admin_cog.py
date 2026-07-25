@@ -6,7 +6,6 @@ from discord.ext import commands
 from bot.guilds import (
     load_guilds,
     save_guilds,
-    get_guild_data_path,
     load_live_leaderboards,
     save_live_leaderboards,
     load_player_list,
@@ -14,7 +13,7 @@ from bot.guilds import (
     add_guild_member_role,
     repo,
 )
-from bot.embeds import guild_autocomplete
+from bot.embeds import guild_autocomplete, encounter_limit
 from bot.permissions import require_tier, check_tier
 from bot.services.chronicl3r.player_service import PlayerService
 
@@ -87,7 +86,6 @@ class AdminCog(commands.Cog):
             "notification_channel_id": None,
         }
         save_guilds(server_id, guilds)
-        get_guild_data_path(server_id, guild_id)  # creates the data directory
 
         await interaction.followup.send(
             f"✅ Guild **{name}** registered! Fetching player roster...",
@@ -300,7 +298,7 @@ class AdminCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         from config import TIER_CHOICES
-        from bot.embeds import build_battle_messages, load_leaderboard_file
+        from bot.embeds import build_battle_messages
 
         server_id  = interaction.guild_id
         guilds     = load_guilds(server_id)
@@ -327,11 +325,7 @@ class AdminCog(commands.Cog):
             await interaction.followup.send(f"❌ Could not determine current season: {e}", ephemeral=True)
             return
 
-        data_dir  = get_guild_data_path(server_id, guild_id)
-        data, err = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
-        if err:
-            await interaction.followup.send(f"❌ {err} — run `/update_leaderboard` first.", ephemeral=True)
-            return
+        data = repo.load_battle_hits(server_id, guild_id, season)
 
         message_ids = {}
         for tier in TIER_CHOICES:
@@ -380,7 +374,7 @@ class AdminCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         from config import TIER_CHOICES
-        from bot.embeds import build_cluster_messages, load_leaderboard_file
+        from bot.embeds import build_cluster_messages
         from bot.guilds import get_player_list
 
         server_id = interaction.guild_id
@@ -405,9 +399,8 @@ class AdminCog(commands.Cog):
 
         merged = {}
         for gid, gdata in guilds.items():
-            data_dir  = get_guild_data_path(server_id, gid)
-            data, err = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
-            if err or not data:
+            data = repo.load_battle_hits(server_id, gid, season)
+            if not data or not data.get("boss_hits"):
                 continue
             id_to_name = get_player_list(server_id, gid)
             guild_name = gdata["name"]
@@ -423,7 +416,7 @@ class AdminCog(commands.Cog):
         for boss_id, encounter_dict in merged.items():
             for e_index, tiers in encounter_dict.items():
                 for tier_key in tiers:
-                    limit = 5 if e_index == "0" else 1
+                    limit = encounter_limit(e_index)
                     tiers[tier_key] = sorted(tiers[tier_key], key=lambda e: (-e["damage"], e.get("completed_on", "")))[:limit]
 
         message_ids = {}

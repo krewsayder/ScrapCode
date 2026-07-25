@@ -1,10 +1,59 @@
+import logging
+import os
 import re
 from pathlib import Path
 
-from bot.repository import JsonClusterRepository
+from bot.repository import ClusterRepository, JsonClusterRepository, SupportsProbe
 from bot.migrations.player_list_migrations import PlayerListMigrator
 
-repo = JsonClusterRepository()
+logger = logging.getLogger(__name__)
+
+
+def build_repo() -> ClusterRepository:
+    """Construct the live ClusterRepository from SCRAPCODE_REPO_BACKEND
+    (ADR-006 D9 — env-driven singleton; rollback = restart with =json).
+
+    Selection order:
+      1. `SCRAPCODE_REPO_BACKEND=json` → JsonClusterRepository (rollback
+         path; the probe is skipped so a missing/invalid SCRAPCODE_DB_KEY
+         does not block a JSON-backend rollback).
+      2. `SCRAPCODE_REPO_BACKEND=sqlite` (the post-cutover default) →
+         SqlAlchemyClusterRepository, UNLESS the safety net fires:
+           - SCRAPCODE_DB_KEY missing/empty → fall back to JSON for one cycle
+             (the SQLite impl cannot operate without the Fernet key).
+           - SCRAPCODE_DB_PATH file missing AND its parent directory exists
+             (i.e., the file was supposed to be there but is gone — deleted
+             or corrupted) → fall back to JSON for one cycle. A first-run
+             path whose parent dir does not yet exist constructs the SQLite
+             impl (which creates both the dir and the file via create_all).
+
+    The safety net keeps the JSON tree as the one-cycle read-only fallback
+    (US-010). A loud WARNING is logged on each fallback so the operator
+    sees it in `discord.log` / journalctl.
+    """
+    backend = os.getenv("SCRAPCODE_REPO_BACKEND", "sqlite")
+    if backend == "json":
+        return JsonClusterRepository()
+    db_path = os.getenv("SCRAPCODE_DB_PATH", "data/scrapcode.db")
+    fernet_key = os.getenv("SCRAPCODE_DB_KEY", "")
+    if not fernet_key:
+        logger.warning(
+            "SCRAPCODE_DB_KEY missing — falling back to JsonClusterRepository "
+            "for one cycle (SCRAPCODE_REPO_BACKEND=sqlite, ADR-006 D9 safety net)"
+        )
+        return JsonClusterRepository()
+    if Path(db_path).parent.exists() and not Path(db_path).exists():
+        logger.warning(
+            "SCRAPCODE_DB_PATH=%s missing — falling back to JsonClusterRepository "
+            "for one cycle (SCRAPCODE_REPO_BACKEND=sqlite, ADR-006 D9 safety net)",
+            db_path,
+        )
+        return JsonClusterRepository()
+    from bot.repository_sqlalchemy import SqlAlchemyClusterRepository
+    return SqlAlchemyClusterRepository()
+
+
+repo: SupportsProbe = build_repo()
 
 UUID_PATTERN = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',

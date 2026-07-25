@@ -1,4 +1,5 @@
 import asyncio
+
 import httpx
 import discord
 from discord.ext import commands, tasks
@@ -6,7 +7,6 @@ from discord.ext import commands, tasks
 from config import UPDATE_CHANNEL_ID
 from bot.guilds import (
     load_guilds,
-    get_guild_data_path,
     get_player_list,
     load_player_registrations,
     load_capped_state,
@@ -17,6 +17,7 @@ from bot.guilds import (
 )
 from bot.tracker import process_api_response
 from bot.guilds import load_player_list
+from bot.embeds import encounter_limit
 from bot.services.chronicl3r.player_service import PlayerService
 
 TACTICUS_PLAYER_URL   = "https://api.tacticusgame.com/api/v1/player"
@@ -25,9 +26,8 @@ TACTICUS_CURRENT_RAID = "https://api.tacticusgame.com/api/v1/guildRaid"
 
 
 class TasksCog(commands.Cog):
-    def __init__(self, bot: commands.Bot, file_lock, player_service: PlayerService):
+    def __init__(self, bot: commands.Bot, player_service: PlayerService):
         self.bot            = bot
-        self.file_lock      = file_lock
         self.player_service = player_service
         self.cap_detect.start()
         self.auto_update.start()
@@ -207,7 +207,6 @@ class TasksCog(commands.Cog):
                         continue
 
                     headers  = {"accept": "application/json", "X-API-KEY": api_key}
-                    data_dir = get_guild_data_path(server_id, guild_id)
                     url      = TACTICUS_RAID_URL.format(season=season)
 
                     try:
@@ -215,8 +214,7 @@ class TasksCog(commands.Cog):
                         response.raise_for_status()
                         api_data = response.json()
 
-                        async with self.file_lock:
-                            process_api_response(api_data, season, data_dir)
+                        process_api_response(api_data, season, server_id, guild_id)
 
                         await self._register_unknown_players(server_id, guild_id, api_data)
                         results.append(f"✅ **{guild_name}** — updated successfully.")
@@ -259,7 +257,7 @@ class TasksCog(commands.Cog):
                        live config at the new message IDs.
         """
         from config import TIER_CHOICES
-        from bot.embeds import build_battle_messages, build_cluster_messages, load_leaderboard_file
+        from bot.embeds import build_battle_messages, build_cluster_messages
 
         live = load_live_leaderboards(server_id)
         if not live:
@@ -289,12 +287,11 @@ class TasksCog(commands.Cog):
                     continue
 
                 guild_name = guild_data["name"]
-                data_dir   = get_guild_data_path(server_id, guild_id)
-                data, err  = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
+                data = repo.load_battle_hits(server_id, guild_id, season)
 
                 contents = {}
                 for tier in TIER_CHOICES:
-                    if err or not data:
+                    if not data or not data.get("boss_hits"):
                         contents[tier.value] = f"📊 **{guild_name} — {tier.name} — No data yet**"
                     else:
                         messages = build_battle_messages(
@@ -309,9 +306,8 @@ class TasksCog(commands.Cog):
             elif key == "cluster":
                 merged = {}
                 for gid, gdata in guilds.items():
-                    data_dir  = get_guild_data_path(server_id, gid)
-                    data, err = load_leaderboard_file(data_dir / f"highest_hits_season_{season}.json")
-                    if err or not data:
+                    data = repo.load_battle_hits(server_id, gid, season)
+                    if not data or not data.get("boss_hits"):
                         continue
                     id_to_name = get_player_list(server_id, gid)
                     guild_name = gdata["name"]
@@ -333,7 +329,7 @@ class TasksCog(commands.Cog):
                 for boss_id, encounter_dict in merged.items():
                     for e_index, tiers in encounter_dict.items():
                         for tier_key in tiers:
-                            limit = 5 if e_index == "0" else 1
+                            limit = encounter_limit(e_index)
                             tiers[tier_key] = sorted(
                                 tiers[tier_key], key=lambda e: (-e["damage"], e.get("completed_on", ""))
                             )[:limit]
@@ -427,5 +423,5 @@ class TasksCog(commands.Cog):
         await self.bot.wait_until_ready()
 
 
-async def setup_tasks(bot: commands.Bot, file_lock, player_service: PlayerService):
-    await bot.add_cog(TasksCog(bot, file_lock, player_service))
+async def setup_tasks(bot: commands.Bot, player_service: PlayerService):
+    await bot.add_cog(TasksCog(bot, player_service))

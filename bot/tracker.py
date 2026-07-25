@@ -1,18 +1,6 @@
-import json
-from pathlib import Path
-
 TRACKED_RARITIES = {"Legendary", "Mythic"}
 TOP_N = 5
 
-def load_json(path: Path) -> dict:
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding='utf-8'))
-        except: pass
-    return {"boss_hits": {}}
-
-def save_json(path: Path, data: dict):
-    path.write_text(json.dumps(data, indent=2), encoding='utf-8')
 
 def get_tier_key(entry: dict) -> str | None:
     rarity = entry.get("rarity")
@@ -36,6 +24,7 @@ def get_tier_key(entry: dict) -> str | None:
         pass
     return None
 
+
 def get_roster_key(entry: dict) -> tuple:
     """Returns a hashable key representing a player + roster combination.
     Heroes are sorted so order doesn't matter. MoW is included."""
@@ -45,6 +34,7 @@ def get_roster_key(entry: dict) -> tuple:
     mow_id = mow.get("unitId", "") if mow else ""
     return (user_id, heroes, mow_id)
 
+
 def try_insert(entries: list, new_entry: dict, check_roster: bool = False) -> bool:
     """Insert new_entry into entries if it qualifies.
 
@@ -52,6 +42,13 @@ def try_insert(entries: list, new_entry: dict, check_roster: bool = False) -> bo
       - Same player + same roster: only keep the higher damage hit.
       - Same player + different roster: allow as a separate entry.
     If check_roster is False (Bomb hits): original top-N logic, no deduplication.
+
+    Retained for the JSON rollback impl (`bot.repository.JsonClusterRepository`
+    imports it) and for the tiebreak contract pin (RC14 /
+    `bot/tests/test_tracker_tiebreak.py`). The SQLite write path
+    (`process_api_response`) no longer calls this — the SQL upsert enforces
+    keep-max(damage) (RC15). Removed from `bot.tracker` once the JSON impl's
+    `try_insert` import is retired (04-04 / later cleanup).
     """
     damage = new_entry["damage"]
 
@@ -86,69 +83,48 @@ def try_insert(entries: list, new_entry: dict, check_roster: bool = False) -> bo
             return True
         return False
 
-def process_api_response(api_data: dict, season: int, data_dir: Path = Path(".")):
-    BATTLE_DETAILED_FILE = data_dir / f"highest_hits_season_{season}.json"
-    BATTLE_SIMPLE_FILE   = data_dir / f"highest_hits_simple_season_{season}.json"
-    BOMB_FILE            = data_dir / f"highest_bombs_season_{season}.json"
 
-    battle_detailed = load_json(BATTLE_DETAILED_FILE)
-    battle_simple = load_json(BATTLE_SIMPLE_FILE)
-    bombs = load_json(BOMB_FILE)
+def process_api_response(api_data: dict, season: int,
+                          discord_server_id: int, guild_id: str) -> None:
+    """Upsert Tacticus API entries into battle_hits / bomb_hits via the repo.
 
+    Replaces the JSON season-file write path (ADR-006 D4 / ADR-007 / US-008).
+    The `data_dir` parameter is gone — the SQL partition key
+    `(season, discord_server_id, guild_id)` replaces it. Entries are filtered
+    by tracked rarity (`get_tier_key`) and routed by `damageType` to the
+    repo's `upsert_guild_hits` (one transaction per guild — ADR-006 D6).
+    The in-memory `try_insert` dedup is retired from this path — the SQL
+    upsert enforces keep-max(damage) (RC15). No `highest_*_season_*.json`
+    file is written.
+    """
+    repo = _get_write_repo()
+    battle_entries: list[dict] = []
+    bomb_entries: list[dict] = []
     for entry in api_data.get("entries", []):
-        tier_key = get_tier_key(entry)
-        if tier_key is None:
+        if get_tier_key(entry) is None:
             continue
-
         damage_type = entry.get("damageType")
-        if damage_type not in ("Battle", "Bomb"):
-            continue
-
-        boss_id = str(entry["unitId"])
-        damage = entry["damageDealt"]
-        e_index = str(entry.get("encounterIndex", 0))
-
         if damage_type == "Battle":
-            det_root = battle_detailed["boss_hits"].setdefault(boss_id, {}).setdefault(e_index, {})
-            sim_root = battle_simple["boss_hits"].setdefault(boss_id, {}).setdefault(e_index, {})
-
-            det_list = det_root.setdefault(tier_key, [])
-            sim_list = sim_root.setdefault(tier_key, [])
-
-            detailed_entry = {
-                "encounterType": entry.get("encounterType"),
-                "damage": damage,
-                "user_id": entry["userId"],
-                "completed_on": entry["completedOn"],
-                "hero_details": entry.get("heroDetails", []),
-                "machine_of_war": entry.get("machineOfWarDetails"),
-            }
-            simple_entry = {
-                "damage": damage,
-                "user_id": entry["userId"],
-                "completed_on": entry["completedOn"],
-                "encounter_type": entry.get("encounterType"),
-            }
-
-            # check_roster=True enforces the per-player per-roster deduplication
-            if try_insert(det_list, detailed_entry, check_roster=True):
-                try_insert(sim_list, simple_entry, check_roster=False)  # simple has no hero_details so no roster check
-                print(f"[Battle] Updated {boss_id} Index {e_index} [{tier_key}]")
-
+            battle_entries.append(entry)
         elif damage_type == "Bomb":
-            bomb_root = bombs["boss_hits"].setdefault(boss_id, {}).setdefault(e_index, {})
-            bomb_list = bomb_root.setdefault(tier_key, [])
+            bomb_entries.append(entry)
+    # One transaction per guild (ADR-006 D6): battle + bomb upserts share a
+    # single session_scope; a mid-guild failure rolls back that guild's whole
+    # write batch. Cross-guild isolation comes from separate calls per
+    # guild_id. The crash-injection assertion (AP7) lands in 04-05.
+    repo.upsert_guild_hits(discord_server_id, guild_id, season, battle_entries, bomb_entries)
 
-            bomb_entry = {
-                "encounterType": entry.get("encounterType"),
-                "damage": damage,
-                "user_id": entry["userId"],
-                "completed_on": entry["completedOn"],
-            }
 
-            if try_insert(bomb_list, bomb_entry, check_roster=False):
-                print(f"[Bomb] Updated {boss_id} Index {e_index} [{tier_key}]")
+def _get_write_repo():
+    """Resolve the write-side ClusterRepository from the current env.
 
-    save_json(BATTLE_DETAILED_FILE, battle_detailed)
-    save_json(BATTLE_SIMPLE_FILE, battle_simple)
-    save_json(BOMB_FILE, bombs)
+    04-04: delegates to `bot.guilds.build_repo()` so the write path re-reads
+    SCRAPCODE_REPO_BACKEND (and the missing-key/file safety net) at call
+    time — the same factory the composition root uses. The hourly
+    `auto_update` loop fires once per guild per hour, so the per-call
+    construction cost is negligible; the benefit is that test fixtures
+    (monkeypatch.setenv) and the operator's rolling-config changes are
+    honored without a process restart. ADR-006 D9.
+    """
+    from bot.guilds import build_repo
+    return build_repo()

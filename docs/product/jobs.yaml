@@ -1,0 +1,29 @@
+# ScrapCode — Jobs (minimal SSOT bootstrap)
+#
+# Status: BOOTSTRAPPED MINIMALLY for feature `sqlite-backend`.
+# DISCOVER was degenerate (backend data-layer swap, not a new user-facing feature),
+# so no JTBD / ODI discovery was run (Decision 4 = No). This file exists only so
+# future waves have a single place to find the job statement that the SQLite
+# migration traces to. Do NOT treat this as a validated JTBD artifact; it is a
+# one-line restatement of the migration's purpose taken from ADR-002 and the
+# orchestrator's feature summary.
+#
+# See: docs/feature/sqlite-backend/discuss/wave-decisions.md (SSOT bootstrap note)
+#      docs/product/architecture/adr-002-storage-backend-json-legacy.md
+
+jobs:
+  - id: preserve-data-integrity-through-backend-swap
+    type: infra-migration
+    statement: >
+      When ScrapCode swaps its flat-JSON data layer for SQLite, every existing
+      Discord command (/view_leaderboard, /view_bombs, /get_replay, /register,
+      /unregister, /move, admin config) and every hourly background task
+      (auto-update, cap-detect) must keep producing the same observable output
+      for the same input — while the standing non-atomic-write + silent-empty-read
+      data-loss trap is retired for good.
+    primary_persona: bot-operator-dev
+    jtbd_skipped: true
+    skip_reason: >
+      Motivations are clear (ADR-002 already accepted SQLite as successor);
+      the value is data integrity preservation, not new user outcomes.
+    traces_to_feature: sqlite-backend

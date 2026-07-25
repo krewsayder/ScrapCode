@@ -1,12 +1,10 @@
-import asyncio
-
 import httpx
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from bot.permissions import require_tier
-from bot.guilds import load_guilds, get_guild_data_path, load_player_list
+from bot.guilds import load_guilds, load_player_list
 from bot.tracker import process_api_response
 from bot.embeds import guild_autocomplete
 from bot.services.chronicl3r.player_service import PlayerService
@@ -15,9 +13,8 @@ TACTICUS_RAID_URL = "https://api.tacticusgame.com/api/v1/guildRaid/{season}"
 
 
 class UpdateCog(commands.Cog):
-    def __init__(self, bot: commands.Bot, file_lock: asyncio.Lock, player_service: PlayerService):
+    def __init__(self, bot: commands.Bot, player_service: PlayerService):
         self.bot            = bot
-        self.file_lock      = file_lock
         self.player_service = player_service
 
     # ==========================================
@@ -57,7 +54,6 @@ class UpdateCog(commands.Cog):
 
         url      = TACTICUS_RAID_URL.format(season=season)
         headers  = {"accept": "application/json", "X-API-KEY": api_key}
-        data_dir = get_guild_data_path(server_id, guild_id)
 
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
@@ -65,8 +61,7 @@ class UpdateCog(commands.Cog):
                 response.raise_for_status()
                 api_data = response.json()
 
-            async with self.file_lock:
-                process_api_response(api_data, season, data_dir)
+            process_api_response(api_data, season, server_id, guild_id)
 
             await self._register_unknown_players(server_id, guild_id, api_data)
 
@@ -113,15 +108,13 @@ class UpdateCog(commands.Cog):
                     continue
 
                 headers  = {"accept": "application/json", "X-API-KEY": api_key}
-                data_dir = get_guild_data_path(server_id, guild_id)
 
                 try:
                     response = await client.get(url, headers=headers)
                     response.raise_for_status()
                     api_data = response.json()
 
-                    async with self.file_lock:
-                        process_api_response(api_data, season, data_dir)
+                    process_api_response(api_data, season, server_id, guild_id)
 
                     await self._register_unknown_players(server_id, guild_id, api_data)
                     results.append(f"✅ **{guild_name}** — updated successfully.")
@@ -148,5 +141,5 @@ class UpdateCog(commands.Cog):
                 print(f"[UpdateCog] Failed to save unknown player {user_id}: {e}")
 
 
-async def setup_update(bot: commands.Bot, file_lock: asyncio.Lock, player_service: PlayerService):
-    await bot.add_cog(UpdateCog(bot, file_lock, player_service))
+async def setup_update(bot: commands.Bot, player_service: PlayerService):
+    await bot.add_cog(UpdateCog(bot, player_service))

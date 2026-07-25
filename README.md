@@ -2,6 +2,18 @@
 
 > ScrapCode is a multi-tenant Discord bot for Warhammer Tacticus clusters. It handles admin functions, player management, token cap notifications, and raid leaderboards. Each Discord server gets its own isolated data cluster, and all role permissions are configured dynamically per server.
 
+## Architecture
+
+Full architecture documentation lives under [`docs/product/architecture/`](docs/product/architecture/). Start with the overview; the rest are deep dives.
+
+- [Architecture overview](docs/product/architecture/overview.md) — start here: what the system is, doc index, library reference, gap-closure status.
+- [Data dictionary](docs/product/architecture/data-dictionary.md) — every persistent entity, its fields, readers/writers, relationships, and a migration mapping to SQLite/Postgres/Supabase.
+- [Architecture brief](docs/product/architecture/brief.md) — the full as-built architecture (SSOT): runtime model, multi-tenancy, storage, conventions, and a deployment/runtime-target section.
+- [Diagrams](docs/product/architecture/c4-diagrams.md) — system context, container, and TasksCog diagrams (Mermaid).
+- [ADR-001..005](docs/product/architecture/overview.md#adrs-as-built-retroactive) — the pinned decisions (permission model, storage backend, Chronicler-first doctrine, multi-tenancy).
+
+These are **as-built** (captured by a read-only pass; zero behavior changes) and live on the `docs/architecture-baseline` branch.
+
 ## Background
 I took this tool over from another developer who had started the project to meet a need from cluster leadership.  That developer no longer maintains the project and so I took this project over.  The original developer will be credited at some point 
 
