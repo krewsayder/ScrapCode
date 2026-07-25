@@ -227,6 +227,11 @@ sudo systemctl start discord-bot
 
 ## 8. Deploy runbook (standard Slice 04 cutover)
 
+> **Superseded — do not execute this block.** The commands below are the
+> DEVOPS-wave design sketch and are missing the `set -a; . ./.env; set +a`
+> source line, so the migration in step B1 fails on an empty Fernet key.
+> The executable version is **`cutover-runbook.md`** in this directory.
+
 Preconditions (gated by the prior slices):
 - Slice 01: ≥17 contract tests green against the JSON impl (KPI-1).
 - Slice 02: contract tests green against BOTH impls (parametrized); probe
