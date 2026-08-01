@@ -16,9 +16,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-__SCAFFOLD__ = True
-
 TACTICUS_GUILD_URL = "https://api.tacticusgame.com/api/v1/guild"
+
+# Reused verbatim from `PlayerService._fetch_roster`, the call this module
+# replaces. The endpoint, the header shape and this timeout are the same read
+# that produced every roster written so far; keeping them identical is what
+# makes the member set in a snapshot the set the old reader produced.
+_REQUEST_TIMEOUT_SECONDS = 20.0
 
 # HTTP statuses Tacticus returns for a revoked or invalid key. Verified
 # against Tacticus 2026-07-25. Lifted here from
@@ -96,8 +100,37 @@ def parse_guild_snapshot(payload: dict) -> GuildSnapshot:
     Returns UNVERIFIABLE when `guildId` is absent. There is NO fallback to
     comparing `guildTag` — a quiet downgrade to a weaker check is the same
     failure shape as the incident this feature exists to prevent (DDD-10).
+
+    A resolved identity is reported as MATCH: this function was given no
+    binding to compare against, so it reports "a guild resolved". Deciding
+    MATCH vs MISMATCH is the policy layer's call, and it is the only caller
+    that holds the expected identity.
     """
-    raise AssertionError("Not yet implemented — RED scaffold")
+    guild = payload.get("guild") or {}
+    uuid = guild.get("guildId")
+
+    if not uuid:
+        # The members are deliberately dropped as well: a roster whose owner
+        # cannot be established is one nobody may write, and handing it back
+        # anyway is the invitation to write it.
+        return GuildSnapshot(
+            outcome=ProbeOutcome.UNVERIFIABLE,
+            status=200,
+            error="the response carries no guildId",
+            raw=payload,
+        )
+
+    return GuildSnapshot(
+        outcome=ProbeOutcome.MATCH,
+        identity=GuildIdentity(
+            uuid=uuid,
+            tag=guild.get("guildTag"),
+            name=guild.get("name"),
+        ),
+        members=frozenset(m["userId"] for m in guild.get("members") or []),
+        status=200,
+        raw=payload,
+    )
 
 
 async def fetch_guild_snapshot(api_key: str) -> GuildSnapshot:
@@ -107,4 +140,44 @@ async def fetch_guild_snapshot(api_key: str) -> GuildSnapshot:
     statuses all come back as a classified snapshot, because the caller's job
     is to distinguish them and an exception erases the distinction.
     """
-    raise AssertionError("Not yet implemented — RED scaffold")
+    # Imported here, not at module scope, so importing this module costs
+    # `dataclasses` and `enum` only. `domain_types.py` and the policy layer
+    # import it for the vocabulary alone and must not pay for httpx.
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
+            response = await client.get(
+                TACTICUS_GUILD_URL,
+                headers={"accept": "application/json", "X-API-KEY": api_key},
+            )
+    except httpx.HTTPError as transport_error:
+        # Timeout, DNS failure, connection refused, protocol error. UNREACHABLE
+        # means "no state change, retry next cycle" — collapsing it into
+        # MISMATCH would quarantine every guild during a Tacticus outage
+        # (DDD-6).
+        return GuildSnapshot(
+            outcome=ProbeOutcome.UNREACHABLE,
+            error=f"{type(transport_error).__name__}: {transport_error}",
+        )
+
+    if response.status_code in DEAD_KEY_STATUSES:
+        # A revoked key returns no data, so there is nothing to contaminate:
+        # report it, never quarantine on it.
+        return GuildSnapshot(
+            outcome=ProbeOutcome.DEAD,
+            status=response.status_code,
+            error=f"the key was refused with HTTP {response.status_code}",
+        )
+
+    if response.status_code != 200:
+        # 5xx and everything else unexpected. Deliberately UNREACHABLE rather
+        # than a narrower 5xx test: an unrecognised status is a reason to
+        # retry, never a reason to act on a guild's binding.
+        return GuildSnapshot(
+            outcome=ProbeOutcome.UNREACHABLE,
+            status=response.status_code,
+            error=f"the guild service answered HTTP {response.status_code}",
+        )
+
+    return parse_guild_snapshot(response.json())

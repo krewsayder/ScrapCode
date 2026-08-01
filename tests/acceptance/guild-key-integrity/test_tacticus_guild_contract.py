@@ -33,7 +33,6 @@ requires_external = pytest.mark.skipif(
 # Recorded-response checks
 # ===========================================================================
 
-@RED
 @pytest.mark.real_io
 def test_a_recorded_response_yields_an_identity_and_a_roster_from_one_read(
     recorded_guild_response,
@@ -56,7 +55,6 @@ def test_a_recorded_response_yields_an_identity_and_a_roster_from_one_read(
     assert snapshot.outcome is ProbeOutcome.MATCH or snapshot.identity is not None
 
 
-@RED
 @pytest.mark.real_io
 @pytest.mark.error
 def test_a_recorded_response_without_the_identifier_is_unverifiable(
@@ -81,7 +79,6 @@ def test_a_recorded_response_without_the_identifier_is_unverifiable(
     )
 
 
-@RED
 @pytest.mark.real_io
 @pytest.mark.error
 @pytest.mark.parametrize("field", ["guildTag", "name"])
@@ -99,7 +96,6 @@ def test_a_recorded_response_missing_a_display_field_still_yields_an_identity(
     assert getattr(snapshot.identity, {"guildTag": "tag", "name": "name"}[field]) is None
 
 
-@RED
 @pytest.mark.real_io
 def test_the_snapshot_members_match_what_the_old_roster_reader_produced(
     recorded_guild_response,
@@ -123,7 +119,6 @@ def test_the_snapshot_members_match_what_the_old_roster_reader_produced(
 # Live checks — the only ones that can catch a vendor change
 # ===========================================================================
 
-@RED
 @requires_external
 @pytest.mark.requires_external
 @pytest.mark.kpi
@@ -146,7 +141,6 @@ async def test_the_live_service_still_returns_a_stable_identifier():
     assert first.identity.uuid == second.identity.uuid
 
 
-@RED
 @requires_external
 @pytest.mark.requires_external
 @pytest.mark.error
