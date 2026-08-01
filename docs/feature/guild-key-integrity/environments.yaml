@@ -1,0 +1,306 @@
+# environments.yaml — feature `guild-key-integrity` (DEVOPS wave)
+#
+# Consumed by DISTILL for Mandate 4 (Environmental Realism). DISTILL
+# parametrizes acceptance scenarios over `target_environments`.
+#
+# These are Python runtime + data states of a single Discord bot process,
+# NOT OS installs. The platform is one Linux VM under systemd (DEVOPS D1/D2);
+# there is no CI (D3); dev work happens on WSL2 and macOS.
+#
+# The distinguishing variable across environments is the relationship between
+# three things:
+#   (a) the binding row in `guild_key_bindings` (absent / present / matching)
+#   (b) what `GET /api/v1/guild` returns for the stored key
+#   (c) whether the transport succeeded at all
+# ADR-008 D6 is the classification table those three produce.
+#
+# See feature-delta.md `## Wave: DEVOPS / [REF] Environment Matrix`.
+
+target_environments:
+
+  - name: clean
+    description: |
+      Trust-on-first-use (ADR-008 D8). Fresh SQLite DB migrated to the new
+      head; `guild_key_bindings` has zero rows; guilds exist and have keys.
+      The first successful probe must ADOPT the observed identity, stamp
+      `identity_bound_at`, and announce the adoption exactly once in the
+      update channel. A second cycle must NOT re-announce.
+      This is also the environment every pre-existing production guild is
+      in on the day Slice 01 deploys.
+    platform: [linux, wsl, macos]
+    preconditions:
+      - "alembic upgrade head applied (guild_key_bindings exists, empty)"
+      - "SCRAPCODE_REPO_BACKEND=sqlite"
+      - "SCRAPCODE_DB_KEY set (Fernet key) and matching the DB"
+      - "at least one guild row with a non-empty api_key"
+      - "GET /api/v1/guild returns 200 with a guildId present"
+    exercises: [US-001, US-006, AC-001.1, AC-001.2, AC-001.6, DDD-8]
+
+  - name: bound-matching
+    description: |
+      The steady state, and the case that must stay silent. A binding row
+      exists and the probed `guildId` equals the bound one. Expected: no
+      alert, no write to the binding row other than routine fields, roster
+      and hit ingestion proceed normally, `guild.key.probe.ok` emitted.
+      A test suite that only covers drift will not catch an implementation
+      that alerts on every cycle.
+    platform: [linux, wsl, macos]
+    preconditions:
+      - "binding row present with tacticus_guild_id = the value the probe returns"
+      - "key_status = 'active'"
+      - "SCRAPCODE_REPO_BACKEND=sqlite"
+    exercises: [US-001, AC-001.3, KPI-4]
+
+  - name: bound-drifted
+    description: |
+      THE INCIDENT REPLAY. The binding says Word Bearers; the live probe
+      returns Dark Mechanicum. This is the exact condition that ran
+      undetected for ~72 hours from 2026-07-28.
+
+      Slice 01 behaviour: report and alert, do NOT block (deliberate
+      intermediate state).
+      Slice 03 behaviour: quarantine — key_status='quarantined',
+      quarantine_reason naming both identities, quarantined_at stamped,
+      ZERO rows written to players / battle_hits / bomb_hits.
+
+      Both behaviours are acceptance targets at their respective slices;
+      the environment is the same.
+    platform: [linux, wsl, macos]
+    preconditions:
+      - "binding row tacticus_guild_id = b64bdba4-36ac-4229-bd29-4b7b6ce7f44f (Word Bearers)"
+      - "probe response guildId = d71d583f-c970-4493-936f-178c21ab844c (Dark Mechanicum)"
+      - "guild has pre-existing players / battle_hits / bomb_hits rows whose counts are asserted UNCHANGED after the cycle"
+      - "SCRAPCODE_REPO_BACKEND=sqlite"
+    exercises: [US-002, US-004, AC-002.*, AC-004.*, KPI-2, DDD-5]
+
+  - name: unverifiable
+    description: |
+      The vendor-change environment (ADR-008 D1 / DDD-10). The probe returns
+      HTTP 200 and a well-formed guild object, but the `guildId` field is
+      ABSENT — the residual risk the whole feature carries, since guildId is
+      undocumented by Tacticus.
+
+      Required behaviour: classify `unverifiable`, emit
+      `guild.key.unverifiable` at ERROR, alert loudly and persistently, and
+      do NOT quarantine and do NOT block ingestion. There must be NO silent
+      fallback to comparing guildTag — a quiet downgrade to a weaker check
+      is the same failure shape as the incident.
+
+      Note this condition affects every guild simultaneously, which is
+      exactly why it must not block.
+    platform: [linux, wsl, macos]
+    preconditions:
+      - "probe fixture is a real recorded /api/v1/guild response with the guildId key REMOVED"
+      - "binding row present and previously matching"
+      - "SCRAPCODE_REPO_BACKEND=sqlite"
+    exercises: [AC-001.5, DDD-10, ADR-008-D1]
+
+  - name: tacticus-unreachable
+    description: |
+      Transport failure is not a mismatch (ADR-008 D6). Covers timeout, DNS
+      failure, connection reset, and 5xx as four parametrized cases over one
+      environment.
+
+      Required behaviour: classify `unreachable`, NO state change to the
+      binding row, NO quarantine, retry next cycle. Collapsing this into
+      `mismatch` would quarantine every guild in the cluster during a
+      Tacticus outage — a strictly worse outcome than the bug being fixed.
+    platform: [linux, wsl, macos]
+    preconditions:
+      - "transport error injected at the httpx boundary (httpx.TimeoutException / ConnectError / 503)"
+      - "binding row present with key_status='active'"
+      - "binding row state asserted BYTE-IDENTICAL after the cycle"
+    exercises: [AC-002.*, DDD-6]
+
+  - name: dead-key
+    description: |
+      401/403 from Tacticus. Reuses `_DEAD_KEY_STATUSES` from
+      bot/cogs/registration_cog.py:24 (verified against Tacticus 2026-07-25).
+
+      Required behaviour: classify `dead`, report to the operator, do NOT
+      quarantine — a dead key returns no data, so there is nothing to
+      contaminate and quarantining adds a recovery step for no safety gain.
+    platform: [linux, wsl, macos]
+    preconditions:
+      - "probe returns 401 (and, as a second case, 403)"
+      - "binding row present"
+    exercises: [DDD-6, US-003]
+
+  - name: mixed-cluster
+    description: |
+      THE SEASON SPOF (ADR-008 D7 / KPI-5). A Discord server with two or more
+      registered guilds, exactly one of which is quarantined.
+
+      CRITICAL: the quarantined guild MUST be FIRST in `guilds` dict
+      iteration order. `tasks_cog.auto_update` derives the season from
+      `next(iter(guilds.values()))` and skips the ENTIRE server when that
+      fails — so the defect is only reachable in that ordering. A scenario
+      that happens to place the quarantined guild second passes while the
+      bug is fully present.
+
+      Required behaviour: season discovery skips guilds without an
+      `active_key` and takes the first that answers; every non-quarantined
+      guild completes its cycle; `auto_update.cycle` records
+      guilds_total / guilds_processed / guilds_skipped / skip_reasons. When
+      NO guild has a usable key the server is skipped with an explicit
+      reason, never a silent `continue`.
+    platform: [linux, wsl, macos]
+    preconditions:
+      - ">= 2 guild rows under one discord_server_id"
+      - "the quarantined guild sorts/inserts FIRST in guilds dict order"
+      - "the other guild(s) have active, matching bindings"
+      - "a third case: ALL guilds quarantined (server skipped with an explicit reason)"
+    exercises: [AC-004.7, AC-004.9, KPI-5, DDD-7]
+
+  - name: json-backend-rollback
+    description: |
+      ADR-006 D9 degradation. `SCRAPCODE_REPO_BACKEND=json`, so
+      JsonClusterRepository serves the three binding methods:
+      load_guild_binding returns "unbound", save_guild_binding no-ops,
+      list_guild_bindings returns empty.
+
+      Required behaviour: the feature goes INERT without raising. No
+      quarantine is possible (nothing persists), ingestion behaves exactly
+      as it did before the feature existed, and the bot starts cleanly (the
+      probe is skipped on the JSON backend). The parametrized repository
+      contract suite must stay green against this adapter.
+
+      This is the environment the operator lands in if Slice 01 or 03 has to
+      be rolled back under time pressure, so "does not crash" is the whole
+      requirement.
+    platform: [linux, wsl, macos]
+    preconditions:
+      - "SCRAPCODE_REPO_BACKEND=json"
+      - "clusters/ JSON tree present"
+      - "SCRAPCODE_DB_KEY may be absent (probe is skipped on the JSON backend)"
+    exercises: [AC-001.7, AC-006.3, ADR-006-D9]
+
+coexistence_matrix:
+
+  - tool: systemd
+    must_not_break: true
+    note: |
+      The `discord-bot` unit is the deploy mechanism. Probe refusal must
+      surface as a systemd `failed` state, not be masked by a
+      `Restart=always` loop. Unchanged from the sqlite-backend wave.
+
+  - tool: discord-bot-backup.timer
+    must_not_break: true
+    note: |
+      Hourly SQLite backup (VACUUM INTO, keep 24). It MUST have run
+      successfully before the Slice 01 `alembic upgrade head` — it is the
+      only rollback for a bad migration. Verify with
+      `systemctl status discord-bot-backup.timer` as deploy step 1.
+
+      RESTORE PROCEDURE: devops/runbook.md §1. Added 2026-08-01 after the
+      Final Wave Review Gate found this note named the backup as the only
+      undo without saying anywhere how to use it. The load-bearing step is
+      `rm -f data/scrapcode.db-wal data/scrapcode.db-shm` — the stale WAL
+      belongs to the OLD database and corrupts the restored copy.
+
+      UNVERIFIED PRECONDITION: docs/feature/sqlite-backend/devops/
+      cutover-runbook.md records under "Known gaps at cutover time" that this
+      timer was NEVER INSTALLED. If that is still true, the only rollback for
+      a bad migration does not exist. Confirm before the Slice 01 deploy and
+      take a manual VACUUM INTO snapshot if the unit is absent — runbook.md
+      opens with this check.
+
+  - tool: alembic
+    must_not_break: true
+    note: |
+      Current head is revision "0002" (0002_battle_hero_details.py). The new
+      revision MUST set down_revision = "0002". The ADR-006 probe compares
+      the DB's alembic_version against the compiled head and refuses on ANY
+      inequality (bot/db/session.py:224) — in BOTH directions. Hence:
+      migrate BEFORE restart on deploy; downgrade BEFORE checkout on
+      rollback.
+
+  - tool: import-linter
+    must_not_break: true
+    note: |
+      Four contracts live in pyproject.toml [tool.importlinter]. They must
+      still pass once bot/guild_keys.py, bot/obs.py and
+      bot/services/tacticus/ exist. One contract is ADDED this feature
+      (guild_keys must not be imported by repository*). The tool is
+      currently installed in .venv but ABSENT from requirements.txt —
+      DEVOPS D10 pins it.
+
+  - tool: pytest-archon
+    must_not_break: true
+    note: |
+      Installed in .venv, imported by ZERO tests today. DEVOPS D10 puts it
+      to work in tests/acceptance/guild-key-integrity/test_architecture_chokepoint.py
+      and pins it into requirements.txt.
+
+  - tool: pytest
+    must_not_break: true
+    note: |
+      `pytest tests/unit tests/acceptance` is THE gate (no CI — DEVOPS D3).
+      The new suite lands at tests/acceptance/guild-key-integrity/ beside
+      tests/acceptance/sqlite-backend/, which keeps its own pytest.ini.
+
+  - tool: pip-venv
+    must_not_break: true
+    note: |
+      /opt/discord-bot/.venv is reused. `pip install -r requirements.txt` is
+      the deploy dependency step. No new runtime dependency is introduced by
+      this feature — only the two enforcement tools move from ad-hoc
+      installs into the pinned file.
+
+  - tool: pre-commit
+    must_not_break: true
+    note: |
+      NOT installed (no .pre-commit-config.yaml, no hook in .git/hooks).
+      DEVOPS D10 deliberately does not introduce it: it requires
+      `pre-commit install` per clone and is bypassable with --no-verify.
+      If added later it must not become a substitute for the pytest gate.
+
+  - tool: husky
+    must_not_break: true
+    note: "Not installed; same coexistence contract as pre-commit if added."
+
+  - tool: discord-api
+    must_not_break: true
+    note: |
+      Alerts post to the update channel and the guild ping channel. Capped
+      at one per guild per 24 h via `last_alerted_at` on the binding row —
+      without the cap an hourly loop alerts hourly forever and the operator
+      mutes the channel, which defeats KPI-1.
+
+platform_coverage:
+  Linux:
+    - "Ubuntu 22.04 LTS (production VM, discord-bot-vm)"
+    - "Ubuntu 24.04 LTS (acceptable upgrade target)"
+  WSL:
+    - "WSL2 on Windows 11 (primary dev environment)"
+  macOS:
+    - "macOS 14+ (secondary dev environment)"
+  Python:
+    - "3.11 (matches the VM venv)"
+    - "3.13 (local dev — the existing test __pycache__ shows cpython-313)"
+  CI:
+    - "None (DEVOPS D3). Stages 1-3 are CI-portable unchanged if added."
+
+deployment_assumptions:
+
+  - "IDEMPOTENT: re-running a cycle against an already-bound, matching guild changes nothing and emits no alert. Re-running `alembic upgrade head` on a migrated DB is a no-op."
+
+  - "MIGRATE BEFORE RESTART. The probe refuses on any alembic_version != compiled head, so starting the new code against an unmigrated DB puts the unit in `failed`."
+
+  - "DOWNGRADE BEFORE CHECKOUT. The mirror-image rollback: `alembic downgrade -1` THEN `git checkout <prev>`. Reversing these leaves the DB ahead of the code and the probe refuses to start. This is the most likely operational mistake in this feature."
+
+  - "ADDITIVE MIGRATION: guild_key_bindings is a new table with NO data backfill (TOFU populates it on first probe). downgrade() is a plain drop_table. No production row is at risk in either direction."
+
+  - "NO NEW SECRET, NO NEW ENV VAR, NO NEW PORT, NO NEW EXTERNAL SYSTEM. `key_ref` in log records derives from the existing api_key_hmac (HKDF-SHA256 keyed by SCRAPCODE_DB_KEY, ADR-006 D7) — 8 hex chars, not key material."
+
+  - "NO PLAINTEXT KEY IN ANY SINK. No api_key value may appear in discord.log, journald, or a Discord response — including error paths and tracebacks (KPI-6). /update_guild_key responses are ephemeral."
+
+  - "THREE SEPARATE RELEASES, NOT ONE. Slice 01 -> (7-day soak, DEVOPS D11) -> Slice 03. Slice 02 must be deployed BEFORE Slice 03 in all orderings: it is the only exit from quarantine (ADR-008 D5), so enforcing first makes the first quarantine unrecoverable without SSH."
+
+  - "SOAK GATE: Slice 03 deploys only after 7 days in which every registered guild has a first-bind announcement and no unexplained guild.key.mismatch / guild.key.unverifiable record. Any unexplained record resets the window."
+
+  - "quarantined_at MUST be written ISO-8601 UTC in the SAME shape as battle_hits.completed_on (String(32), sourced verbatim from Tacticus). KPI-2 compares them as strings; mismatched shapes return a wrong result set silently instead of erroring. Verify against a production row before relying on it."
+
+  - "bot/services/tacticus/ requires an __init__.py — bot/services/ has exactly one subpackage today and the import-linter contracts must be able to resolve the new one."
+
+  - "A failed deploy AUTO-STOPS rather than half-runs: probe failure -> non-zero exit -> systemd `failed`. Inherited from ADR-006 D8, unchanged."

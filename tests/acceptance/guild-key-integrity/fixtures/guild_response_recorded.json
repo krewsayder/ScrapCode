@@ -1,0 +1,29 @@
+{
+  "_recording_note": [
+    "Shape of GET https://api.tacticusgame.com/api/v1/guild, as consumed by",
+    "bot/services/chronicl3r/player_service.py::_fetch_roster (resp.json()",
+    "['guild']['members'] -> m['userId']) and by ADR-008 D1 (guildId).",
+    "",
+    "Member userIds are scrubbed placeholders; the SHAPE is what this file",
+    "asserts, and the shape is what the vendor can silently change.",
+    "",
+    "guildId is UNDOCUMENTED by Tacticus. It is the single field the whole",
+    "feature binds on. When re-recording after a vendor change, the diff on",
+    "this file is the review artifact.",
+    "",
+    "Captured: 2026-07-31, guild word_bearers, production key."
+  ],
+  "guild": {
+    "guildId": "b64bdba4-36ac-4229-bd29-4b7b6ce7f44f",
+    "guildTag": "EUVQZ",
+    "name": "【UNDV】Word Bearers",
+    "level": 27,
+    "members": [
+      { "userId": "aaaaaaaa-0000-0000-0000-000000000001", "role": "leader" },
+      { "userId": "aaaaaaaa-0000-0000-0000-000000000002", "role": "coLeader" },
+      { "userId": "aaaaaaaa-0000-0000-0000-000000000003", "role": "officer" },
+      { "userId": "aaaaaaaa-0000-0000-0000-000000000004", "role": "member" },
+      { "userId": "aaaaaaaa-0000-0000-0000-000000000005", "role": "member" }
+    ]
+  }
+}

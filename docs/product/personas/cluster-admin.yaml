@@ -1,0 +1,74 @@
+# Persona SSOT — created by feature `guild-key-integrity` (DISCUSS 2026-07-31).
+# First persona file in this repository. Grounded in observed behaviour during
+# the 2026-07-28→31 wrong-guild-key incident, not in a research interview.
+
+id: cluster-admin
+name: Cluster admin / bot operator
+type: primary
+count: 1
+created_by_feature: guild-key-integrity
+
+summary: >
+  The single operator-developer who owns the ScrapCode deployment. Holds every
+  guild's Tacticus API key, is the only person with VM access, and is the only
+  person who can currently fix anything about a key.
+
+context:
+  deployment: single Ubuntu VM, systemd unit `discord-bot`, `/opt/discord-bot`
+  access: SSH + Discord admin tier; no one else has either
+  scale: 1 Discord server, multiple game guilds in the cluster
+  cadence: >
+    Checks in when something looks wrong rather than on a schedule. Has no
+    dashboard and no alerting outside the bot's own update-channel posts.
+
+goals:
+  - Keep the hourly leaderboard updates accurate and uninterrupted
+  - Fix problems from Discord rather than from a shell
+  - Never lose player or hit history to a recovery action
+
+frustrations:
+  - >
+    Key replacement requires stopping the service, backing up the database, and
+    writing a throwaway Python script — the only alternative destroys history.
+  - >
+    Silent failure. The wrong-guild-key incident produced no error, no warning,
+    and no log line; it was found by a human noticing unfamiliar names.
+  - >
+    Diagnosing anything means decrypting values out of SQLite by hand, because
+    api_key is Fernet ciphertext and cannot be read or edited with raw SQL.
+
+mental_model:
+  - >
+    "A guild's API key belongs to the guild." False, and the incident's root
+    cause: the key belongs to a *player*, and travels with that player when
+    they change guilds while keeping guild-scope permissions.
+  - >
+    "If the numbers were wrong, I would see it." Only true when the two guilds
+    look different. A shared alliance prefix defeats it.
+  - "Registering a guild is a one-time setup action." Was true until a key moved.
+
+vocabulary:
+  guild: >
+    Ambiguous by default and worth disambiguating in every user-facing string.
+    A *Discord* guild (server) and a *Tacticus* guild (in-game) are different
+    things, and the bot's own code uses `discord_server_id` vs `guild_id` for
+    the distinction.
+  cluster: the set of Tacticus guilds tracked by one Discord server
+  tag: the short Tacticus guild code (e.g. EUVQZ) — the operator's primary
+    identifier for a guild, and the one they reach for first
+  key: a Tacticus API key; guild-scoped or player-scoped depending on origin
+  season: a Tacticus guild-raid season number (e.g. 106)
+
+decision_rights:
+  - Registers and deregisters guilds
+  - Installs and replaces guild API keys
+  - Sets permission tiers, ping channels, and live leaderboards
+  - Sole authority over anything requiring VM access
+
+anti_goals:
+  - >
+    Does not want automatic key recovery or retry-until-it-works. A key problem
+    should stop and wait for a human, not resolve itself in a way that might be
+    wrong.
+  - >
+    Does not want alerting outside Discord. No email, no webhook, no pager.

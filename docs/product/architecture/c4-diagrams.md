@@ -226,3 +226,80 @@ flowchart TD
   must demonstrate it can transact before the system depends on it.
 - No arrow crosses the process boundary except the unchanged Tacticus /
   Chronicler integrations (§§1–2). SQLite is in-process.
+
+---
+
+# Diagrams — `guild-key-integrity` (DESIGN wave, target)
+
+> Appended 2026-07-31. **System Context (§1) and Container (§4) are unchanged**
+> — this feature introduces no new external system and no new container. Only a
+> Component diagram is warranted. See
+> [ADR-008](adr-008-guild-key-identity-binding.md).
+
+## 6. Component diagram — guild key verification path
+
+```mermaid
+flowchart TB
+    subgraph Driving["Driving ports"]
+        Admin["/update_guild_key<br/>admin tier"]
+        Upd["/update_leaderboard<br/>/update_all"]
+        Auto["auto_update<br/>@tasks.loop(hours=1)"]
+        Cfg["/view_config config:guilds"]
+    end
+
+    subgraph Policy["Key policy — the ONLY sanctioned api_key reader"]
+        GK["bot/guild_keys.py<br/>verify_and_resolve() async — probes + enforces<br/>active_key() sync — storage only"]
+    end
+
+    subgraph Adapters["Driven adapters"]
+        TC["bot/services/tacticus/guild_client.py<br/>fetch_guild_snapshot()<br/>the ONLY issuer of GET /api/v1/guild"]
+        Repo["ClusterRepository (ABC)<br/>+load_guild_binding<br/>+save_guild_binding<br/>+list_guild_bindings"]
+    end
+
+    subgraph Consumers["Snapshot consumers"]
+        PS["PlayerService<br/>refresh_guild(snapshot)<br/>validate_if_stale(snapshot)<br/>NO http — _fetch_roster deleted"]
+        Track["tracker.process_api_response"]
+    end
+
+    SQL[("guild_key_bindings<br/>tacticus_guild_id ← the binding<br/>key_status: active / quarantined<br/>CASCADE from guilds")]
+    Tact{{"Tacticus API<br/>api.tacticusgame.com"}}
+    Chron{{"Chronicler<br/>www.chronicl3r.com"}}
+
+    Admin --> GK
+    Upd --> GK
+    Auto --> GK
+    Cfg -- "reads binding for display" --> Repo
+
+    GK -- "1 request: identity + roster" --> TC
+    TC --> Tact
+    GK -- "read binding / write quarantine" --> Repo
+    Repo --> SQL
+
+    GK -- "on ok: passes verified snapshot" --> PS
+    GK -- "on ok: releases key" --> Track
+    GK -. "quarantined / dead / unreachable<br/>→ NO write of any kind" .-> Consumers
+
+    PS -- "per-player profiles (unchanged)" --> Chron
+```
+
+## Notes — `guild-key-integrity` diagram
+
+- **The probe is not a separate call.** `fetch_guild_snapshot` issues one
+  `GET /api/v1/guild` and returns identity *and* members. Probe and roster
+  cannot disagree because they are the same response (ADR-008 D2), and the
+  hourly Tacticus call count is unchanged rather than doubled.
+- **Every arrow into an ingestion path passes through `bot/guild_keys.py`.**
+  That is the whole design: the seven pre-existing call sites that each read
+  `api_key` independently now have exactly one door. An AST rule forbids
+  `bot/cogs/*` and `bot/services/*` from reading `api_key` directly.
+- **The dotted arrow is the quarantine path** — it writes nothing. Not the
+  roster, not the hits. Blocking hits alone would leave `refresh_guild` free to
+  invert the roster, which was 60 of 67 corrupted `players` rows in the incident
+  (ADR-008 D5).
+- **`PlayerService` no longer speaks to Tacticus.** It keeps its Chronicler
+  calls for per-player profiles; the Tacticus-direct call has moved out of the
+  Chronicler package entirely, resolving the oddity ADR-003 row #2 flags.
+- **`active_key` (sync, no probe) exists solely for season discovery**, which
+  must skip quarantined guilds and fall through to the next usable key —
+  otherwise quarantining one guild halts every guild in the server
+  (ADR-008 D7).

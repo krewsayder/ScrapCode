@@ -30,13 +30,24 @@ allowed (i.e. not served by Chronicler today):
 | # | Endpoint | Caller(s) | Why direct (not Chronicler) |
 |---|----------|-----------|------------------------------|
 | 1 | `GET /api/v1/player` | `tasks_cog.cap_detect`, `token_cog`, `bomb_cog`, `registration_cog.register` (validation) | Real-time raid-token / bomb-token progress and live API-key validation (401). Chronicler does not serve real-time token state. |
-| 2 | `GET /api/v1/guild` | `PlayerService._fetch_roster` | Current guild member `userId` set, used to mark `is_former` and seed new players. Currently direct; roster may move to Chronicler later. |
+| 2 | `GET /api/v1/guild` | `bot/services/tacticus/guild_client.fetch_guild_snapshot` (amended by ADR-008 — was `PlayerService._fetch_roster`) | Guild **identity** (`guildId`/`guildTag`/`name`) **and** current member `userId` set, from one response. Identity gates whether the roster is trusted at all; members mark `is_former` and seed new players. Currently direct; roster may move to Chronicler later. |
 | 3 | `GET /api/v1/guildRaid` (current) | `tasks_cog.auto_update`, `admin_cog.set_live_leaderboard`, `admin_cog.set_live_cluster_leaderboard` | Current season number discovery. |
 | 4 | `GET /api/v1/guildRaid/{season}` | `tasks_cog.auto_update`, `update_cog.update_leaderboard`, `update_cog.update_all` | Per-season raid hit/bomb entries merged by `tracker.process_api_response`. The Chronicler namespace is `tacticus-guild-raid`, so raid data *may* migrate to Chronicler; until then it is fetched direct. |
 
 Anything not in this table must **not** be added as a direct Tacticus call. If a
 future feature needs data Chronicler already exposes, it goes through
 `services/chronicl3r`.
+
+> **Amendment (2026-07-31, [ADR-008](adr-008-guild-key-identity-binding.md)).**
+> Row #2's caller moved out of `services/chronicl3r` into a dedicated
+> `services/tacticus` module, and its purpose broadened from "roster" to
+> "roster + guild identity". This is **not** a new call: the guild-identity
+> probe is folded into the existing roster request rather than added beside it,
+> so the endpoint list and the per-hour call volume are unchanged. The move
+> resolves the oddity this row previously carried — a Tacticus-direct call
+> living inside the Chronicler package — and `services/chronicl3r` now makes no
+> Tacticus call at all (enforced: `bot/services/chronicl3r/*` must not import
+> `httpx`).
 
 ### Where Chronicler is used today
 

@@ -816,3 +816,120 @@ new external system is introduced.
 | D12 `update_channel_id` dropped; v1→v2 once | US-003, US-005 |
 | D13 OOP paradigm | (paradigm routing) |
 | ADR-007 ABC read methods + `get_guild_data_path` deprecation | US-008 (scope expansion) |
+
+---
+
+## Application Architecture — `guild-key-integrity` (DESIGN wave)
+
+> Appended by the DESIGN wave for feature `guild-key-integrity` (2026-07-31).
+> §§1–8 and the `sqlite-backend` section above are unchanged. Full decision
+> text, alternatives and consequences:
+> [ADR-008](adr-008-guild-key-identity-binding.md).
+
+### A. Scope and quality-attribute priorities
+
+A **provenance guard** on guild API keys. A Tacticus key belongs to a *player*,
+not a guild; when a guild-scoped key-holder changes guild the key keeps working
+and starts returning the new guild's data. ScrapCode has never checked which
+guild a key resolves to. On ~2026-07-28 that produced ~72 hours of one guild's
+data written under another's identity (season 106: 30/30 battle and 20/20 bomb
+rows off-roster; 60 of 67 `players` rows corrupted).
+
+Quality-attribute priorities, in order: **correctness/provenance > operability
+> testability > maintainability > time-to-market**. Scalability is NOT a
+priority (ADR-004: one process, one VM).
+
+Scope: application / components. No system- or domain-architect scope — the
+single-process framing in §1 of this brief is unchanged.
+
+### B. Architecture pattern
+
+**Unchanged** — modular monolith with dependency inversion (ports-and-adapters).
+This feature adds one driven adapter (`bot/services/tacticus/guild_client.py`),
+one application-policy module (`bot/guild_keys.py`), one ORM row, and three ABC
+methods. It introduces no new architectural style.
+
+### C. New components
+
+| Component (status) | Responsibility | Depends on (inward only) |
+|---|---|---|
+| `bot/services/tacticus/guild_client.py` (NEW) | `fetch_guild_snapshot(api_key) -> GuildSnapshot` — the **only** issuer of `GET /api/v1/guild`. Returns guild identity (`guildId`/`guildTag`/`name`) **and** member ids from one response (ADR-008 D2). Classifies dead / unreachable / unverifiable (D6). | `httpx` only. |
+| `bot/guild_keys.py` (NEW) | The single key-policy chokepoint (D3). `verify_and_resolve` (async — probes, compares, quarantines, returns the verified snapshot) and `active_key` (sync — storage only, for season discovery). The only sanctioned reader of a guild `api_key`. | `bot.guilds`, `bot.services.tacticus.guild_client`. |
+| `guild_key_bindings` table (NEW) | 1:1 with `guilds`, CASCADE. `tacticus_guild_id` (the binding), `tacticus_guild_tag` + `tacticus_guild_name` (display), `identity_bound_at`, `key_status`, `quarantine_reason`, `quarantined_at`, `last_alerted_at`. | — |
+
+### D. Modified components
+
+`bot/repository.py` (ABC + JSON impl) and `bot/repository_sqlalchemy.py` gain
+`load_guild_binding` / `save_guild_binding` / `list_guild_bindings` — the
+ADR-007 pattern. `bot/guilds.py` gains two thin wrappers; **`Guild` and
+`save_guilds` are deliberately untouched** (D4).
+`bot/services/chronicl3r/player_service.py` loses `_fetch_roster` entirely —
+`refresh_guild` / `validate_if_stale` now take a `GuildSnapshot` and make no
+HTTP call. `admin_cog` gains `/update_guild_key` and renders binding state in
+`_config_guilds`; `update_cog` and `tasks_cog` route their key reads through the
+chokepoint.
+
+### E. Correction to §4.1 and to the `sqlite-backend` section
+
+The DISCUSS wave for this feature asserted that a field absent from
+`load_guilds`/`save_guilds` is destroyed on the next save. That holds for
+`JsonClusterRepository.save` (which rebuilds the dict from `Guild` fields) but
+**not** for `SqlAlchemyClusterRepository._upsert_one_guild`, which assigns five
+attributes by name on an existing row — unlisted columns survive. The genuine
+hazard is the inverse: adding binding fields to the `Guild` dataclass would let
+`save_guilds` write `None` defaults over live state on any unrelated admin
+command. This is why D4 uses a separate table.
+
+### F. Amendment to ADR-003's direct-Tacticus allow-list
+
+Row #2 (`GET /api/v1/guild`) changes caller from
+`PlayerService._fetch_roster` to
+`bot/services/tacticus/guild_client.fetch_guild_snapshot`, and its purpose
+broadens from "roster" to "roster + guild identity". **No new endpoint, no new
+external system, and no increase in call volume** — the identity probe is folded
+into the roster call rather than added beside it (ADR-008 D2). The Chronicler
+package no longer makes any Tacticus call, resolving the oddity ADR-003 row #2
+flagged.
+
+### G. Architecture enforcement (extends §I of the `sqlite-backend` section)
+
+- `bot/cogs/*` and `bot/services/*` MUST NOT read `api_key` off a guild dict or
+  `Guild` object — sanctioned readers are `bot/guild_keys.py` and the adapters.
+- `bot/services/chronicl3r/*` MUST NOT import `httpx`.
+- `bot/guilds.py` MUST NOT import `bot.guild_keys` or `httpx` (cycle guard).
+- `bot/guild_keys.py` MUST NOT be imported by `bot/repository*.py` (policy
+  depends on storage, never the reverse).
+
+### H. External integrations
+
+No new external integrations. Tacticus and Chronicler are unchanged as systems;
+only the *caller* of one existing Tacticus endpoint moves. ADR-006 §H's note
+stands: Tacticus remains the highest-risk contract boundary. This feature adds
+one recommendation to that surface — a recorded-response contract test for
+`GET /api/v1/guild` including a fixture with `guildId` **absent**, since that
+field is undocumented and its disappearance is the feature's residual risk.
+
+### I. Development paradigm
+
+**OOP — unchanged.** Already pinned in `CLAUDE.md` and ADR-006 D13. Routes
+DELIVER to `@nw-software-crafter`. No change requested to `CLAUDE.md`.
+
+### J. C4 diagrams
+
+See [c4-diagrams.md §6](c4-diagrams.md) — a Component diagram for the
+key-verification path. The System Context (§1) and Container (§4) diagrams are
+**unchanged**: no new external system, no new container.
+
+### K. Traceability
+
+| ADR-008 decision | Driving stories |
+|---|---|
+| D1 `guildId` binding | US-001, US-002 |
+| D2 probe folded into roster fetch | US-001, US-002 |
+| D3 single chokepoint | US-004 |
+| D4 separate binding table | US-006 |
+| D5 quarantine blocks roster + hits | US-004 |
+| D6 transport failure ≠ mismatch | US-001, US-004 |
+| D7 season discovery fall-through | US-004 |
+| D8 trust-on-first-use | US-001 |
+| D9 `force` parameter | US-003 |

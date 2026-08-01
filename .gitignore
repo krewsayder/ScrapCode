@@ -11,3 +11,18 @@ logs/
 *.json
 *.log
 .pytest_cache
+
+# `*.json` above targets RUNTIME state (clusters/, replay_index.json, the
+# legacy data/ tree). It also swept up two classes of file that are source,
+# not state, and must survive a fresh clone:
+#
+#   1. Recorded contract fixtures. tests/acceptance/*/fixtures/*.json are the
+#      captured vendor responses the parser is built against. Untracked, they
+#      are absent on the VM after `git pull`, so the contract scenarios ERROR
+#      instead of failing — the suite reports a problem with itself rather
+#      than with the code.
+#   2. nWave machine artifacts (roadmap.json, execution-log.json). DES reads
+#      these to verify TDD phase compliance; an untracked audit log cannot be
+#      audited by anyone but the machine that wrote it.
+!tests/**/fixtures/*.json
+!docs/feature/**/*.json

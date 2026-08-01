@@ -97,6 +97,56 @@ def save_guilds(discord_server_id: int, guilds: dict) -> None:
     repo.save(cluster)
 
 
+# ==========================================
+# GUILD KEY BINDINGS  (feature: guild-key-integrity)
+#
+# RED scaffolds created by DISTILL (Mandate 7). DELIVER implements them.
+#
+# These are thin wrappers over the ClusterRepository binding methods, in the
+# same shape as every other wrapper in this module — brief §4.1 and ADR-004
+# rule 1 make this the sanctioned cog-facing layer.
+#
+# Binding state lives in its own `guild_key_bindings` table, NOT on `Guild`
+# (DDD-4). That is deliberate: `save_guilds` above rebuilds each `Guild` from
+# a five-key dict, so any binding field threaded through the dataclass would
+# be overwritten with a None default by the next unrelated admin command.
+# Keeping it out of `Guild` makes that clobber structurally impossible rather
+# than merely avoided.
+#
+# This module MUST NOT import `bot.guild_keys` or `httpx` — every cog imports
+# this layer, and pulling policy or an HTTP client in here is the import cycle
+# DDD-3 is shaped to avoid. Enforced by
+# tests/acceptance/guild-key-integrity/test_architecture_chokepoint.py.
+# ==========================================
+
+__SCAFFOLD__ = True
+
+
+def load_guild_binding(discord_server_id: int, guild_id: str):
+    """Return the guild's identity binding, or an unbound placeholder.
+
+    Never returns None: an unbound guild is a real, expected state (every
+    guild is unbound on the day Slice 01 deploys), and a None return would
+    push that check onto seven call sites. On the JSON backend this always
+    returns unbound — the feature degrades to inert there (ADR-006 D9).
+    """
+    raise AssertionError("Not yet implemented — RED scaffold")
+
+
+def save_guild_binding(discord_server_id: int, guild_id: str, binding) -> None:
+    """Persist the guild's identity binding.
+
+    No-ops on the JSON backend rather than raising, so a rollback under time
+    pressure leaves a bot that runs.
+    """
+    raise AssertionError("Not yet implemented — RED scaffold")
+
+
+def list_guild_bindings(discord_server_id: int) -> dict:
+    """Return {guild_id: binding} for every guild in the server."""
+    raise AssertionError("Not yet implemented — RED scaffold")
+
+
 def add_cluster_role(discord_server_id: int, tier: str, role_id: int) -> None:
     cluster = repo.load(discord_server_id)
     existing = cluster.role_tiers.get(tier, [])
