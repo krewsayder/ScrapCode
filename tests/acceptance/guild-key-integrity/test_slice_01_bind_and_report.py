@@ -40,7 +40,7 @@ RED = pytest.mark.skip(reason="RED scaffold — enable one at a time in DELIVER"
 @pytest.mark.real_io
 @pytest.mark.adapter_integration
 def test_upgrade_creates_the_binding_store_and_touches_no_guild_record(
-    db_at_previous_head: Path, sqlite_repo
+    db_at_previous_head: Path,
 ):
     """AC-006.1 (restated per DDD-4).
 
@@ -49,6 +49,15 @@ def test_upgrade_creates_the_binding_store_and_touches_no_guild_record(
     that `save_guilds` cannot clobber it, which makes the original wording
     unreachable. The INTENT — an additive migration that alters no existing
     row — is what is asserted. See distill/upstream-issues.md UI-1.
+
+    Do NOT reintroduce the `sqlite_repo` parameter. It was requested here but
+    never used in the body, and it silently defeated the test: `sqlite_repo`
+    depends on `migrated_db`, which upgrades THIS SAME `sqlite_db_path` to
+    head. Both `before` and `after` were then read from an already-migrated
+    database, so the column-list assertion — the one guarding DDD-4's whole
+    reason for existing — would have passed even if the revision DID add a
+    column to `guilds`. Found during DELIVER 02-01; see the feature-delta
+    `## Wave: DELIVER / [WHY] Upstream Issues`, UD-2.
     """
     from alembic import command
 
