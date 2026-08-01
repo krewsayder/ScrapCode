@@ -1,0 +1,212 @@
+{
+  "roadmap": {
+    "project_id": "guild-key-integrity",
+    "created_at": "2026-08-01",
+    "total_steps": 10
+  },
+  "slice_scope": "Slice 01 only — US-006 (binding store), US-001 (bind and show), US-002 (report drift). Slices 02 and 03 are separate deploys per DEVOPS D6/D11; the 7-day soak between 01 and 03 is the empirical basis for KPI-4.",
+  "non_goals": [
+    "Quarantine enforcement (Slice 03) — verify_and_resolve ships with enforce=False and no caller passes True",
+    "/update_guild_key (Slice 02)",
+    "hypothesis pin — its only consumer, tier_b, exercises the Slice 03 state machine; pinning it now converts an honest skip into a red",
+    "player_registrations.api_key — out of scope per DISCUSS"
+  ],
+  "validation": {
+    "status": "approved",
+    "gate": "orchestrator automated gate 2026-08-01: AC coupling clean, decomposition ratio 9 steps / 15 files = 0.60, no identical patterns, no validation-only steps, all ids match ^\\d{2}-\\d{2}$, every step carries test_file + scenario_name"
+  },
+  "phases": [
+    {
+      "id": "01",
+      "name": "Probe foundations",
+      "description": "Enforcement made real, structured records made shareable, and the one module that talks to Tacticus.",
+      "default_agent": "nw-software-crafter",
+      "default_deps_strategy": "sequential",
+      "steps": [
+        {
+          "id": "01-01",
+          "name": "Pin the enforcement tools and add the fifth contract",
+          "agent": "nw-software-crafter",
+          "deps": [],
+          "criteria": [
+            "requirements.txt pins import-linter and pytest-archon",
+            "pyproject.toml gains a contract forbidding bot.repository* from importing bot.guild_keys",
+            "lint-imports reports 5 contracts kept, 0 broken"
+          ],
+          "test_file": "tests/acceptance/guild-key-integrity/test_architecture_chokepoint.py",
+          "scenario_name": "test_both_enforcement_tools_are_pinned, test_import_linter_contracts_all_pass",
+          "files_to_modify": ["requirements.txt", "pyproject.toml"],
+          "implementation_notes": "DEVOPS D10. Do NOT pin hypothesis: its only consumer is tier_b/, which exercises the Slice 03 quarantine state machine. Pinning it here turns a documented skip into a failure. Pin unversioned to match the file's existing style. The fifth contract mirrors the direction of DESIGN rule 4 — policy depends on storage, never the reverse."
+        },
+        {
+          "id": "01-02",
+          "name": "Promote the structured log helper to bot/obs.py",
+          "agent": "nw-software-crafter",
+          "deps": ["01-01"],
+          "criteria": [
+            "bot/obs.py emit_structured writes one single-line JSON record",
+            "bot/obs.py imports json and logging only",
+            "bot/db/session.py imports the helper rather than defining its own",
+            "existing db.* records keep their current shape"
+          ],
+          "test_file": "tests/acceptance/guild-key-integrity/test_slice_01_bind_and_report.py",
+          "scenario_name": "test_the_detection_latency_is_computable_from_the_records",
+          "files_to_modify": ["bot/obs.py", "bot/db/session.py"],
+          "implementation_notes": "DEVOPS U1. PROMOTE _emit_structured verbatim, do not rewrite it — two divergent JSON log schemas is exactly what structured logging exists to prevent, and every KPI query in kpi-contracts.yaml assumes one shape. Fields must also be attached to the LogRecord as attributes so a test can assert record.event without re-parsing the line; the conftest key_events fixture reads them that way. Keep the module import-light: bot/guild_keys.py is imported by three cogs and a service, and importing session.py from it would drag SQLAlchemy onto the JSON rollback path."
+        },
+        {
+          "id": "01-03",
+          "name": "Implement the Tacticus guild client",
+          "agent": "nw-software-crafter",
+          "deps": ["01-02"],
+          "criteria": [
+            "parse_guild_snapshot returns MATCH-eligible identity plus members from one payload",
+            "a payload with no guildId classifies UNVERIFIABLE and never compares guildTag",
+            "a missing guildTag or name still yields an identity",
+            "401 and 403 classify DEAD; timeout, connection error and 5xx classify UNREACHABLE",
+            "members equal the set the old _fetch_roster produced"
+          ],
+          "test_file": "tests/acceptance/guild-key-integrity/test_tacticus_guild_contract.py",
+          "scenario_name": "test_a_recorded_response_yields_an_identity_and_a_roster_from_one_read, test_a_recorded_response_without_the_identifier_is_unverifiable, test_a_recorded_response_missing_a_display_field_still_yields_an_identity, test_the_snapshot_members_match_what_the_old_roster_reader_produced, test_the_live_service_still_returns_a_stable_identifier, test_the_live_response_still_carries_every_recorded_field",
+          "files_to_modify": ["bot/services/tacticus/guild_client.py"],
+          "implementation_notes": "DDD-2 and DDD-10. fetch_guild_snapshot must NEVER raise for an expected failure — transport errors, 5xx and dead-key statuses all return a classified snapshot, because the caller's whole job is to tell them apart and an exception erases the distinction. Import httpx INSIDE the function, not at module scope, so the module stays import-light. Remove __SCAFFOLD__. The two @requires_external scenarios stay skipped unless SCRAPCODE_TACTICUS_CONTRACT_KEY is set; do not weaken them to make them run."
+        }
+      ]
+    },
+    {
+      "id": "02",
+      "name": "The binding store (US-006)",
+      "description": "A table of its own, reachable only through the repository port.",
+      "default_agent": "nw-software-crafter",
+      "default_deps_strategy": "sequential",
+      "steps": [
+        {
+          "id": "02-01",
+          "name": "Add the binding row and its Alembic revision",
+          "agent": "nw-software-crafter",
+          "deps": ["01-03"],
+          "criteria": [
+            "GuildKeyBindingRow is 1:1 with guilds, FK ondelete CASCADE",
+            "revision sets down_revision to 0002",
+            "upgrade creates an empty guild_key_bindings and alters no guilds row or column",
+            "downgrade restores the prior schema exactly"
+          ],
+          "test_file": "tests/acceptance/guild-key-integrity/test_slice_01_bind_and_report.py",
+          "scenario_name": "test_upgrade_creates_the_binding_store_and_touches_no_guild_record, test_downgrade_restores_the_prior_shape_exactly",
+          "files_to_modify": ["bot/db/models.py", "bot/db/alembic/versions/0003_guild_key_bindings.py"],
+          "implementation_notes": "DDD-4. Columns: tacticus_guild_id (the binding), tacticus_guild_tag and tacticus_guild_name (display only), identity_bound_at, key_status, quarantine_reason, quarantined_at, last_alerted_at. No backfill — trust-on-first-use populates it, so downgrade is a plain drop_table. quarantined_at MUST be ISO-8601 UTC in the SAME string shape as battle_hits.completed_on (String(32), stored verbatim from Tacticus): KPI-2 compares them as strings and a shape mismatch returns a wrong result set silently instead of erroring. Confirm the real completed_on format against a production row before relying on it. Adding columns to guilds is a test failure, not an alternative."
+        },
+        {
+          "id": "02-02",
+          "name": "Extend the repository port and both adapters",
+          "agent": "nw-software-crafter",
+          "deps": ["02-01"],
+          "criteria": [
+            "ABC gains load_guild_binding, save_guild_binding, list_guild_bindings",
+            "SQLite adapter reads and writes guild_key_bindings",
+            "JSON adapter reports unbound and no-ops the write without raising",
+            "bot/guilds.py exposes thin wrappers over the three methods",
+            "Guild dataclass and save_guilds are unchanged"
+          ],
+          "test_file": "tests/acceptance/guild-key-integrity/test_slice_01_bind_and_report.py",
+          "scenario_name": "test_load_and_save_unchanged_preserves_every_field, test_changing_the_ping_channel_leaves_the_binding_untouched, test_the_guilds_wrapper_layer_stays_free_of_policy_and_http, test_storage_never_imports_policy",
+          "files_to_modify": ["bot/repository.py", "bot/repository_sqlalchemy.py", "bot/guilds.py"],
+          "implementation_notes": "ADR-007 pattern. The JSON adapter degrading to unbound is deliberate, not a stub — ADR-006 D9 rollback must leave the feature inert rather than raising. bot/guilds.py already carries the three wrapper scaffolds; implement them in place and remove __SCAFFOLD__. Touching the Guild dataclass is the specific hazard DDD-4 exists to prevent: save_guilds rebuilds Guild from a five-key dict, so a binding field added there would be overwritten with None by any unrelated admin command. bot/guilds.py must not import bot.guild_keys or httpx — asserted by a test that passes today."
+        }
+      ]
+    },
+    {
+      "id": "03",
+      "name": "Policy and wiring (US-001, US-002)",
+      "description": "The chokepoint, the roster refactor, and the six guild-key call sites routed through it. Reports everything, blocks nothing.",
+      "default_agent": "nw-software-crafter",
+      "default_deps_strategy": "sequential",
+      "steps": [
+        {
+          "id": "03-01",
+          "name": "Implement the key policy chokepoint",
+          "agent": "nw-software-crafter",
+          "deps": ["02-02"],
+          "criteria": [
+            "first successful probe adopts the identity and stamps identity_bound_at",
+            "a later probe refreshes the date and does not re-announce",
+            "mismatch is classified on guildId alone; a retag or rename is not a mismatch",
+            "dead, unreachable and unverifiable each leave the stored binding byte-identical",
+            "active_key is sync and makes no network call"
+          ],
+          "test_file": "tests/acceptance/guild-key-integrity/test_slice_01_bind_and_report.py",
+          "scenario_name": "test_first_verification_adopts_the_identity_and_announces_once, test_second_verification_refreshes_the_date_without_announcing, test_missing_identifier_is_unverifiable_and_never_falls_back_to_the_tag, test_rejected_key_is_dead_not_quarantined, test_unreachable_leaves_the_binding_byte_identical, test_a_retag_or_rename_is_not_a_mismatch",
+          "files_to_modify": ["bot/guild_keys.py"],
+          "implementation_notes": "DDD-1, DDD-6, DDD-8, DDD-10. verify_and_resolve ships with enforce=False and NO caller passes True in this slice — quarantine is Slice 03 and shipping the block before the recovery path violates ADR-008 D3. quarantine() and release() may stay unimplemented; they are Slice 02/03. Only uuid is ever compared: tag and name are display, so a legitimate retag must not trip the lock. Emit guild.key.bound, guild.key.probe.ok, guild.key.mismatch, guild.key.unverifiable, guild.key.unreachable, guild.key.dead through bot/obs.py, each carrying key_ref — the first 8 hex of api_key_hmac, never the key. KPI-6 is zero by construction, not by filtering."
+        },
+        {
+          "id": "03-02",
+          "name": "Move the roster fetch out of the Chronicler package",
+          "agent": "nw-software-crafter",
+          "deps": ["03-01"],
+          "criteria": [
+            "_fetch_roster is deleted",
+            "refresh_guild and validate_if_stale take a GuildSnapshot, not an api_key",
+            "bot/services/chronicl3r no longer imports httpx",
+            "Chronicler profile calls are unchanged"
+          ],
+          "test_file": "tests/acceptance/guild-key-integrity/test_architecture_chokepoint.py",
+          "scenario_name": "test_the_chronicler_package_makes_no_http_calls, test_archon_rules_hold",
+          "files_to_modify": ["bot/services/chronicl3r/player_service.py"],
+          "implementation_notes": "DDD-2. Delete, do not deprecate — an httpx import left behind is the signal that a second unguarded call path survived the move, which is what these two tests exist to catch. The members frozenset on GuildSnapshot must be the same set _fetch_roster returned; a contract scenario asserts exactly that. PlayerService keeps every Chronicler call it has: only the Tacticus call leaves."
+        },
+        {
+          "id": "03-03",
+          "name": "Route the hourly loop through the chokepoint",
+          "agent": "nw-software-crafter",
+          "deps": ["03-02"],
+          "criteria": [
+            "auto_update verifies each guild before ingesting and still writes on a mismatch",
+            "first bind posts exactly one message naming the guild and adopted identity",
+            "a matching guild produces no message in any channel and no alert record",
+            "the mismatch line appears in the summary beside the healthy guilds",
+            "auto_update.cycle records guilds_total, guilds_processed, guilds_skipped and skip_reasons"
+          ],
+          "test_file": "tests/acceptance/guild-key-integrity/test_slice_01_bind_and_report.py",
+          "scenario_name": "test_drift_is_reported_naming_both_guilds, test_slice_01_still_ingests_on_a_mismatch, test_mismatch_appears_in_the_hourly_summary, test_a_matching_guild_is_completely_silent, test_a_persistent_mismatch_is_reported_every_cycle_in_this_slice, test_the_detection_latency_is_computable_from_the_records",
+          "files_to_modify": ["bot/cogs/tasks_cog.py"],
+          "implementation_notes": "AC-002.2 — this slice REPORTS and still ingests. An implementation that blocks passes the drift scenarios and fails test_slice_01_still_ingests_on_a_mismatch, which is the scenario protecting the D3 slice order. test_a_matching_guild_is_completely_silent is the one scenario an unconditionally-alerting implementation fails, and it is the empirical basis for KPI-4; do not weaken it. Season discovery moves to active_key with fall-through (DDD-7) so the tasks_cog:174 read leaves. cap_detect at line 75 reads a PLAYER key and is out of scope — leave it exactly as it is. Detection latency is alerted_at minus last_probe_ok_at (DEVOPS U2), so guild.key.probe.ok must carry a parseable timestamp."
+        },
+        {
+          "id": "03-04",
+          "name": "Route the remaining key reads and render the binding",
+          "agent": "nw-software-crafter",
+          "deps": ["03-03"],
+          "criteria": [
+            "update_leaderboard and update_all resolve keys through the chokepoint",
+            "set_live_leaderboard and set_live_cluster_leaderboard do the same",
+            "/view_config shows the bound tag, the first 8 characters of the identifier and the verification date",
+            "a guild with no key still renders exactly as it did before",
+            "no cog reads a guild api_key directly"
+          ],
+          "test_file": "tests/acceptance/guild-key-integrity/test_slice_01_bind_and_report.py",
+          "scenario_name": "test_guild_list_shows_the_bound_guild_and_when_it_was_checked, test_missing_display_field_still_binds_on_the_identifier, test_no_cog_or_service_reads_a_guild_api_key_directly",
+          "files_to_modify": ["bot/cogs/update_cog.py", "bot/cogs/admin_cog.py"],
+          "implementation_notes": "Closes DESIGN rule 1 for guild keys. After this step the chokepoint scan must report zero offenders. admin_cog:183 is a presence check feeding the existing Missing rendering that AC-005.3 pins as unchanged — the scan exempts it structurally, so leave its shape alone; binding state renders alongside it, not instead of it. A missing tag or name renders as a dash and must never block the bind (AC-001.6). No identifier longer than 8 characters may appear in any embed."
+        },
+        {
+          "id": "03-05",
+          "name": "Close the environment matrix",
+          "agent": "nw-software-crafter",
+          "deps": ["03-04"],
+          "criteria": [
+            "a clean cluster binds all three guilds and announces once, then stays silent",
+            "a fully bound, matching cluster raises no alert of any kind",
+            "an identifier missing cluster-wide alerts loudly and still ingests everywhere",
+            "an outage leaves every binding byte-identical across the whole cluster",
+            "a revoked key is reported as dead and the operator is told to install a new one"
+          ],
+          "test_file": "tests/acceptance/guild-key-integrity/test_environment_matrix.py",
+          "scenario_name": "test_clean_adopts_every_identity_once, test_bound_matching_is_completely_silent, test_unverifiable_alerts_loudly_and_blocks_nothing, test_tacticus_unreachable_leaves_every_binding_byte_identical, test_dead_key_is_reported_not_quarantined, test_json_backend_rollback_goes_inert_without_raising, test_environment_names_match_the_devops_artifact, test_the_player_key_exemptions_still_describe_real_code",
+          "files_to_modify": ["bot/guild_keys.py", "bot/cogs/tasks_cog.py"],
+          "implementation_notes": "Mandate 4, Environmental Realism. These are whole-cluster properties over the six Slice 01 environments, not repeats of the single-guild scenarios: each drives auto_update across a cluster and asserts the environment's headline invariant. Expect most to pass once 03-01..03-04 are green — treat any that does not as a real defect in the per-guild logic that only shows up in aggregate, which is the entire reason this layer exists. bound-drifted and mixed-cluster are deliberately NOT here: both assert quarantine, which is Slice 03. The last two names are regression guards that pass today and must still pass at the end."
+        }
+      ]
+    }
+  ]
+}

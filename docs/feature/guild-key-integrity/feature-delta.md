@@ -1598,3 +1598,193 @@ consolidated gate is the wrong place to learn that.
   matching what `_fetch_roster` returned, with a contract scenario asserting
   the sets are identical. Full member dicts deferred until something needs
   them.
+
+---
+
+# DELIVER
+
+> Wave 6 of 6. Scope: **Slice 01 only** — US-006 (binding store), US-001 (bind
+> and show), US-002 (report drift). Slices 02 and 03 are separate deploys per
+> DEVOPS D6/D11. Roadmap and DES audit log:
+> [`deliver/roadmap.json`](deliver/roadmap.json),
+> [`deliver/execution-log.json`](deliver/execution-log.json).
+
+## Wave: DELIVER / [WHY] Upstream Issues
+
+Defects found in prior-wave artifacts while implementing them. Per the
+back-propagation contract none are silently edited into the prior wave's text;
+they are recorded here with what was changed and why.
+
+Four of the five are defects in the **acceptance suite itself** — tests that
+could not pass, could not fail, or tested the wrong object. That concentration
+is worth naming: the DISTILL RED gate classified every scenario by **exception
+type** (`AssertionError` = RED, `ImportError` = BROKEN) and reported 172/0/0.
+That check cannot see a test that fails for a correct-looking reason while
+asserting nothing, nor one whose fixtures make its central assertion vacuous.
+A future RED gate should also ask, per scenario, *"is this satisfiable inside
+the slice's scope, and would it fail if the behaviour regressed?"*
+
+### UD-1 — the chokepoint scan could not pass within the feature's scope
+
+**Found:** step 01-01, before any crafter ran.
+**Artifact:** `tests/acceptance/guild-key-integrity/test_architecture_chokepoint.py`.
+
+`test_no_cog_or_service_reads_a_guild_api_key_directly` allowlisted by MODULE.
+The scan matches the identifier `api_key`, and this repository stores two
+unrelated secrets under that one name: `guilds.api_key` (this feature's
+subject) and `player_registrations.api_key` (explicitly out of scope per
+DISCUSS `Out of Scope`). It therefore named six modules, only three of which
+hold guild keys. It could only have gone green by rewriting the token-cap,
+bomb and registration paths — code this feature is forbidden to touch.
+
+`bot/cogs/tasks_cog.py` is the proof a per-module allowlist cannot work:
+`cap_detect` (line 75) reads a PLAYER key, `auto_update` (lines 174, 197) reads
+a GUILD key.
+
+**Resolved** with operator approval, by two different mechanisms because they
+are two different problems:
+
+- Player-key sites are exempted by **enclosing function**, named individually
+  in `EXEMPT_PLAYER_KEY_FUNCTIONS`, with a companion test
+  `test_the_player_key_exemptions_still_describe_real_code` that fails if any
+  name goes stale. A new player-key site elsewhere still fails until someone
+  classifies it consciously.
+- `admin_cog._config_guilds`'s read is exempted **structurally**, not by name:
+  `_is_presence_test` allows a read that is the direct test of an `If`/`IfExp`
+  or the operand of `not`. AC-005.3 pins the `Missing` rendering that read
+  produces, so it must survive — but exempting the whole function by name would
+  also stop the test noticing if someone later *used* the key there, which is
+  exactly a seven-becomes-eight regression.
+
+Scan now reports precisely the six guild-key sites (D6 #1–#6).
+
+### UD-2 — the migration guard was blind to the regression it exists to catch
+
+**Found:** step 02-01, by the crafter, routed rather than edited — correct
+DELIVER discipline.
+**Artifact:** `test_upgrade_creates_the_binding_store_and_touches_no_guild_record`.
+
+The scenario requested the `sqlite_repo` fixture and never used it in the body.
+`sqlite_repo` depends on `migrated_db`, which upgrades the **same**
+`sqlite_db_path` to head. So the migration had already run before the body read
+`before`, the body's own `command.upgrade(..., "head")` was a no-op, and both
+`guild_cols_before` and `guild_cols_after` were sampled from an already-migrated
+database.
+
+That made the column-list assertion vacuous — and that assertion guards DDD-4's
+entire reason for existing.
+
+**Demonstrated rather than argued.** Adding `op.add_column('guilds', ...)` to
+revision 0003:
+
+| Signature | Result against a revision that adds a `guilds` column |
+|---|---|
+| `(db_at_previous_head, sqlite_repo)` — as authored | **PASSED** |
+| `(db_at_previous_head)` — corrected | **FAILED** |
+
+**Resolved:** unused parameter dropped, with a docstring note against
+reintroducing it. The alembic log now shows `Running upgrade 0002 -> 0003`
+during the test.
+
+### UD-3 — the suite wrote to the real `clusters/` tree
+
+**Found:** step 02-02, by the crafter. The most consequential of the five.
+**Artifact:** `tests/acceptance/guild-key-integrity/conftest.py`.
+
+`bot/guilds.py:61` evaluates `repo = build_repo()` at **import** time, reading
+`SCRAPCODE_REPO_BACKEND` / `SCRAPCODE_DB_PATH` / `SCRAPCODE_DB_KEY` at that
+moment. The `env_vars` fixture sets those with `monkeypatch.setenv` **during**
+the test — far too late to affect a singleton that already exists.
+
+Two consequences. Every call through a `bot/guilds.py` wrapper exercised
+whichever repository was built at first import, not the `tmp_path` one the test
+configured, so those tests could pass or fail for reasons unrelated to their
+subject. And with no Fernet key present, `build_repo`'s safety net falls back to
+`JsonClusterRepository()`, whose `base_path` is the real `clusters/` tree: a
+full-suite run created `clusters/1458181638453203099/guilds.json` at the
+repository root. On a machine holding a live JSON tree that is a write to
+production data, and `save_guilds` overwrites rather than appends.
+
+The stray file was inspected before removal — 71 bytes, `{"guilds": {},
+"role_tiers": {}}`, no key material, created by that day's test run. Nothing was
+lost. **The hazard was structural, not hypothetical**: the same run on the VM,
+or on any checkout still holding its pre-cutover JSON tree, would have targeted
+real data.
+
+**Resolved:** autouse fixture `_repo_singleton_never_escapes_tmp_path` rebinds
+`bot.guilds.repo` to a `tmp_path` JSON repository for every test in the suite,
+and `sqlite_repo` / `json_repo` each rebind it to their own instance. Autouse
+and unconditional, so a test that forgets to request a repository fixture still
+cannot reach the real tree; the default is a JSON repo under `tmp_path` so the
+failure mode of forgetting is an empty cluster, not a production write.
+Verified: `clusters/` is absent after a full suite run.
+
+### UD-4 — two scenarios declared a Given that no fixture supplied
+
+**Found:** step 02-02, by the crafter.
+**Artifact:** `test_slice_01_bind_and_report.py`, both round-trip scenarios.
+
+`slice-01-bind-and-report.feature` says `Given a guild with a stored binding`.
+Neither Python body implemented it, and no such fixture existed.
+
+- `test_changing_the_ping_channel_leaves_the_binding_untouched` raised
+  `KeyError: 'word_bearers'` — `load_guilds` returns `{}` on a freshly migrated
+  database — before reaching its assertion.
+- `test_load_and_save_unchanged_preserves_every_field` **passed vacuously**,
+  comparing an unbound placeholder against an unbound placeholder and `{}`
+  against `{}`. Its own docstring conceded it "currently cannot fail". A
+  tripwire with no wire is worse than no tripwire: it reports coverage it does
+  not have.
+
+**Resolved:** `registered_guilds` and `bound_guild` fixtures added to
+`conftest.py`; both scenarios repointed. `registered_guilds` pins Word Bearers
+FIRST in insertion order, because `auto_update` derives the season from
+`next(iter(guilds.values()))` and the SPOF only misbehaves in that ordering.
+`bound_guild` binds to the identity from the real incident so a failure prints
+the values in the postmortem.
+
+Mutation-tested: with `save_guilds` patched to wipe bindings, **both scenarios
+fail**; unpatched, both pass. They are real tripwires now.
+
+### UD-5 — the declared pytest gate had never run as one command
+
+**Found:** step 01-01, by the crafter, as a "pre-existing cross-suite failure".
+**Artifact:** DEVOPS `## Wave: DEVOPS / [REF] CI/CD Pipeline Outline` stage 1.
+
+DEVOPS stage 1 names `pytest tests/unit tests/acceptance` as the blocking gate
+before every push, and the deployment strategy leans on it. It did not work.
+
+Three suites each ship their own `pytest.ini`, and pytest honours exactly one
+config per invocation. Given two directories it resolves rootdir to the
+repository root and selects `pyproject.toml`, which declared no pytest section —
+so `asyncio_mode = auto` was dropped and every `async def` test failed with
+`async def functions are not natively supported`. Three unit tests failed that
+way in the combined run while passing standalone.
+
+It stayed hidden because every wave ran the suites one at a time and reported
+them one at a time, so the numbers always looked right.
+
+**Resolved:** `[tool.pytest.ini_options]` added to `pyproject.toml`. Standalone
+runs are unaffected — a per-suite `pytest.ini` sits closer to its own directory
+and still wins — so this governs only the combined invocation, which is the one
+an operator and any future CI actually type. Before: 3 failed / 104 passed.
+After: 111 passed / 91 skipped / 1 xfailed.
+
+### UD-6 — an empty member list would invert the roster silently
+
+**Found:** step 01-03, by the crafter. **Open — carried into step 03-02.**
+**Artifact:** DESIGN Open Question 2 (`GuildSnapshot` member shape).
+
+`parse_guild_snapshot` reads members tolerantly, so a 200 response carrying a
+`guildId` but no `members` key yields an identity with an **empty** member set.
+Once `refresh_guild` consumes the snapshot, an empty roster means every player
+is absent — and `refresh_guild` flips everyone absent to `is_former`.
+
+That is the incident's exact failure shape reached by a different route: roster
+inversion accounted for 60 of the 67 corrupted `players` rows. No acceptance
+scenario covers this response shape, so the crafter flagged it rather than
+inventing a classification — the right call.
+
+Treatment carried into step 03-02: a snapshot with no usable member list must
+not be allowed to drive a roster write. Recorded for `nw-acceptance-designer` as
+a scenario the contract suite should carry.
