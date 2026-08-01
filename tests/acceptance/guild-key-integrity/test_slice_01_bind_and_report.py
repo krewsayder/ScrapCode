@@ -37,7 +37,6 @@ RED = pytest.mark.skip(reason="RED scaffold — enable one at a time in DELIVER"
 # US-006 — the binding store
 # ===========================================================================
 
-@RED
 @pytest.mark.real_io
 @pytest.mark.adapter_integration
 def test_upgrade_creates_the_binding_store_and_touches_no_guild_record(
@@ -76,7 +75,6 @@ def test_upgrade_creates_the_binding_store_and_touches_no_guild_record(
     )
 
 
-@RED
 @pytest.mark.real_io
 @pytest.mark.error
 def test_downgrade_restores_the_prior_shape_exactly(db_at_previous_head: Path):
