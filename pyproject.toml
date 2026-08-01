@@ -111,3 +111,25 @@ type = "forbidden"
 source_modules = ["bot.repository", "bot.repository_sqlalchemy"]
 forbidden_modules = ["bot.guild_keys"]
 allow_indirect_imports = true
+
+# DEVOPS U1: `bot/obs.py` exists ONLY so the policy layer can emit structured
+# records without importing the SQLite stack. `bot/guild_keys.py` is imported
+# by three cogs and a service, so a heavy import here reaches all of them —
+# including on the SCRAPCODE_REPO_BACKEND=json rollback path, where SQLAlchemy
+# is meant to be untouched (ADR-006 D9). The module's docstring states the
+# constraint absolutely; this contract is what makes it true tomorrow.
+[[tool.importlinter.contracts]]
+name = "bot.obs stays dependency-free — the whole reason the module exists"
+type = "forbidden"
+source_modules = ["bot.obs"]
+forbidden_modules = [
+    "sqlalchemy",
+    "alembic",
+    "aiosqlite",
+    "cryptography",
+    "httpx",
+    "discord",
+    "bot.db",
+    "bot.guilds",
+    "bot.repository",
+]
