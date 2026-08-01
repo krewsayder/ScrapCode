@@ -1,7 +1,5 @@
 """Guild key policy — the single sanctioned reader of a guild's `api_key`.
 
-RED scaffold created by DISTILL (Mandate 7). DELIVER implements it.
-
 ADR-008 D3 / DDD-3. Seven call sites across three cogs plus a service read a
 guild key today. Six-of-seven is not "mostly fixed" — it is a silent
 contamination path that looks fixed. Every one of those sites routes through
@@ -12,9 +10,11 @@ the build when a new one does not.
 Two entry points, deliberately different in kind:
 
   `verify_and_resolve` — async. Probes Tacticus, compares the resolved
-      identity against the stored binding, quarantines on drift, and returns a
+      identity against the stored binding, reports the result, and returns a
       snapshot the caller can ingest from. This is what an ingestion path
-      calls.
+      calls. Slice 01 reports and does not block: `enforce` is False and
+      quarantine arrives in Slice 03, one slice AFTER `/update_guild_key`
+      ships the recovery path, so the first quarantine is never a trap.
 
   `active_key` — sync, storage-only, no network. Returns the key ONLY if the
       guild is not quarantined. This is what season discovery calls, and the
@@ -26,6 +26,14 @@ storage, never the reverse.
 """
 from __future__ import annotations
 
+import logging
+import os
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+
+from bot.guilds import load_guild_binding, load_guilds, save_guild_binding
+from bot.obs import emit_structured
+from bot.services.tacticus import guild_client
 from bot.services.tacticus.guild_client import (
     GuildIdentity,
     GuildSnapshot,
@@ -33,12 +41,20 @@ from bot.services.tacticus.guild_client import (
     ProbeOutcome,
 )
 
-__SCAFFOLD__ = True
+logger = logging.getLogger(__name__)
 
 # One alert per guild per 24 hours while a quarantine persists (ADR-008 D5).
 # An hourly loop that alerts hourly gets its channel muted, and a muted
 # channel defeats KPI-1 entirely.
 ALERT_SUPPRESSION_HOURS = 24
+
+# Shown in place of a `key_ref` that cannot be derived — an unregistered
+# guild, an empty key, or the JSON rollback path where SCRAPCODE_DB_KEY does
+# not exist. A placeholder rather than an omitted field: every KPI query in
+# `docs/product/kpi-contracts.yaml` selects on `key_ref`, and a record missing
+# the column silently drops out of the result set instead of showing up as the
+# uncorrelatable record it is.
+UNKNOWN_KEY_REF = "--------"
 
 
 class GuildQuarantined(Exception):
@@ -60,20 +76,41 @@ async def verify_and_resolve(
     discord_server_id: int,
     guild_id: str,
     *,
-    enforce: bool = True,
+    enforce: bool = False,
 ) -> GuildSnapshot:
-    """Probe the guild's key, compare identity, and enforce the result.
+    """Probe the guild's key, compare identity, and report the result.
 
-    `enforce=False` is the Slice 01 behaviour: classify and report, write
-    nothing, block nothing. Slice 03 flips the default. Keeping it a
-    parameter rather than two functions is what lets the same acceptance
-    scenarios run against both slices.
+    `enforce=False` is the Slice 01 behaviour and the shipped default:
+    classify and report, block nothing. Slice 03 flips it, after Slice 02 has
+    shipped the recovery path (`/update_guild_key`). Shipping the block first
+    would make the first quarantine unrecoverable without an SSH session
+    (ADR-008 D3), so `enforce=True` refuses loudly here rather than quietly
+    returning an unenforced result to a caller who asked to be protected.
 
-    Raises `GuildQuarantined` when the guild is already quarantined, BEFORE
-    any request is made — fetching the data and then discarding it would put
-    another guild's roster in memory and possibly in a traceback.
+    Only `uuid` is ever compared (DDD-1). The tag and the name are
+    display-only and are refreshed from every successful probe, so a retag or
+    a rename updates what the operator sees without touching the lock.
+
+    A probe that did not succeed — UNVERIFIABLE, UNREACHABLE or DEAD — leaves
+    the stored binding byte-identical. Refreshing `identity_bound_at` on a
+    check that never happened would report a verification date for a
+    verification nobody performed.
     """
-    raise AssertionError("Not yet implemented — RED scaffold")
+    if enforce:
+        raise NotImplementedError(
+            "enforcement lands in Slice 03, after /update_guild_key ships the "
+            "recovery path in Slice 02 (ADR-008 D3)"
+        )
+
+    api_key = _registered_key(discord_server_id, guild_id)
+    context = _KeyContext(discord_server_id, guild_id, _key_ref_for(api_key))
+    if not api_key:
+        return _unreachable_without_a_key(context)
+
+    snapshot = await guild_client.fetch_guild_snapshot(api_key)
+    if snapshot.identity is None:
+        return _report_failed_probe(context, snapshot)
+    return _resolve_identity(context, snapshot)
 
 
 def active_key(discord_server_id: int, guild_id: str) -> str | None:
@@ -83,7 +120,9 @@ def active_key(discord_server_id: int, guild_id: str) -> str | None:
     candidate guilds and must be able to skip a quarantined one without
     paying for a probe.
     """
-    raise AssertionError("Not yet implemented — RED scaffold")
+    if _is_quarantined(discord_server_id, guild_id):
+        return None
+    return _registered_key(discord_server_id, guild_id) or None
 
 
 def quarantine(
@@ -113,7 +152,7 @@ def release(discord_server_id: int, guild_id: str) -> None:
     raise AssertionError("Not yet implemented — RED scaffold")
 
 
-def key_ref(api_key_hmac: str) -> str:
+def key_ref(api_key_hmac: str | None) -> str:
     """Correlation ID for log records: first 8 hex of `api_key_hmac`.
 
     Lets an operator follow one key across bind → mismatch → quarantine →
@@ -121,4 +160,251 @@ def key_ref(api_key_hmac: str) -> str:
     keyed by SCRAPCODE_DB_KEY (ADR-006 D7) and is not reversible without that
     key. KPI-6 stays at zero by construction.
     """
-    raise AssertionError("Not yet implemented — RED scaffold")
+    if not api_key_hmac:
+        return UNKNOWN_KEY_REF
+    return api_key_hmac[:8]
+
+
+# ===========================================================================
+# Internals — the classification, one shape per outcome (DDD-6).
+#
+# Collapsing any two of these is a documented failure mode, so they are kept
+# as separate, individually readable branches rather than one table lookup:
+#   MISMATCH vs UNREACHABLE  → a Tacticus outage quarantines the cluster
+#   MISMATCH vs UNVERIFIABLE → a vendor change quarantines the cluster
+#   MISMATCH vs DEAD         → a revoked key needs recovery it does not need
+# ===========================================================================
+
+@dataclass(frozen=True)
+class _KeyContext:
+    """Who a record is about: which guild, and which key was used on it.
+
+    Every `guild.key.*` record carries `ts`, `server_id`, `guild_id` and
+    `key_ref` (`docs/product/kpi-contracts.yaml` `required_fields`); a record
+    missing one of them drops silently out of a KPI result set instead of
+    showing up as the uncorrelatable record it is. Adding them here rather
+    than at nine call sites is what makes "no record ships without them"
+    structural.
+
+    Three fields rather than Object Calisthenics' two, deliberately: all
+    three are the correlation key, and dropping any one of them is what the
+    rule would cost. NONE of them is key material — the plaintext `api_key`
+    is not held here, so no record this object can emit is able to leak one,
+    however it is later serialised. KPI-6 ("0 key values in logs or Discord")
+    holds by construction rather than by filtering.
+    """
+
+    server_id: int
+    guild_id: str
+    key_ref: str
+
+    def emit(self, level: int, event: str, **fields) -> None:
+        emit_structured(
+            logger, level, event,
+            ts=_utc_now(),
+            server_id=self.server_id,
+            guild_id=self.guild_id,
+            key_ref=self.key_ref,
+            **fields,
+        )
+
+    def emit_probe_ok(self, observed: GuildIdentity) -> None:
+        """The `last_probe_ok_at` half of KPI-1's `alerted_at − last_probe_ok_at`.
+
+        Emitted only when the probe AGREED — on a first-use adoption or on a
+        matching identity — because the metric is the width of the window in
+        which drift could have gone unnoticed.
+        """
+        self.emit(
+            logging.INFO, "guild.key.probe.ok",
+            tacticus_guild_id=observed.uuid,
+        )
+
+
+def _resolve_identity(
+    context: _KeyContext, snapshot: GuildSnapshot
+) -> GuildSnapshot:
+    """200 with an identity: adopt it, refresh it, or report the drift."""
+    observed: GuildIdentity = snapshot.identity
+    binding = load_guild_binding(context.server_id, context.guild_id)
+
+    if binding.is_unbound:
+        return _adopt(context, snapshot, binding, observed)
+
+    bound = GuildIdentity(uuid=binding.tacticus_guild_id)
+    if not bound.matches(observed):
+        return _report_mismatch(context, snapshot, binding, observed)
+
+    _rebind(context, binding, observed)
+    context.emit_probe_ok(observed)
+    return snapshot
+
+
+def _adopt(
+    context: _KeyContext,
+    snapshot: GuildSnapshot,
+    binding,
+    observed: GuildIdentity,
+) -> GuildSnapshot:
+    """Trust-on-first-use (DDD-8), announced exactly once.
+
+    There is no historical record to reconstruct a binding from, so the
+    announcement IS the verification step: an operator reading it is the only
+    thing standing between "we adopted the right guild" and "we adopted
+    whatever the key happened to resolve to on deploy day".
+    """
+    _rebind(context, replace(binding, tacticus_guild_id=observed.uuid), observed)
+    context.emit(
+        logging.INFO, "guild.key.bound",
+        tacticus_guild_id=observed.uuid,
+        tacticus_guild_tag=observed.tag,
+        # Deliberately NOT `name`: `logging` refuses an `extra` key that
+        # collides with a LogRecord attribute, and `record.name` is the
+        # logger's own name. A `name` field here raises at emit time, which
+        # would turn the one announcement that matters into an exception
+        # inside the hourly loop.
+        tacticus_guild_name=observed.name,
+    )
+    context.emit_probe_ok(observed)
+    return snapshot
+
+
+def _rebind(context: _KeyContext, binding, observed: GuildIdentity) -> None:
+    """Write the display fields and the verification date from a probe that
+    SUCCEEDED — never from one that did not.
+
+    `tacticus_guild_id` is not touched here: adoption sets it once (DDD-8) and
+    nothing else may, which is what keeps a drifted key from quietly
+    re-pointing the binding at the guild it drifted to. The tag and the name
+    ARE refreshed on every agreeing probe, so a retag or a rename updates what
+    the operator sees without going anywhere near the lock (DDD-1).
+    """
+    save_guild_binding(
+        context.server_id,
+        context.guild_id,
+        replace(
+            binding,
+            tacticus_guild_tag=observed.tag,
+            tacticus_guild_name=observed.name,
+            identity_bound_at=_utc_now(),
+        ),
+    )
+
+
+def _report_mismatch(
+    context: _KeyContext,
+    snapshot: GuildSnapshot,
+    binding,
+    observed: GuildIdentity,
+) -> GuildSnapshot:
+    """The incident. Slice 01 reports it and still hands the data back.
+
+    No `guild.key.probe.ok`: KPI-1's detection latency is the gap back to the
+    last probe that AGREED, and a probe that disagreed is the event being
+    measured, not the baseline it is measured from.
+    """
+    context.emit(
+        logging.ERROR, "guild.key.mismatch",
+        bound_id=binding.tacticus_guild_id,
+        observed_id=observed.uuid,
+        observed_tag=observed.tag,
+        observed_name=observed.name,
+    )
+    return replace(snapshot, outcome=ProbeOutcome.MISMATCH)
+
+
+def _report_failed_probe(
+    context: _KeyContext, snapshot: GuildSnapshot
+) -> GuildSnapshot:
+    """No identity came back. Report it; change nothing.
+
+    UNVERIFIABLE is an ERROR and not a downgrade to a weaker check: there is
+    NO fallback to comparing `guildTag`. Both guilds in the 2026-07-28
+    incident carried the 【UNDV】 alliance prefix, so a tag comparison is
+    exactly the check that would have looked reassuring and proved nothing
+    (DDD-10).
+    """
+    if snapshot.outcome is ProbeOutcome.UNVERIFIABLE:
+        context.emit(
+            logging.ERROR, "guild.key.unverifiable", reason="guildId_absent"
+        )
+        return snapshot
+
+    if snapshot.outcome is ProbeOutcome.DEAD:
+        # Never quarantined: a refused key returns no data, so there is
+        # nothing to contaminate and a recovery step would buy zero safety.
+        context.emit(logging.ERROR, "guild.key.dead", status=snapshot.status)
+        return snapshot
+
+    context.emit(
+        logging.WARNING, "guild.key.unreachable",
+        reason=snapshot.error, status=snapshot.status,
+    )
+    return snapshot
+
+
+def _unreachable_without_a_key(context: _KeyContext) -> GuildSnapshot:
+    """A guild with no registered key is UNREACHABLE, never probed.
+
+    Not DEAD — nothing was refused, there is simply nothing to ask with, and
+    the correct response is to retry next cycle. Sending an empty credential
+    to Tacticus to find that out would be a request whose only possible
+    outcome is a 401 the operator then has to interpret.
+    """
+    snapshot = GuildSnapshot(
+        outcome=ProbeOutcome.UNREACHABLE,
+        error="no api_key is registered for this guild",
+    )
+    context.emit(
+        logging.WARNING, "guild.key.unreachable",
+        reason=snapshot.error, status=None,
+    )
+    return snapshot
+
+
+# ===========================================================================
+# Storage + observability helpers
+# ===========================================================================
+
+def _registered_key(discord_server_id: int, guild_id: str) -> str:
+    """The guild's `api_key`, or `""` when the guild or the key is absent.
+
+    This is THE sanctioned read (DDD-3). Every other module asks this one.
+    """
+    guild = load_guilds(discord_server_id).get(guild_id) or {}
+    return guild.get("api_key") or ""
+
+
+def _is_quarantined(discord_server_id: int, guild_id: str) -> bool:
+    binding = load_guild_binding(discord_server_id, guild_id)
+    return binding.key_status == KeyStatus.QUARANTINED.value
+
+
+def _key_ref_for(api_key: str) -> str:
+    """Derive the log correlation ID for `api_key`.
+
+    `bot.db.secrets` is imported inside the function, not at module scope, and
+    only when the Fernet key is actually present. `bot/guild_keys.py` is
+    imported by three cogs and a service, so a module-scope import here would
+    put `cryptography` on the JSON rollback path where ADR-006 D9 says the
+    SQLite stack stays untouched.
+    """
+    fernet_key = os.getenv("SCRAPCODE_DB_KEY", "")
+    if not api_key or not fernet_key:
+        return UNKNOWN_KEY_REF
+    from bot.db.secrets import api_key_hmac
+    return key_ref(api_key_hmac(api_key, fernet_key))
+
+
+def _utc_now() -> str:
+    """ISO-8601 UTC, millisecond precision, `String(32)`-shaped.
+
+    The same shape as `battle_hits.completed_on`, which KPI-2 compares AS
+    STRINGS — a different shape returns a wrong result set silently instead
+    of erroring. Milliseconds rather than whole seconds because KPI-1 asserts
+    `alerted_at − last_probe_ok_at > 0`: at second resolution two records
+    emitted inside the same second are indistinguishable, and the metric
+    reads zero for a real, non-zero latency.
+    """
+    now = datetime.now(timezone.utc)
+    return f"{now.strftime('%Y-%m-%dT%H:%M:%S')}.{now.microsecond // 1000:03d}Z"
