@@ -1,5 +1,6 @@
 import json
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NotRequired, Optional, Protocol, TypedDict, runtime_checkable
 
@@ -70,6 +71,58 @@ class ReplayThreadInfo(TypedDict):
     forum_channel_id: int | None
     thread_id: int | None
     index_message_id: NotRequired[int | None]
+
+
+@dataclass(frozen=True)
+class GuildBinding:
+    """Which Tacticus guild a guild's API key is bound to (ADR-008 DDD-4).
+
+    The port-level shape of one `guild_key_bindings` row, so that cogs and the
+    key-policy chokepoint never import the ORM row. Frozen and value-compared
+    on purpose: AC-001.9 / D6 assert a binding is BYTE-IDENTICAL after a failed
+    probe, and `==` on a frozen dataclass says exactly that — an implementation
+    that refreshed `identity_bound_at` on a probe that never succeeded would
+    report a verification date for a check that did not happen.
+
+    The default instance IS the unbound state. No row means UNBOUND, and that
+    is a NORMAL state, never an error: trust-on-first-use (DDD-8) writes the
+    row on the first successful probe, so every guild is unbound on the day
+    Slice 01 deploys. `load_guild_binding` therefore returns this rather than
+    None, keeping the None-check off seven call sites.
+
+    Carries no key material. Log correlation uses `key_ref` — the first 8 hex
+    of `api_key_hmac` — which the policy layer derives, not this row.
+
+    Timestamps are ISO-8601 UTC strings in the SAME `String(32)` shape as
+    `battle_hits.completed_on`; KPI-2 compares them AS STRINGS, so a different
+    shape returns a wrong result set silently instead of erroring.
+
+    `key_status` holds the string values of
+    `bot.services.tacticus.guild_client.KeyStatus` (`active` / `quarantined`).
+    The literal is duplicated rather than imported: policy depends on storage
+    and never the reverse (ADR-008 D3), and a repository that imported the
+    chokepoint could quarantine during a read — which would make the
+    quarantine state unreadable exactly while quarantined.
+    """
+
+    tacticus_guild_id: str | None = None
+    tacticus_guild_tag: str | None = None
+    tacticus_guild_name: str | None = None
+    identity_bound_at: str | None = None
+    key_status: str = "active"
+    quarantine_reason: str | None = None
+    quarantined_at: str | None = None
+    last_alerted_at: str | None = None
+
+    @property
+    def is_unbound(self) -> bool:
+        """True while no identity has ever been adopted for this guild.
+
+        Keyed on `tacticus_guild_id` alone (DDD-1): the tag and the name are
+        display-only and may legitimately be absent, so treating either as
+        evidence of a binding would call an unverifiable guild bound.
+        """
+        return self.tacticus_guild_id is None
 
 
 # ADR-006 D8 / §Architecture enforcement: every ClusterRepository adapter
@@ -202,6 +255,37 @@ class ClusterRepository(ABC):
     def list_replay_threads(self, discord_server_id: int) -> dict:
         """Return `{boss: {map_name: {"forum_channel_id", "thread_id"}}}` for
         every registered (boss, map_name) — drives boss/map autocomplete."""
+
+    # --- ADR-007-pattern guild-key-binding methods (02-02; ADR-008 DDD-4) ---
+    # Binding state is reached ONLY through these three. It deliberately does
+    # not travel on `Cluster`/`Guild`: `bot.guilds.save_guilds` rebuilds each
+    # `Guild` from a five-key dict, so a binding field reachable from the
+    # dataclass would be written back as `None` by the next unrelated admin
+    # command — `/set_ping_channel` alone would wipe it. A separate table
+    # reached by separate methods makes that clobber structurally impossible
+    # rather than merely avoided.
+
+    @abstractmethod
+    def load_guild_binding(self, discord_server_id: int, guild_id: str) -> GuildBinding:
+        """Return the guild's identity binding, or an unbound `GuildBinding`.
+
+        Never returns None — see `GuildBinding` for why absence is modelled as
+        a value rather than a missing one."""
+
+    @abstractmethod
+    def save_guild_binding(self, discord_server_id: int, guild_id: str,
+                           binding: GuildBinding) -> None:
+        """Persist the guild's identity binding, inserting the row on first
+        adoption (DDD-8 trust-on-first-use) and replacing it thereafter."""
+
+    @abstractmethod
+    def list_guild_bindings(self, discord_server_id: int) -> dict[str, GuildBinding]:
+        """Return `{guild_id: binding}` for every guild that HAS a binding.
+
+        Guilds with no row are absent from the mapping rather than present as
+        unbound: the caller pairs this with the guild registry, and inventing
+        entries for guilds that may not be registered would make the two
+        disagree."""
 
 
 class DuplicateReplayUrlError(Exception):
@@ -494,3 +578,25 @@ class JsonClusterRepository(ClusterRepository):
             }
             for boss, maps in data.items()
         }
+
+    # --- Guild-key bindings: deliberately inert (ADR-006 D9 / ADR-008) ---
+    # `SCRAPCODE_REPO_BACKEND=json` is the rollback an operator reaches for
+    # under time pressure. On that path the provenance guard must go INERT —
+    # every guild reads back unbound, every write is dropped — rather than
+    # raise. A half-working guard is worse than an absent one: it would
+    # quarantine on state it cannot persist, and the operator who rolled back
+    # to restore service would get an outage instead. Same shape as
+    # `get_replay_thread` returning None for thread ids here. NOT a stub; the
+    # binding store has no JSON representation by design (DDD-4), because a
+    # file the pre-cutover code also rewrites is exactly the clobber the
+    # separate table exists to rule out.
+
+    def load_guild_binding(self, discord_server_id: int, guild_id: str) -> GuildBinding:
+        return GuildBinding()
+
+    def save_guild_binding(self, discord_server_id: int, guild_id: str,
+                           binding: GuildBinding) -> None:
+        return None
+
+    def list_guild_bindings(self, discord_server_id: int) -> dict[str, GuildBinding]:
+        return {}

@@ -134,16 +134,122 @@ def migrated_db(sqlite_db_path: Path, env_vars) -> Path:
     return sqlite_db_path
 
 
-@pytest.fixture
-def sqlite_repo(migrated_db: Path, fernet_key: str):
-    from bot.repository_sqlalchemy import SqlAlchemyClusterRepository
-    return SqlAlchemyClusterRepository(db_path=str(migrated_db), fernet_key=fernet_key)
+@pytest.fixture(autouse=True)
+def _repo_singleton_never_escapes_tmp_path(monkeypatch, tmp_path: Path):
+    """Point `bot.guilds.repo` at tmp_path for EVERY test in this suite.
 
+    `bot/guilds.py:61` evaluates `repo = build_repo()` at IMPORT time, reading
+    SCRAPCODE_REPO_BACKEND / SCRAPCODE_DB_PATH / SCRAPCODE_DB_KEY at that
+    moment. The `env_vars` fixture sets those with `monkeypatch.setenv` during
+    the test — far too late to affect a singleton that already exists. So every
+    call through a `bot/guilds.py` wrapper reached whichever repository was
+    built at first import, NOT the tmp_path one the test set up.
 
-@pytest.fixture
-def json_repo(json_env_vars):
+    Two consequences, both bad. The tests exercised the wrong object, so they
+    could pass or fail for reasons unrelated to their subject. And with no
+    Fernet key present the composition root's safety net falls back to
+    `JsonClusterRepository()`, whose base_path is the real `clusters/` tree —
+    a full-suite run created `clusters/1458181638453203099/guilds.json` at the
+    repository root. On a machine holding a live JSON tree that is a write to
+    production data, and `save_guilds` would overwrite rather than append.
+
+    Autouse and unconditional, so a test that forgets to request a repository
+    fixture still cannot reach the real tree. `sqlite_repo` and `json_repo`
+    override this with their own instance; the default here is deliberately a
+    JSON repo under tmp_path so the failure mode of forgetting is an empty
+    cluster, not a production write.
+
+    Found during DELIVER step 02-02; see the feature-delta
+    `## Wave: DELIVER / [WHY] Upstream Issues`, UD-3.
+    """
+    import bot.guilds as guilds_mod
     from bot.repository import JsonClusterRepository
-    return JsonClusterRepository()
+    monkeypatch.setattr(
+        guilds_mod, "repo", JsonClusterRepository(base_path=tmp_path / "clusters")
+    )
+    yield
+
+
+@pytest.fixture
+def sqlite_repo(migrated_db: Path, fernet_key: str, monkeypatch):
+    from bot.repository_sqlalchemy import SqlAlchemyClusterRepository
+    repo = SqlAlchemyClusterRepository(db_path=str(migrated_db), fernet_key=fernet_key)
+    # The wrappers in bot/guilds.py resolve through the module singleton, so a
+    # test that drives a cog or a wrapper must see THIS repository, not the
+    # import-time one. See _repo_singleton_never_escapes_tmp_path.
+    import bot.guilds as guilds_mod
+    monkeypatch.setattr(guilds_mod, "repo", repo)
+    return repo
+
+
+@pytest.fixture
+def json_repo(json_env_vars, monkeypatch):
+    from bot.repository import JsonClusterRepository
+    repo = JsonClusterRepository()
+    import bot.guilds as guilds_mod
+    monkeypatch.setattr(guilds_mod, "repo", repo)
+    return repo
+
+
+@pytest.fixture
+def registered_guilds(sqlite_repo):
+    """`Given a registered guild` — the cluster as it existed before this feature.
+
+    Two guilds so that scenarios about one guild not affecting another have
+    something to say. Word Bearers is FIRST in insertion order because
+    `auto_update` derives the season from `next(iter(guilds.values()))`; the
+    season SPOF only misbehaves in that ordering, so a fixture that happened to
+    put it second would pass while the bug was fully present.
+    """
+    from bot.guilds import save_guilds
+    save_guilds(PROD_SERVER_ID, {
+        GUILD_WB: {
+            "name": "Word Bearers",
+            "api_key": "wb-key",
+            "role_id": 1,
+            "notification_channel_id": 4242,
+            "member_role_ids": [],
+        },
+        GUILD_DM: {
+            "name": "Dark Mechanicum",
+            "api_key": "dm-key",
+            "role_id": 2,
+            "notification_channel_id": None,
+            "member_role_ids": [],
+        },
+    })
+    return PROD_SERVER_ID
+
+
+@pytest.fixture
+def bound_guild(registered_guilds):
+    """`Given a guild with a stored binding` — the precondition several
+    scenarios declare in Gherkin and no fixture supplied.
+
+    Without it `load_guilds` returned `{}` on a freshly migrated database, so
+    `test_changing_the_ping_channel_leaves_the_binding_untouched` raised
+    KeyError before reaching its assertion, and
+    `test_load_and_save_unchanged_preserves_every_field` compared an unbound
+    placeholder against an unbound placeholder — passing while asserting
+    nothing. A round-trip test whose Given is missing cannot catch a
+    round-trip bug.
+
+    Binds Word Bearers to the identity from the real incident, so the values
+    a failure prints are the ones in the postmortem.
+
+    Found during DELIVER step 02-02; see the feature-delta
+    `## Wave: DELIVER / [WHY] Upstream Issues`, UD-4.
+    """
+    from bot.guilds import save_guild_binding
+    from bot.repository import GuildBinding
+    binding = GuildBinding(
+        tacticus_guild_id=WORD_BEARERS.uuid,
+        tacticus_guild_tag=WORD_BEARERS.tag,
+        tacticus_guild_name=WORD_BEARERS.name,
+        identity_bound_at="2026-07-31T04:00:00Z",
+    )
+    save_guild_binding(PROD_SERVER_ID, GUILD_WB, binding)
+    return binding
 
 
 # ---------------------------------------------------------------------------

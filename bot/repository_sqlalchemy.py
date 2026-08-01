@@ -27,6 +27,7 @@ from bot.db.models import (
     BattleHitRow,
     BombHitRow,
     ClusterRow,
+    GuildKeyBindingRow,
     GuildMemberRoleRow,
     GuildRow,
     LiveLeaderboardRow,
@@ -45,6 +46,7 @@ from bot.repository import (
     BombHitEntry,
     ClusterRepository,
     DuplicateReplayUrlError,
+    GuildBinding,
     ReplayEntry,
     ReplayThreadInfo,
 )
@@ -676,6 +678,74 @@ class SqlAlchemyClusterRepository(ClusterRepository):
             "url": row.url,
             "comment": row.comment or "",
             "submitted_by": row.submitted_by,
+        }
+
+    # ------------------------------------------------------------------
+    # Guild-key bindings (ADR-008 DDD-4). Read and written against
+    # `guild_key_bindings`, which is 1:1 with `guilds` and CASCADEs from it.
+    #
+    # Nothing here touches `GuildRow`, and `_upsert_one_guild` above touches
+    # nothing here. That separation is the whole point of the table: an
+    # unrelated admin command routes through `save` and cannot reach a binding
+    # column even by accident.
+    # ------------------------------------------------------------------
+
+    def load_guild_binding(self, discord_server_id: int, guild_id: str) -> GuildBinding:
+        with self._db.session_scope() as session:
+            row = session.get(GuildKeyBindingRow, (discord_server_id, guild_id))
+            if row is None:
+                return GuildBinding()
+            return self._binding_from_row(row)
+
+    def save_guild_binding(self, discord_server_id: int, guild_id: str,
+                           binding: GuildBinding) -> None:
+        with self._db.session_scope() as session:
+            row = session.get(GuildKeyBindingRow, (discord_server_id, guild_id))
+            columns = self._binding_columns(binding)
+            if row is None:
+                session.add(GuildKeyBindingRow(
+                    discord_server_id=discord_server_id,
+                    guild_id=guild_id,
+                    **columns,
+                ))
+                return
+            for column, value in columns.items():
+                setattr(row, column, value)
+
+    def list_guild_bindings(self, discord_server_id: int) -> dict[str, GuildBinding]:
+        with self._db.session_scope() as session:
+            rows = session.execute(
+                select(GuildKeyBindingRow).where(
+                    GuildKeyBindingRow.discord_server_id == discord_server_id
+                )
+            ).scalars().all()
+            return {row.guild_id: self._binding_from_row(row) for row in rows}
+
+    def _binding_from_row(self, row) -> GuildBinding:
+        return GuildBinding(
+            tacticus_guild_id=row.tacticus_guild_id,
+            tacticus_guild_tag=row.tacticus_guild_tag,
+            tacticus_guild_name=row.tacticus_guild_name,
+            identity_bound_at=row.identity_bound_at,
+            key_status=row.key_status,
+            quarantine_reason=row.quarantine_reason,
+            quarantined_at=row.quarantined_at,
+            last_alerted_at=row.last_alerted_at,
+        )
+
+    def _binding_columns(self, binding: GuildBinding) -> dict[str, Any]:
+        """Every writable column, named once, for both the insert and the
+        update path — so a column added to the row cannot be persisted on
+        first adoption and silently dropped on every later save."""
+        return {
+            "tacticus_guild_id": binding.tacticus_guild_id,
+            "tacticus_guild_tag": binding.tacticus_guild_tag,
+            "tacticus_guild_name": binding.tacticus_guild_name,
+            "identity_bound_at": binding.identity_bound_at,
+            "key_status": binding.key_status,
+            "quarantine_reason": binding.quarantine_reason,
+            "quarantined_at": binding.quarantined_at,
+            "last_alerted_at": binding.last_alerted_at,
         }
 
     # ------------------------------------------------------------------

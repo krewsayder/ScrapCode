@@ -201,7 +201,6 @@ async def test_mixed_cluster_survives_a_quarantined_first_guild(
     assert cycle.skip_reasons
 
 
-@RED
 @pytest.mark.error
 @pytest.mark.real_io
 @pytest.mark.adapter_integration

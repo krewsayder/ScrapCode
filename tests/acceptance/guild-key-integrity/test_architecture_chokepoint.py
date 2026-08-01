@@ -221,7 +221,6 @@ def test_the_chronicler_package_makes_no_http_calls():
     assert not offenders, f"httpx still imported inside the Chronicler package: {offenders}"
 
 
-@RED
 def test_the_guilds_wrapper_layer_stays_free_of_policy_and_http():
     """DESIGN rule 3. `bot/guilds.py` is imported by every cog; if it
     imported `bot.guild_keys` the policy layer's HTTP client would become a
@@ -234,7 +233,6 @@ def test_the_guilds_wrapper_layer_stays_free_of_policy_and_http():
         )
 
 
-@RED
 def test_storage_never_imports_policy():
     """DESIGN rule 4. Policy depends on storage; never the reverse. A
     repository that imported the chokepoint could quarantine during a read,

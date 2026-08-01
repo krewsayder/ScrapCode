@@ -3,7 +3,12 @@ import os
 import re
 from pathlib import Path
 
-from bot.repository import ClusterRepository, JsonClusterRepository, SupportsProbe
+from bot.repository import (
+    ClusterRepository,
+    GuildBinding,
+    JsonClusterRepository,
+    SupportsProbe,
+)
 from bot.migrations.player_list_migrations import PlayerListMigrator
 
 logger = logging.getLogger(__name__)
@@ -100,8 +105,6 @@ def save_guilds(discord_server_id: int, guilds: dict) -> None:
 # ==========================================
 # GUILD KEY BINDINGS  (feature: guild-key-integrity)
 #
-# RED scaffolds created by DISTILL (Mandate 7). DELIVER implements them.
-#
 # These are thin wrappers over the ClusterRepository binding methods, in the
 # same shape as every other wrapper in this module — brief §4.1 and ADR-004
 # rule 1 make this the sanctioned cog-facing layer.
@@ -119,10 +122,7 @@ def save_guilds(discord_server_id: int, guilds: dict) -> None:
 # tests/acceptance/guild-key-integrity/test_architecture_chokepoint.py.
 # ==========================================
 
-__SCAFFOLD__ = True
-
-
-def load_guild_binding(discord_server_id: int, guild_id: str):
+def load_guild_binding(discord_server_id: int, guild_id: str) -> GuildBinding:
     """Return the guild's identity binding, or an unbound placeholder.
 
     Never returns None: an unbound guild is a real, expected state (every
@@ -130,21 +130,22 @@ def load_guild_binding(discord_server_id: int, guild_id: str):
     push that check onto seven call sites. On the JSON backend this always
     returns unbound — the feature degrades to inert there (ADR-006 D9).
     """
-    raise AssertionError("Not yet implemented — RED scaffold")
+    return repo.load_guild_binding(discord_server_id, guild_id)
 
 
-def save_guild_binding(discord_server_id: int, guild_id: str, binding) -> None:
+def save_guild_binding(discord_server_id: int, guild_id: str,
+                       binding: GuildBinding) -> None:
     """Persist the guild's identity binding.
 
     No-ops on the JSON backend rather than raising, so a rollback under time
     pressure leaves a bot that runs.
     """
-    raise AssertionError("Not yet implemented — RED scaffold")
+    repo.save_guild_binding(discord_server_id, guild_id, binding)
 
 
-def list_guild_bindings(discord_server_id: int) -> dict:
-    """Return {guild_id: binding} for every guild in the server."""
-    raise AssertionError("Not yet implemented — RED scaffold")
+def list_guild_bindings(discord_server_id: int) -> dict[str, GuildBinding]:
+    """Return {guild_id: binding} for every guild that has one."""
+    return repo.list_guild_bindings(discord_server_id)
 
 
 def add_cluster_role(discord_server_id: int, tier: str, role_id: int) -> None:

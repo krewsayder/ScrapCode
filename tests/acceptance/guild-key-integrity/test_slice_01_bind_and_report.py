@@ -109,9 +109,8 @@ def test_downgrade_restores_the_prior_shape_exactly(db_at_previous_head: Path):
     assert after == before
 
 
-@RED
 @pytest.mark.error
-def test_load_and_save_unchanged_preserves_every_field(sqlite_repo, env_vars):
+def test_load_and_save_unchanged_preserves_every_field(bound_guild, env_vars):
     """AC-006.3 + AC-001.7 — the `bot/guilds.py:83-97` round-trip trap.
 
     `save_guilds` rebuilds each `Guild` from a five-key dict. DESIGN's
@@ -119,6 +118,12 @@ def test_load_and_save_unchanged_preserves_every_field(sqlite_repo, env_vars):
     live clobber the moment anyone threads a binding field through the
     `Guild` dataclass. This test is the tripwire on that future mistake, so
     it must keep running even though it currently cannot fail.
+
+    Takes `bound_guild`, not a bare repository. Without a registered guild AND
+    a stored binding this compared an unbound placeholder against an unbound
+    placeholder and an empty dict against an empty dict — green while
+    asserting nothing about a round trip. A tripwire with no wire is worse
+    than no tripwire, because it reports coverage it does not have.
     """
     from bot.guilds import load_guilds, save_guilds, load_guild_binding
 
@@ -259,12 +264,16 @@ async def test_missing_display_field_still_binds_on_the_identifier(
     assert "—" in field
 
 
-@RED
 @pytest.mark.error
 @pytest.mark.driving_port
-def test_changing_the_ping_channel_leaves_the_binding_untouched(sqlite_repo, env_vars):
+def test_changing_the_ping_channel_leaves_the_binding_untouched(bound_guild, env_vars):
     """AC-001.7. The round-trip trap approached from the user's side: an
-    unrelated admin command must not be able to erase identity state."""
+    unrelated admin command must not be able to erase identity state.
+
+    `bound_guild` supplies the `Given a guild with a stored binding` the
+    Gherkin declares. Without it `load_guilds` returned `{}` and this raised
+    KeyError before reaching its assertion.
+    """
     from bot.guilds import load_guild_binding, save_guilds, load_guilds
 
     before = load_guild_binding(PROD_SERVER_ID, GUILD_WB)
