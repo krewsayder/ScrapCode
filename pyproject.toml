@@ -72,3 +72,17 @@ type = "forbidden"
 source_modules = ["bot.cogs.replay_cog"]
 forbidden_modules = ["replay_index"]
 allow_indirect_imports = true
+
+# ADR-008 §Architecture enforcement rule 4: policy depends on storage, never
+# the reverse. `bot.guild_keys` is the key-usage chokepoint; it reads the key
+# THROUGH the repositories. A repository that imported the chokepoint back
+# could quarantine during a read, which makes the quarantine state unreadable
+# while quarantined. Direct imports only — this mirrors the AST assertion
+# `test_storage_never_imports_policy`, so an operator running `lint-imports`
+# sees the same rule the test enforces.
+[[tool.importlinter.contracts]]
+name = "Repositories MUST NOT import bot.guild_keys — the dependency runs backwards"
+type = "forbidden"
+source_modules = ["bot.repository", "bot.repository_sqlalchemy"]
+forbidden_modules = ["bot.guild_keys"]
+allow_indirect_imports = true

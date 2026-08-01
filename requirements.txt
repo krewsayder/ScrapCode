@@ -9,3 +9,9 @@ sqlalchemy>=2.0
 alembic
 aiosqlite
 cryptography
+# Architecture enforcement (ADR-008 D3 / DEVOPS D10): the import-graph
+# contracts live in pyproject.toml and the reachability rules in
+# tests/acceptance/guild-key-integrity/. Enforcement that depends on someone
+# having pip-installed the tool by hand is not enforcement.
+import-linter
+pytest-archon

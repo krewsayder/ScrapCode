@@ -245,7 +245,6 @@ def test_storage_never_imports_policy():
         )
 
 
-@RED
 def test_import_linter_contracts_all_pass():
     """The four existing `lint-imports` contracts plus the fifth this feature
     adds, run as part of `pytest` rather than only when someone remembers.
@@ -287,7 +286,6 @@ def test_archon_rules_hold():
     )
 
 
-@RED
 def test_both_enforcement_tools_are_pinned():
     """DEVOPS D10's own precondition, asserted rather than assumed.
 
