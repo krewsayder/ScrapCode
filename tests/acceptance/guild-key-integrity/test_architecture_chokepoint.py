@@ -208,7 +208,6 @@ def test_the_player_key_exemptions_still_describe_real_code():
     )
 
 
-@RED
 def test_the_chronicler_package_makes_no_http_calls():
     """DESIGN rule 2 / DDD-2. `_fetch_roster` is deleted by this feature and
     the Tacticus call moves out for good. An `httpx` import left behind is
@@ -259,7 +258,6 @@ def test_import_linter_contracts_all_pass():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@RED
 def test_archon_rules_hold():
     """`pytest-archon` rules for the two import boundaries best expressed as
     reachability rather than a direct-import check."""
