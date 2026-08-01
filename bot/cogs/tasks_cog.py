@@ -1,12 +1,15 @@
 import asyncio
+import logging
 
 import httpx
 import discord
 from discord.ext import commands, tasks
 
 from config import UPDATE_CHANNEL_ID
+from bot import guild_keys
 from bot.guilds import (
     load_guilds,
+    load_guild_binding,
     get_player_list,
     load_player_registrations,
     load_capped_state,
@@ -15,14 +18,31 @@ from bot.guilds import (
     save_live_leaderboards,
     repo,
 )
+from bot.obs import emit_structured
 from bot.tracker import process_api_response
 from bot.guilds import load_player_list
 from bot.embeds import encounter_limit
 from bot.services.chronicl3r.player_service import PlayerService
+from bot.services.tacticus.guild_client import GuildSnapshot, KeyStatus, ProbeOutcome
+
+logger = logging.getLogger(__name__)
 
 TACTICUS_PLAYER_URL   = "https://api.tacticusgame.com/api/v1/player"
 TACTICUS_RAID_URL     = "https://api.tacticusgame.com/api/v1/guildRaid/{season}"
 TACTICUS_CURRENT_RAID = "https://api.tacticusgame.com/api/v1/guildRaid"
+
+_TACTICUS_TIMEOUT_SECONDS = 20.0
+
+# One record per server per hourly cycle. `auto_update` emitted nothing
+# structured before this feature, which is exactly why a whole-server skip was
+# invisible for three days during the 2026-07-28 incident — KPI-5 ("100% of
+# guilds survive a sibling's quarantine") is unmeasurable without it.
+CYCLE_EVENT = "auto_update.cycle"
+
+# Emitted when the cycle posts a message an operator is meant to act on.
+# KPI-1's detection latency is `alerted_at − last_probe_ok_at`, so this record
+# is the second operand of the formula and its `ts` must be real.
+ALERT_SENT_EVENT = "guild.key.alert.sent"
 
 
 class TasksCog(commands.Cog):
@@ -148,93 +168,236 @@ class TasksCog(commands.Cog):
 
     # ==========================================
     # TASK: AUTO UPDATE (runs every hour)
+    #
+    # Every guild passes through `bot.guild_keys` before a single byte of its
+    # data is read (ADR-008 D3). A Tacticus key belongs to a PLAYER, not to a
+    # guild: when a guild-scoped key-holder changes guild the key keeps working
+    # and silently returns the NEW guild's data. This loop is where that goes
+    # from invisible to a message in a channel within the hour.
+    #
+    # Slice 01 REPORTS and does not block — `enforce=False`, deliberately. An
+    # implementation that refused the write here would pass every drift
+    # scenario and still be wrong: enforcement ships in Slice 03, AFTER
+    # `/update_guild_key` (Slice 02) provides the only exit from quarantine, so
+    # the first quarantine is never a trap (ADR-008 D3).
     # ==========================================
 
     @tasks.loop(hours=1)
     async def auto_update(self):
         print("[auto_update] Loop fired...")
 
-        channel = self.bot.get_channel(UPDATE_CHANNEL_ID)
+        channel = await self._update_channel()
         if channel is None:
-            try:
-                channel = await self.bot.fetch_channel(UPDATE_CHANNEL_ID)
-            except Exception as e:
-                print(f"[auto_update] Channel {UPDATE_CHANNEL_ID} not found — {e}")
-                return
+            return
 
-        server_ids = repo.list_server_ids()
+        for server_id in repo.list_server_ids():
+            await self._update_one_server(server_id, channel)
 
-        for server_id in server_ids:
-            guilds = load_guilds(server_id)
-            if not guilds:
+    async def _update_channel(self):
+        channel = self.bot.get_channel(UPDATE_CHANNEL_ID)
+        if channel is not None:
+            return channel
+        try:
+            return await self.bot.fetch_channel(UPDATE_CHANNEL_ID)
+        except Exception as e:
+            print(f"[auto_update] Channel {UPDATE_CHANNEL_ID} not found — {e}")
+            return None
+
+    async def _update_one_server(self, server_id: int, channel) -> None:
+        """One server's cycle: find the season, walk every guild, report once."""
+        guilds = load_guilds(server_id)
+        if not guilds:
+            return
+
+        cycle = _CycleReport(server_id, guilds_total=len(guilds))
+        season = await self._current_season(server_id, guilds)
+
+        if season is None:
+            for guild_id in guilds:
+                cycle.skipped(guild_id, _unusable_key_reason(server_id, guild_id))
+            cycle.emit(season=None)
+            print(f"[auto_update] Could not determine season for server {server_id}, skipping.")
+            return
+
+        print(f"[auto_update] Updating server {server_id} guilds for season {season}...")
+
+        results: list[str] = []
+        for guild_id, guild_data in guilds.items():
+            results += await self._update_one_guild(
+                server_id, guild_id, guild_data, season, channel, cycle
+            )
+
+        await self._post(
+            channel,
+            f"🔄 **Auto-update complete — Season {season}**\n" + "\n".join(results),
+        )
+        cycle.emit(season=season)
+
+        await self._refresh_live_leaderboards(server_id, season, guilds)
+
+    async def _current_season(self, server_id: int, guilds: dict) -> int | None:
+        """The current raid season, from the first guild whose key can answer.
+
+        DDD-7 exists for this loop: `active_key` is sync and storage-only, so a
+        quarantined or unregistered guild is skipped without paying for a
+        probe. The original read `next(iter(guilds.values()))["api_key"]` and
+        skipped the WHOLE SERVER when that one guild failed — one bad key
+        halting every sibling is KPI-5's 0% baseline. Nothing is quarantined in
+        Slice 01, so the fall-through is dormant until Slice 03 opens it.
+        """
+        for guild_id in guilds:
+            credential = guild_keys.active_key(server_id, guild_id)
+            if credential is None:
                 continue
+            season = await self._ask_for_current_season(credential, server_id, guild_id)
+            if season is not None:
+                return season
+        return None
 
-            season    = None
-            first_gd  = next(iter(guilds.values()))
-            first_key = first_gd.get("api_key")
-            if first_key:
-                try:
-                    async with httpx.AsyncClient(timeout=20.0) as client:
-                        resp = await client.get(
-                            TACTICUS_CURRENT_RAID,
-                            headers={"accept": "application/json", "X-API-KEY": first_key}
-                        )
-                        resp.raise_for_status()
-                        season = resp.json().get("season")
-                except Exception as e:
-                    print(f"[auto_update] Failed to determine current season for server {server_id}: {e}")
-
-            if season is None:
-                print(f"[auto_update] Could not determine season for server {server_id}, skipping.")
-                continue
-
-            print(f"[auto_update] Updating server {server_id} guilds for season {season}...")
-            results = []
-
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                for guild_id, guild_data in guilds.items():
-                    guild_name = guild_data["name"]
-                    api_key    = guild_data.get("api_key")
-
-                    if api_key:
-                        try:
-                            await self.player_service.validate_if_stale(server_id, guild_id, api_key)
-                        except Exception as e:
-                            print(f"[auto_update] Player list validation failed for {guild_name}: {e}")
-
-                    if not api_key:
-                        results.append(f"⚠️ **{guild_name}** — skipped, no API key set.")
-                        continue
-
-                    headers  = {"accept": "application/json", "X-API-KEY": api_key}
-                    url      = TACTICUS_RAID_URL.format(season=season)
-
-                    try:
-                        response = await client.get(url, headers=headers)
-                        response.raise_for_status()
-                        api_data = response.json()
-
-                        process_api_response(api_data, season, server_id, guild_id)
-
-                        await self._register_unknown_players(server_id, guild_id, api_data)
-                        results.append(f"✅ **{guild_name}** — updated successfully.")
-                        print(f"[auto_update] {guild_name} updated.")
-
-                    except httpx.HTTPStatusError as e:
-                        results.append(f"❌ **{guild_name}** — HTTP {e.response.status_code}")
-                        print(f"[auto_update] {guild_name} failed: HTTP {e.response.status_code}")
-                    except Exception as e:
-                        results.append(f"❌ **{guild_name}** — {str(e)[:80]}")
-                        print(f"[auto_update] {guild_name} failed: {e}")
-
-            try:
-                await channel.send(
-                    f"🔄 **Auto-update complete — Season {season}**\n" + "\n".join(results)
+    async def _ask_for_current_season(
+        self, credential: str, server_id: int, guild_id: str
+    ) -> int | None:
+        try:
+            async with httpx.AsyncClient(timeout=_TACTICUS_TIMEOUT_SECONDS) as client:
+                response = await client.get(
+                    TACTICUS_CURRENT_RAID, headers=_tacticus_headers(credential)
                 )
-            except discord.Forbidden:
-                print(f"[auto_update] Missing permission to send in channel {UPDATE_CHANNEL_ID}")
+                response.raise_for_status()
+                return response.json().get("season")
+        except Exception as e:
+            print(
+                f"[auto_update] {guild_id} could not answer the season for "
+                f"server {server_id}: {e}"
+            )
+            return None
 
-            await self._refresh_live_leaderboards(server_id, season, guilds)
+    async def _update_one_guild(
+        self, server_id: int, guild_id: str, guild_data: dict,
+        season: int, channel, cycle: "_CycleReport",
+    ) -> list[str]:
+        """Verify the guild's identity, then ingest. Returns its summary lines."""
+        guild_name = guild_data["name"]
+
+        credential = guild_keys.active_key(server_id, guild_id)
+        if credential is None:
+            reason = _unusable_key_reason(server_id, guild_id)
+            cycle.skipped(guild_id, reason)
+            return [f"⛔ **{guild_name}** — skipped, no usable key ({reason})."]
+
+        # Read the binding BEFORE the probe: adoption is announced exactly once
+        # (DDD-8) and a mismatch names the guild it WAS bound to, neither of
+        # which is recoverable from the snapshot afterwards.
+        bound_before = load_guild_binding(server_id, guild_id)
+        snapshot = await guild_keys.verify_and_resolve(server_id, guild_id, enforce=False)
+
+        await self._announce_adoption(guild_name, bound_before, snapshot, channel)
+        results = self._probe_report(server_id, guild_id, guild_name,
+                                     bound_before, snapshot, channel)
+
+        if snapshot.outcome is ProbeOutcome.DEAD:
+            # A refused key returns no data, so there is nothing to fetch and
+            # nothing to contaminate — report it and move to the next guild.
+            cycle.skipped(guild_id, "dead_key")
+            return results
+
+        await self._validate_roster(server_id, guild_id, guild_name, snapshot)
+        cycle.processed(guild_id)
+        results.append(await self._ingest_raid(server_id, guild_id, guild_name,
+                                               season, credential))
+        return results
+
+    def _probe_report(
+        self, server_id: int, guild_id: str, guild_name: str,
+        bound_before, snapshot: GuildSnapshot, channel,
+    ) -> list[str]:
+        """The operator-facing consequence of the probe, if there is one.
+
+        A guild whose key resolves to the guild it is bound to says NOTHING —
+        an hourly all-clear is alert fatigue by construction and would bury the
+        one message that matters. That silence is KPI-4's whole basis.
+        """
+        line = _probe_line(guild_name, bound_before, snapshot)
+        if line is None:
+            return []
+        if snapshot.outcome in _ALERTING_OUTCOMES:
+            self._record_alert(server_id, guild_id, channel)
+        return [line]
+
+    async def _announce_adoption(
+        self, guild_name: str, bound_before, snapshot: GuildSnapshot, channel
+    ) -> None:
+        """Trust-on-first-use, said out loud exactly once (DDD-8).
+
+        There is no historical record to reconstruct a binding from, so the
+        announcement IS the verification step: an operator reading it is the
+        only thing standing between "we adopted the right guild" and "we
+        adopted whatever the key happened to resolve to on deploy day".
+        """
+        if not bound_before.is_unbound or snapshot.identity is None:
+            return
+        await self._post(
+            channel,
+            f"🔗 **{guild_name}** is now bound to {_resolved_label(snapshot.identity)}. "
+            f"Verify this is the right guild — every later cycle is checked against it.",
+        )
+
+    def _record_alert(self, server_id: int, guild_id: str, channel) -> None:
+        """KPI-1's `alerted_at`, the second operand of
+        `alerted_at − last_probe_ok_at`."""
+        emit_structured(
+            logger, logging.INFO, ALERT_SENT_EVENT,
+            ts=_now(),
+            server_id=server_id,
+            guild_id=guild_id,
+            channel_id=getattr(channel, "id", None),
+            # No suppression in Slice 01 (AC-002.6): a repeat means the
+            # operator has not acted yet, and that is worth saying. Suppression
+            # arrives with quarantine in Slice 03, where the state persists.
+            suppressed_until=None,
+        )
+
+    async def _validate_roster(
+        self, server_id: int, guild_id: str, guild_name: str, snapshot: GuildSnapshot
+    ) -> None:
+        """Hand the roster to the Chronicler as a SNAPSHOT, never as a key.
+
+        `PlayerService` no longer fetches for itself (DDD-2): it refuses to
+        write a roster whose owner cannot be established, which is the guard
+        that stops an hourly inversion flipping 60 of 67 players to `former`.
+        """
+        try:
+            await self.player_service.validate_if_stale(server_id, guild_id, snapshot)
+        except Exception as e:
+            print(f"[auto_update] Player list validation failed for {guild_name}: {e}")
+
+    async def _ingest_raid(
+        self, server_id: int, guild_id: str, guild_name: str,
+        season: int, credential: str,
+    ) -> str:
+        url = TACTICUS_RAID_URL.format(season=season)
+        try:
+            async with httpx.AsyncClient(timeout=_TACTICUS_TIMEOUT_SECONDS) as client:
+                response = await client.get(url, headers=_tacticus_headers(credential))
+                response.raise_for_status()
+                api_data = response.json()
+
+            process_api_response(api_data, season, server_id, guild_id)
+            await self._register_unknown_players(server_id, guild_id, api_data)
+            print(f"[auto_update] {guild_name} updated.")
+            return f"✅ **{guild_name}** — updated successfully."
+
+        except httpx.HTTPStatusError as e:
+            print(f"[auto_update] {guild_name} failed: HTTP {e.response.status_code}")
+            return f"❌ **{guild_name}** — HTTP {e.response.status_code}"
+        except Exception as e:
+            print(f"[auto_update] {guild_name} failed: {e}")
+            return f"❌ **{guild_name}** — {str(e)[:80]}"
+
+    async def _post(self, channel, content: str) -> None:
+        try:
+            await channel.send(content)
+        except discord.Forbidden:
+            print(f"[auto_update] Missing permission to send in channel {UPDATE_CHANNEL_ID}")
 
     async def _register_unknown_players(self, server_id: int, guild_id: str, api_data: dict) -> None:
         known   = set(load_player_list(server_id, guild_id).get("players", {}).keys())
@@ -421,6 +584,137 @@ class TasksCog(commands.Cog):
     @auto_update.before_loop
     async def before_auto_update(self):
         await self.bot.wait_until_ready()
+
+
+# ==========================================
+# Cycle bookkeeping + rendering
+# ==========================================
+
+class _CycleReport:
+    """The KPI-5 instrument: what this server's cycle actually did.
+
+    KPI-5 reads `guilds_processed == guilds_total − guilds_quarantined`, so the
+    three counts and the reasons have to come out of ONE record per server per
+    cycle — a skip that leaves no trace is exactly how a whole-server outage
+    stayed invisible for three days. `skip_reasons` is never empty while
+    `guilds_skipped > 0`: a count with no reason is a number nobody can act on.
+    """
+
+    def __init__(self, server_id: int, *, guilds_total: int) -> None:
+        self.server_id = server_id
+        self.guilds_total = guilds_total
+        self._processed: list[str] = []
+        self._skipped: list[str] = []
+
+    def processed(self, guild_id: str) -> None:
+        self._processed.append(guild_id)
+
+    def skipped(self, guild_id: str, reason: str) -> None:
+        self._skipped.append(f"{guild_id}: {reason}")
+
+    def emit(self, *, season: int | None) -> None:
+        emit_structured(
+            logger, logging.INFO, CYCLE_EVENT,
+            ts=_now(),
+            server_id=self.server_id,
+            season=season,
+            guilds_total=self.guilds_total,
+            guilds_processed=len(self._processed),
+            guilds_skipped=len(self._skipped),
+            skip_reasons=list(self._skipped),
+        )
+
+
+def _unusable_key_reason(server_id: int, guild_id: str) -> str:
+    """Why `active_key` said no. Quarantine and absence need different words:
+    one is the feature working, the other is a guild nobody finished
+    registering, and an operator acts differently on each."""
+    binding = load_guild_binding(server_id, guild_id)
+    if binding.key_status == KeyStatus.QUARANTINED.value:
+        return "quarantined"
+    return "no_key_registered"
+
+
+# The probe outcomes an operator has to act on. UNREACHABLE is deliberately
+# absent: a Tacticus outage is transient and self-healing, and an alert record
+# per guild per hour through an outage is how a channel gets muted — a muted
+# channel defeats KPI-1 entirely.
+_ALERTING_OUTCOMES = (
+    ProbeOutcome.MISMATCH, ProbeOutcome.UNVERIFIABLE, ProbeOutcome.DEAD,
+)
+
+
+def _probe_line(guild_name: str, bound_before, snapshot: GuildSnapshot) -> str | None:
+    """One summary line for a probe that needs saying, or None for silence.
+
+    Pure rendering, kept out of the loop's control flow: the decision to record
+    an alert and the words shown to the operator change for different reasons.
+    """
+    if snapshot.outcome is ProbeOutcome.MISMATCH:
+        return (
+            f"⚠️ **{guild_name}** — key mismatch: bound to "
+            f"{_bound_label(bound_before)} but the key now resolves to "
+            f"{_resolved_label(snapshot.identity)}. Data is still ingested this "
+            f"slice — run `/update_guild_key` to correct it."
+        )
+    if snapshot.outcome is ProbeOutcome.UNVERIFIABLE:
+        return (
+            f"⚠️ **{guild_name}** — identity verification is offline: the guild "
+            f"service answered without an identifier, so the key could not be "
+            f"checked. The tag is never compared as a substitute."
+        )
+    if snapshot.outcome is ProbeOutcome.DEAD:
+        return (
+            f"❌ **{guild_name}** — the key was refused (HTTP {snapshot.status}). "
+            f"Install a working one with `/update_guild_key`."
+        )
+    if snapshot.outcome is ProbeOutcome.UNREACHABLE:
+        return (
+            f"❌ **{guild_name}** — the guild service is unreachable "
+            f"({snapshot.error}); the check is retried next cycle."
+        )
+    return None
+
+
+def _bound_label(binding) -> str:
+    return _identity_label(
+        binding.tacticus_guild_name,
+        binding.tacticus_guild_tag,
+        binding.tacticus_guild_id,
+    )
+
+
+def _resolved_label(identity) -> str:
+    return _identity_label(identity.name, identity.tag, identity.uuid)
+
+
+def _identity_label(name: str | None, tag: str | None, uuid: str | None) -> str:
+    """Name, tag and the first eight characters of the identifier.
+
+    The comparison is on uuid alone (DDD-1), but a uuid pair tells an operator
+    nothing about what to do next — and both guilds in the 2026-07-28 incident
+    carried the 【UNDV】 alliance prefix, so the name alone is not enough
+    either. All three, always.
+    """
+    return f"{name or '—'} 【{tag or '—'}】 ({(uuid or '—')[:8]})"
+
+
+def _tacticus_headers(credential: str) -> dict:
+    return {"accept": "application/json", "X-API-KEY": credential}
+
+
+def _now() -> str:
+    """The one clock this feature's records share.
+
+    Reuses `bot.guild_keys`'s helper rather than re-deriving the format:
+    KPI-1 subtracts a timestamp emitted HERE from one emitted THERE, and
+    KPI-2 compares them as strings against `battle_hits.completed_on`. Two
+    independently-written formatters is the failure that returns a wrong
+    result set silently instead of erroring. Millisecond precision is
+    load-bearing — KPI-1 asserts the difference is STRICTLY positive, and at
+    whole-second resolution two records in the same second read as zero.
+    """
+    return guild_keys._utc_now()
 
 
 async def setup_tasks(bot: commands.Bot, player_service: PlayerService):
