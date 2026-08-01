@@ -445,7 +445,6 @@ async def test_a_persistent_mismatch_is_reported_every_cycle_in_this_slice(
     assert len(key_events.named("guild.key.mismatch")) == 2
 
 
-@RED
 @pytest.mark.kpi
 async def test_the_detection_latency_is_computable_from_the_records(
     sqlite_repo, fake_guild_service, update_channel, key_events
