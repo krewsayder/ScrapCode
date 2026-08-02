@@ -28,10 +28,16 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
-from bot.guilds import load_guild_binding, load_guilds, save_guild_binding
+from bot.guilds import (
+    load_guild_binding,
+    load_guilds,
+    replace_guild_key,
+    save_guild_binding,
+)
 from bot.obs import emit_structured
 from bot.services.tacticus import guild_client
 from bot.services.tacticus.guild_client import (
@@ -160,13 +166,172 @@ def release(discord_server_id: int, guild_id: str) -> None:
     slice before anything can enter quarantine, so the exit provably exists
     before the entrance opens.
 
-    NOT a leftover scaffold — a deliberate slice boundary. Unreachable in
-    Slice 01, where nothing can enter quarantine in the first place.
+    Clears `key_status` → active, `quarantine_reason`, `quarantined_at` and
+    `last_alerted_at` (a fresh quarantine's first alert must fire, so the
+    rate-limit clock resets too), KEEPING the identity fields
+    (`tacticus_guild_id`, tag, name, `identity_bound_at`). The identity is the
+    lock; quarantine is a state of the key, not a rebinding.
     """
-    raise NotImplementedError(
-        "release() lands in Slice 02 with /update_guild_key, which is the "
-        "only way out of quarantine. Nothing can enter quarantine until "
-        "Slice 03, so this is unreachable in Slice 01."
+    binding = load_guild_binding(discord_server_id, guild_id)
+    save_guild_binding(discord_server_id, guild_id, replace(
+        binding,
+        key_status=KeyStatus.ACTIVE.value,
+        quarantine_reason=None,
+        quarantined_at=None,
+        last_alerted_at=None,
+    ))
+
+
+async def install_guild_key(
+    discord_server_id: int,
+    guild_id: str,
+    api_key: str,
+    *,
+    force: bool = False,
+) -> "InstallResult":
+    """Probe a submitted key, install it when it verifies, release quarantine.
+
+    The policy half of `/update_guild_key` (Slice 02). Probes the SUBMITTED
+    key via `guild_client.fetch_guild_snapshot` BEFORE storing it, so an
+    unverified key is never written (AC-003.3 / criterion 3). Only a probe that
+    returns an identity (a well-formed 200) authorises a write:
+
+      * identity matches the bound identity (or the guild is unbound →
+        trust-on-first-use adopt, or `force=True` → rebind) → write the key +
+        hmac in one transaction via `replace_guild_key`, release quarantine if
+        the guild was quarantined, refresh the binding display fields, emit
+        `guild.key.updated`, return the result.
+      * failed probe (UNREACHABLE / DEAD / UNVERIFIABLE) → no write, return the
+        outcome. An untrusted key must not enter on an outage (AC-003.6).
+      * mismatch without `force` → no write, return MISMATCH. Slice 03's
+        quarantine + 04-02's refusal reply layer on top; the no-store guard is
+        correct by construction now.
+
+    The 04-02 cog wraps this in the real `/update_guild_key` command
+    (permission tier, force, refusal replies, unknown-guild listing); the
+    signature here is shaped so that wrap is an extension, not a rewrite.
+
+    `key_ref` is derived from the SUBMITTED key at call time (the plaintext is
+    in scope here and nowhere else); no plaintext reaches the record.
+    """
+    context = _KeyContext(discord_server_id, guild_id, _key_ref_for(api_key))
+    started = time.perf_counter()
+    snapshot = await guild_client.fetch_guild_snapshot(api_key)
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+    if snapshot.identity is None:
+        return InstallResult(
+            outcome=snapshot.outcome,
+            bound_name=load_guild_binding(discord_server_id, guild_id).tacticus_guild_name,
+        )
+
+    observed: GuildIdentity = snapshot.identity
+    binding = load_guild_binding(discord_server_id, guild_id)
+
+    if binding.is_unbound:
+        replace_guild_key(discord_server_id, guild_id, api_key)
+        _commit_install(
+            context, binding, observed, elapsed_ms,
+            set_identity=True, clear_quarantine=False,
+            forced=False, rebound_from=None,
+        )
+        context.emit_probe_ok(observed)
+        return InstallResult(outcome=ProbeOutcome.MATCH, identity=observed)
+
+    bound = GuildIdentity(uuid=binding.tacticus_guild_id)
+    if bound.matches(observed):
+        replace_guild_key(discord_server_id, guild_id, api_key)
+        _rebind(context, binding, observed)
+        context.emit_probe_ok(observed)
+        if binding.key_status == KeyStatus.QUARANTINED.value:
+            release(discord_server_id, guild_id)
+        _emit_updated(context, observed, elapsed_ms, forced=False, rebound_from=None)
+        return InstallResult(outcome=ProbeOutcome.MATCH, identity=observed)
+
+    if force:
+        rebound_from = binding.tacticus_guild_id
+        replace_guild_key(discord_server_id, guild_id, api_key)
+        _commit_install(
+            context, binding, observed, elapsed_ms,
+            set_identity=True, clear_quarantine=True,
+            forced=True, rebound_from=rebound_from,
+        )
+        return InstallResult(
+            outcome=ProbeOutcome.MISMATCH, identity=observed,
+            forced=True, rebound_from=rebound_from,
+        )
+
+    context.emit(
+        logging.ERROR, "guild.key.mismatch",
+        bound_id=binding.tacticus_guild_id, observed_id=observed.uuid,
+        observed_tag=observed.tag, observed_name=observed.name,
+    )
+    return InstallResult(
+        outcome=ProbeOutcome.MISMATCH, identity=observed,
+        bound_name=binding.tacticus_guild_name,
+    )
+
+
+@dataclass(frozen=True)
+class InstallResult:
+    """What `install_guild_key` did — rendered to the Discord reply by the cog.
+
+    `outcome` is the probe classification; the cog renders a refusal for every
+    non-MATCH (and for MISMATCH-with-force it renders the rebind). `identity`
+    is the resolved guild (None on a failed probe). `bound_name` is the
+    previously-bound guild's display name, carried so the mismatch refusal
+    can name both guilds without re-reading the binding. Carries no key
+    material — `key_ref` is on the record, not the plaintext.
+    """
+
+    outcome: ProbeOutcome
+    identity: GuildIdentity | None = None
+    forced: bool = False
+    rebound_from: str | None = None
+    bound_name: str | None = None
+
+
+def _commit_install(
+    context: _KeyContext, binding, observed: GuildIdentity, elapsed_ms: int, *,
+    set_identity: bool, clear_quarantine: bool,
+    forced: bool, rebound_from: str | None,
+) -> None:
+    """Write the refreshed binding + `guild.key.updated` after a key install.
+
+    The one helper for the three install-commit paths (adopt, force-rebind,
+    and the unbound adoption): build the column delta explicitly so a column
+    added to `GuildBinding` cannot be silently dropped here. `set_identity`
+    re-points the lock (adoption / force); `clear_quarantine` exits it.
+    """
+    updates: dict = {
+        "tacticus_guild_tag": observed.tag,
+        "tacticus_guild_name": observed.name,
+        "identity_bound_at": _utc_now(),
+    }
+    if set_identity:
+        updates["tacticus_guild_id"] = observed.uuid
+    if clear_quarantine:
+        updates["key_status"] = KeyStatus.ACTIVE.value
+        updates["quarantine_reason"] = None
+        updates["quarantined_at"] = None
+        updates["last_alerted_at"] = None
+    save_guild_binding(context.server_id, context.guild_id, replace(binding, **updates))
+    _emit_updated(context, observed, elapsed_ms, forced=forced, rebound_from=rebound_from)
+
+
+def _emit_updated(
+    context: _KeyContext, observed: GuildIdentity, elapsed_ms: int, *,
+    forced: bool, rebound_from: str | None,
+) -> None:
+    """Emit the `guild.key.updated` KPI record (key_ref + outcome correlation).
+
+    `key_ref` is on the context (derived from the SUBMITTED key); no plaintext
+    key value reaches this record (KPI-6 by construction).
+    """
+    context.emit(
+        logging.INFO, "guild.key.updated",
+        tacticus_guild_id=observed.uuid, elapsed_ms=elapsed_ms,
+        forced=forced, rebound_from=rebound_from,
     )
 
 

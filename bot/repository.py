@@ -287,6 +287,26 @@ class ClusterRepository(ABC):
         entries for guilds that may not be registered would make the two
         disagree."""
 
+    @abstractmethod
+    def replace_guild_key(self, discord_server_id: int, guild_id: str,
+                          api_key: str) -> None:
+        """UPDATE only `api_key` (and `api_key_hmac` where the backend has one)
+        on the single named guild row, in one transaction.
+
+        This is the targeted key-swap path (ADR-006 D7 / AC-003.2). Unlike
+        `save` — which rewrites every guild row and CASCADE-deletes absent ones
+        — this touches ONLY the two key columns, so dependent player/hit rows
+        cannot be affected and CASCADE is impossible by construction, not by
+        avoidance. Both `api_key` and `api_key_hmac` are written in the SAME
+        transaction: a write that updates one without the other leaves a row
+        whose uniqueness check no longer matches its key.
+
+        Raises `KeyError` when the guild row is absent: installing a key for an
+        unregistered guild is a caller-side refusal (04-02), never a silent
+        no-op here. Raw-SQL key edits are forbidden — this is the only
+        sanctioned write path for a key replacement.
+        """
+
 
 class DuplicateReplayUrlError(Exception):
     """Raised by `upsert_replay_entry` when (server, boss, map_name, url) is
@@ -600,3 +620,18 @@ class JsonClusterRepository(ClusterRepository):
 
     def list_guild_bindings(self, discord_server_id: int) -> dict[str, GuildBinding]:
         return {}
+
+    def replace_guild_key(self, discord_server_id: int, guild_id: str,
+                          api_key: str) -> None:
+        """JSON rollback impl (ADR-006 D9). No `api_key_hmac` concept on the
+        JSON path, so only `api_key` is updated. Edits the one guild's entry
+        in `guilds.json` directly — no deletion, no rewrite of siblings — so
+        the rollback path mirrors the SQLite impl's "touch only the key
+        column" guarantee as closely as a flat file allows."""
+        guilds_file = self._server_path(discord_server_id) / "guilds.json"
+        data = self._read_json(guilds_file)
+        guilds = data.get("guilds", {})
+        if guild_id not in guilds:
+            raise KeyError(guild_id)
+        guilds[guild_id]["api_key"] = api_key
+        self._write_json(guilds_file, data)

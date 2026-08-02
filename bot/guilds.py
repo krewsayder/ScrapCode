@@ -143,6 +143,20 @@ def save_guild_binding(discord_server_id: int, guild_id: str,
     repo.save_guild_binding(discord_server_id, guild_id, binding)
 
 
+def replace_guild_key(discord_server_id: int, guild_id: str, api_key: str) -> None:
+    """Swap a guild's `api_key` (and `api_key_hmac` where the backend has one)
+    in one transaction, touching nothing else (ADR-006 D7 / AC-003.2).
+
+    The targeted key-swap path — the ONLY sanctioned write for a key
+    replacement. `save_guilds` rebuilds every guild row and CASCADE-deletes
+    absent ones, which is the wrong tool for a key swap: this command's whole
+    justification is that players and hit rows are byte-identical before and
+    after, so this method touches only the two key columns and cannot reach a
+    dependent row even by accident.
+    """
+    repo.replace_guild_key(discord_server_id, guild_id, api_key)
+
+
 def list_guild_bindings(discord_server_id: int) -> dict[str, GuildBinding]:
     """Return {guild_id: binding} for every guild that has one."""
     return repo.list_guild_bindings(discord_server_id)

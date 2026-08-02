@@ -721,6 +721,23 @@ class SqlAlchemyClusterRepository(ClusterRepository):
             ).scalars().all()
             return {row.guild_id: self._binding_from_row(row) for row in rows}
 
+    def replace_guild_key(self, discord_server_id: int, guild_id: str,
+                          api_key: str) -> None:
+        """UPDATE only `api_key` + `api_key_hmac` on the one guild row, in one
+        session (ADR-006 D7 / AC-003.2).
+
+        Does NOT call `_upsert_one_guild` — that helper rewrites name,
+        role_id, notification_channel_id and would let a stale dict clobber
+        state. Touching only these two columns makes CASCADE impossible by
+        construction: nothing here can delete the row or its dependents.
+        """
+        with self._db.session_scope() as session:
+            row = session.get(GuildRow, (discord_server_id, guild_id))
+            if row is None:
+                raise KeyError(guild_id)
+            row.api_key = encrypt_api_key(api_key, self._fernet_key)
+            row.api_key_hmac = api_key_hmac(api_key, self._fernet_key)
+
     def _binding_from_row(self, row) -> GuildBinding:
         return GuildBinding(
             tacticus_guild_id=row.tacticus_guild_id,

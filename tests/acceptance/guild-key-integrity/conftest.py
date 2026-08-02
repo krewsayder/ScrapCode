@@ -288,6 +288,70 @@ def bound_cluster(registered_guilds):
     return bindings
 
 
+@pytest.fixture
+def guild_with_recorded_rows(registered_guilds):
+    """`Given a registered guild with recorded players, battle hits and bomb
+    hits` — the precondition AC-003.2 asserts over (Slice 02 scenario
+    `test_replacing_a_key_destroys_nothing`).
+
+    The scenario's signature supplied only `(sqlite_repo, fake_guild_service)`,
+    so `_row_counts` read `(0, 0, 0)` and `assert all(n > 0)` failed for a
+    fixture gap rather than missing behaviour. This fixture seeds GUILD_WB with
+    a couple of players and one battle hit + one bomb hit for SEASON through
+    the real repo, the same path production writes take. The counts are
+    asserted non-zero by the scenario itself, so the row-preservation claim has
+    something to preserve.
+
+    Added during DELIVER step 04-01; wiring for a declared `Given`, not test
+    authoring — see the step's CRITICAL BOUNDARY note.
+    """
+    from bot.guilds import save_player_list
+    from bot.tracker import get_tier_key
+
+    save_player_list(PROD_SERVER_ID, GUILD_WB, {
+        "__meta__": {"version": 2},
+        "players": {
+            "tacticus-uid-001": {
+                "display_name": "BearOne",
+                "last_validated": "2026-07-31T04:00:00.000Z",
+                "is_former": False,
+            },
+            "tacticus-uid-002": {
+                "display_name": "BearTwo",
+                "last_validated": "2026-07-31T04:00:00.00.000Z",
+                "is_former": False,
+            },
+        },
+    })
+
+    def _entry(*, damage_type="Battle", encounter_type="Battle"):
+        entry = {
+            "unitId": "Avatar",
+            "encounterIndex": 0,
+            "rarity": "Legendary",
+            "set": 0,
+            "damageType": damage_type,
+            "damage": 12000,
+            "userId": "tacticus-uid-001",
+            "completedOn": "2026-07-18T10:00:00Z",
+            "encounterType": encounter_type,
+            "heroDetails": [{"unitId": "Aethana"}],
+            "machineOfWarDetails": None,
+        }
+        entry["tier_key"] = get_tier_key(entry)
+        return entry
+
+    import bot.guilds as guilds_mod
+    guilds_mod.repo.upsert_battle_hits(
+        PROD_SERVER_ID, GUILD_WB, SEASON, [_entry(damage_type="Battle")]
+    )
+    guilds_mod.repo.upsert_bomb_hits(
+        PROD_SERVER_ID, GUILD_WB, SEASON,
+        [_entry(damage_type="Bomb", encounter_type="Bomb")],
+    )
+    return PROD_SERVER_ID
+
+
 # ---------------------------------------------------------------------------
 # The guild-service double
 # ---------------------------------------------------------------------------

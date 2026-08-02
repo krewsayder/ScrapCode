@@ -55,9 +55,10 @@ async def test_admin_installs_a_new_key_and_is_told_which_guild_it_belongs_to(
     assert record.elapsed_ms >= 0
 
 
-@RED
 @pytest.mark.kpi
-async def test_replacing_a_key_destroys_nothing(sqlite_repo, fake_guild_service):
+async def test_replacing_a_key_destroys_nothing(
+    sqlite_repo, fake_guild_service, guild_with_recorded_rows
+):
     """AC-003.2 — the property that makes this command safe where the
     documented workaround is not.
 
@@ -221,9 +222,8 @@ async def test_no_key_value_is_ever_shown_or_written_down(
         assert _stored_key_plaintext_before() not in haystack
 
 
-@RED
 async def test_installing_a_matching_key_releases_a_quarantined_guild(
-    sqlite_repo, fake_guild_service
+    sqlite_repo, fake_guild_service, bound_guild
 ):
     """AC-003.9. Quarantine must never be a trap (D3). The clearing logic
     ships in Slice 02, one slice BEFORE anything can enter quarantine, so
@@ -264,14 +264,148 @@ async def test_an_unknown_guild_is_refused_with_the_list_of_real_ones(
 # ===========================================================================
 # Helpers — wiring only
 # ===========================================================================
+from contextlib import contextmanager
+
+from conftest import PROD_SERVER_ID, SEASON
+
+
+@contextmanager
+def _tacticus_answered_by(guild_service):
+    """Answer every Tacticus call from the scenario's programmed doubles.
+
+    Replicated from `test_slice_01_bind_and_report.py` (UD-10: do NOT import
+    helpers across test modules — same-name conftest constants collide).
+    Swapping `httpx.AsyncClient` keeps ALL classification in production code.
+    """
+    import httpx
+
+    real_client = httpx.AsyncClient
+    httpx.AsyncClient = lambda *args, **kwargs: _RecordedTacticus(guild_service)
+    try:
+        yield
+    finally:
+        httpx.AsyncClient = real_client
+
+
+class _RecordedTacticus:
+    """An `httpx.AsyncClient` answering from the programmed guild-service double."""
+
+    def __init__(self, guild_service) -> None:
+        self._guild_service = guild_service
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def get(self, url: str, headers: dict | None = None, **kwargs):
+        import httpx
+        from bot.services.tacticus.guild_client import TACTICUS_GUILD_URL
+
+        if url != TACTICUS_GUILD_URL:
+            raise AssertionError(
+                f"the update path called an endpoint no scenario declared: {url}"
+            )
+        answer = self._guild_service.answer_for((headers or {}).get("X-API-KEY", ""))
+        return httpx.Response(
+            answer.status, json=answer.payload(), request=httpx.Request("GET", url)
+        )
+
 
 async def _invoke_update_guild_key(interaction, guild_id, api_key, *, force=False, service):
-    """Invoke the real `/update_guild_key` callback with a Discord double."""
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """Invoke the policy function driving `/update_guild_key` with a Discord double.
+
+    The 04-01 scenarios assert on storage state only, so the driving port is
+    the policy function in `bot.guild_keys` (the cog command comes in 04-02).
+    The Tacticus call is patched at the httpx transport boundary so all
+    classification stays in production code.
+    """
+    with _tacticus_answered_by(service):
+        from bot.guild_keys import install_guild_key
+
+        result = await install_guild_key(
+            PROD_SERVER_ID, guild_id, api_key, force=force
+        )
+    _render_update_reply(interaction, result)
+    return result
+
+
+def _render_update_reply(interaction, result) -> None:
+    """Render the policy result to the Discord double's reply surface.
+
+    Minimal for 04-01 (no scenario asserts on reply text here). 04-02's
+    scenarios assert on the resolved guild name and refusal reasons, so the
+    shape is in place now; the cog (04-02) will render through the same result.
+    """
+    from bot.services.tacticus.guild_client import ProbeOutcome
+
+    if result.outcome is ProbeOutcome.MATCH:
+        name = result.identity.name if result.identity else "the guild"
+        interaction.reply(f"✅ Key updated for {name}.")
+    elif result.outcome is ProbeOutcome.MISMATCH and not result.forced:
+        bound_name = result.bound_name or "the bound guild"
+        observed_name = result.identity.name if result.identity else "the submitted key"
+        interaction.reply(
+            f"❌ {observed_name} does not match {bound_name}."
+        )
+    elif result.outcome is ProbeOutcome.DEAD:
+        interaction.reply("❌ The key was rejected (dead).")
+    elif result.outcome is ProbeOutcome.UNVERIFIABLE:
+        interaction.reply("❌ The key could not be verified.")
+    else:
+        interaction.reply("❌ The guild service could not be reached; key not installed.")
+
+
+class _FakeResponse:
+    def __init__(self, interaction) -> None:
+        self._interaction = interaction
+
+    async def send_message(self, content="", *, embed=None, ephemeral=False, **kwargs):
+        self._interaction.reply_text = content or (getattr(embed, "description", "") or "")
+        self._interaction.was_ephemeral = ephemeral
+
+    async def defer(self, *, ephemeral=False, **kwargs):
+        self._interaction.was_ephemeral = ephemeral
+
+    def is_done(self):
+        return self._interaction._replied
+
+
+class _FakeFollowup:
+    def __init__(self, interaction) -> None:
+        self._interaction = interaction
+
+    async def send(self, content="", *, embed=None, ephemeral=False, **kwargs):
+        self._interaction.reply_text = content or (getattr(embed, "description", "") or "")
+        self._interaction.was_ephemeral = ephemeral
+
+
+class _FakeInteraction:
+    """A Discord interaction double capturing the reply text + ephemerality.
+
+    `reply_text` / `was_ephemeral` are the observable surface the 04-02
+    scenarios assert on; 04-01's two scenarios ignore them.
+    """
+
+    def __init__(self, *, guild_id: int = PROD_SERVER_ID) -> None:
+        self.guild_id = guild_id
+        self.reply_text = ""
+        self.was_ephemeral = False
+        self._replied = False
+        self.response = _FakeResponse(self)
+        self.followup = _FakeFollowup(self)
+
+    def reply(self, content: str, *, ephemeral: bool = True) -> None:
+        self.reply_text = content
+        self.was_ephemeral = ephemeral
+        self._replied = True
 
 
 def _admin_interaction():
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """An interaction double authorized at admin tier (04-02 adds the real
+    `require_tier` check; 04-01 calls the policy directly)."""
+    return _FakeInteraction()
 
 
 def _officer_interaction():
@@ -279,28 +413,71 @@ def _officer_interaction():
 
 
 def _stored_key(guild_id: str) -> str:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """Decrypt and return the stored `api_key` for the guild (port read)."""
+    from bot.guilds import load_guilds
+
+    return load_guilds(PROD_SERVER_ID).get(guild_id, {}).get("api_key", "")
 
 
 def _stored_key_plaintext_before() -> str:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """The plaintext of the key GUILD_WB was registered with, for leak tests."""
+    return "wb-key"
 
 
-def _stored_key_hmac(guild_id: str) -> str:
-    raise AssertionError("Not yet implemented — RED scaffold")
+def _stored_key_hmac(guild_id: str) -> str | None:
+    """Read the stored `api_key_hmac` column directly from the guild row."""
+    import bot.guilds as guilds_mod
+    from bot.db.models import GuildRow
+    from sqlalchemy import select
+
+    with guilds_mod.repo._db.session_scope() as session:  # noqa: SLF001
+        row = session.get(GuildRow, (PROD_SERVER_ID, guild_id))
+        return row.api_key_hmac if row else None
 
 
-def _expected_hmac(api_key: str) -> str:
-    raise AssertionError("Not yet implemented — RED scaffold")
+def _expected_hmac(api_key: str) -> str | None:
+    """The hmac `replace_guild_key` should have written for `api_key`."""
+    import os
+
+    from bot.db.secrets import api_key_hmac
+
+    return api_key_hmac(api_key, os.environ["SCRAPCODE_DB_KEY"])
 
 
 def _row_counts(repo, guild_id: str) -> tuple[int, int, int]:
-    """(players, battle_hits, bomb_hits) for the guild."""
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """(players, battle_hits, bomb_hits) for the guild — the AC-003.2 surface."""
+    from bot.guilds import load_player_list
+
+    players = len(load_player_list(PROD_SERVER_ID, guild_id).get("players", {}))
+    battle = _count_hits(repo.load_battle_hits(PROD_SERVER_ID, guild_id, SEASON))
+    bomb = _count_hits(repo.load_bomb_hits(PROD_SERVER_ID, guild_id, SEASON))
+    return (players, battle, bomb)
+
+
+def _count_hits(hits: dict) -> int:
+    """Count the leaf entries in a `{"boss_hits": {boss: {enc: {tier: [...]}}}}`."""
+    total = 0
+    for boss in (hits.get("boss_hits") or {}).values():
+        for encounter in boss.values():
+            for tier in encounter.values():
+                total += len(tier)
+    return total
 
 
 def _quarantine(guild_id: str, *, reason: str) -> None:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """Flip a bound guild's binding to quarantined (the Slice 03 entrance, here
+    used to prove the exit exists)."""
+    from dataclasses import replace
+
+    from bot.guilds import load_guild_binding, save_guild_binding
+
+    current = load_guild_binding(PROD_SERVER_ID, guild_id)
+    save_guild_binding(PROD_SERVER_ID, guild_id, replace(
+        current,
+        key_status="quarantined",
+        quarantine_reason=reason,
+        quarantined_at="2026-07-31T05:00:00.000Z",
+    ))
 
 
 def _program_outcome(service, outcome: str, api_key: str) -> None:
