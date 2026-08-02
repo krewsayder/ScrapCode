@@ -91,7 +91,6 @@ async def test_bound_matching_is_completely_silent(
     assert key_events.named("guild.key.probe.ok")
 
 
-@RED
 @pytest.mark.kpi
 async def test_bound_drifted_writes_nothing_once_enforcement_is_on(
     sqlite_repo, drifted_guild, update_channel
@@ -169,7 +168,6 @@ async def test_dead_key_is_reported_not_quarantined(
     assert "update_guild_key" in update_channel.text
 
 
-@RED
 @pytest.mark.kpi
 async def test_mixed_cluster_survives_a_quarantined_first_guild(
     sqlite_repo, fake_guild_service, update_channel, key_events
@@ -310,16 +308,17 @@ async def _run_hourly_cycle(service, channel, *, ping_channel=None, enforcement=
     that re-registered would silently shrink a three-guild environment back to
     the two-guild default.
 
-    `enforcement` records the environment's declared posture and is INERT in
-    Slice 01. It is not quietly dropped: `guild_keys.verify_and_resolve`
-    refuses `enforce=True` with NotImplementedError on purpose (ADR-008 D3 —
-    enforcement ships in Slice 03, one slice AFTER `/update_guild_key` provides
-    the only exit from quarantine), and `tasks_cog` passes `enforce=False`
-    unconditionally. Honouring the flag here would raise, not enforce. What the
-    four Slice-01 scenarios that pass it actually assert is that their
-    environment produces NO quarantine even when enforcement is requested —
-    which is true of this slice by construction and must stay true of the next
-    one. Slice 03 is where this parameter starts reaching production.
+    `enforcement` records the environment's declared posture. As of step
+    05-01, `tasks_cog._update_one_guild` calls `verify_and_resolve(...,
+    enforce=True)` unconditionally, so `auto_update` ALWAYS enforces regardless
+    of what this helper passes — the parameter is a declared posture that the
+    cycle honours by construction, not a gate the helper has to wire. The
+    scenarios that pass `enforcement=True` here are stating the environment's
+    posture for the reader; the invariant (a drifted guild quarantines and
+    writes nothing; a quarantined guild is skipped) holds because
+    `auto_update` enforces, not because this helper re-plumbed the flag. No
+    logic is gated on `enforcement` here on purpose: adding a gate would
+    duplicate the production decision and let the two drift apart.
     """
     _register_the_guilds_the_scenario_programmed(service)
     cog = _tasks_cog_posting_to(channel, ping_channel)
@@ -330,24 +329,40 @@ async def _run_hourly_cycle(service, channel, *, ping_channel=None, enforcement=
 def _register_the_guilds_the_scenario_programmed(service) -> None:
     """Register the guilds whose key the scenario programmed an answer for.
 
-    Idempotent by short-circuit: a scenario that already called
-    `_register_guilds` owns its cluster and this leaves it untouched.
+    Re-derives the cluster from the programmed set, PRESERVING any guild the
+    scenario already registered AND quarantined (a quarantined guild has no
+    programmed answer — `active_key` returns None — but it must stay in the
+    cluster so the SPOF fall-through and the persisting-quarantine skip path
+    both have a guild to act on). Mirrors the slice-03 helper verbatim in
+    shape, against this suite's `_CLUSTER`.
 
-    Not every guild unconditionally — `FakeGuildService.answer_for` refuses an
-    unprogrammed key precisely so a scenario cannot silently exercise a path it
-    did not declare, and registering a guild nobody programmed would trip that
-    guard on every single-guild environment.
+    A guild the scenario registered but neither programmed nor quarantined is
+    DROPPED: `FakeGuildService.answer_for` refuses an unprogrammed key
+    precisely so a scenario cannot silently exercise a path it did not
+    declare, and keeping such a guild would trip that guard mid-cycle. The
+    `bound-drifted` environment relies on this — `drifted_guild` pulls in
+    `registered_guilds` (two guilds) but programs only `wb-key`, so DM is
+    dropped here and the cycle walks only the drifted guild.
+
+    `program_default` (a non-None `_default`) declares a cluster-wide
+    environment, so every guild in `_CLUSTER` is treated as programmed — that
+    is what keeps `test_clean_adopts_every_identity_once`'s three-guild
+    environment from shrinking to two.
     """
+    import bot.guild_keys as guild_keys
     from bot.guilds import load_guilds, save_guilds
 
-    if load_guilds(PROD_SERVER_ID):
-        return
+    programmed = set(service._by_key)
+    if service._default is not None:
+        programmed = set(_CLUSTER)
 
-    programmed = set(_CLUSTER) if service._default is not None else set(service._by_key)
+    existing = load_guilds(PROD_SERVER_ID)
     save_guilds(PROD_SERVER_ID, {
-        _CLUSTER[key][0]: _CLUSTER[key][1]
-        for key in _CLUSTER
+        guild_id: guild_data
+        for key, (guild_id, guild_data) in _CLUSTER.items()
         if key in programmed
+        or (guild_id in existing
+            and guild_keys.active_key(PROD_SERVER_ID, guild_id) is None)
     })
 
 
@@ -409,11 +424,42 @@ def _register_guilds(repo, *, count: int) -> None:
 
 
 def _register_two_guilds_quarantined_first(repo) -> None:
-    raise AssertionError(
-        "Not yet implemented — needs `guild_keys.quarantine`, which is a "
-        "Slice 03 scaffold. `test_mixed_cluster_survives_a_quarantined_first_"
-        "guild` stays @RED until then."
-    )
+    """`Given a cluster with a quarantined guild listed FIRST` — the SPOF setup.
+
+    WB is inserted before DM (regular dict, insertion order preserved) so
+    `_current_season` meets WB first. WB is then quarantined; the cycle's
+    fall-through must skip it and find DM's season, proving one bad key does
+    not halt the server (DDD-7 / KPI-5). `repo` is accepted to mirror the
+    fixture-driven scenarios; the write goes through the `bot.guilds` wrapper
+    that resolves to the per-test repository.
+
+    The quarantine binding is written directly rather than via
+    `guild_keys.quarantine` because the scenario's `Given` is a precondition,
+    not the production transition: the cycle under test has to START from a
+    quarantined WB, not quarantine it. Reuses the slice-03 `_quarantine` shape
+    (a `GuildBinding` with `key_status`, `quarantine_reason`, `quarantined_at`)
+    so the persisting-quarantine skip path reads the same binding either suite
+    writes.
+    """
+    from bot.guilds import save_guild_binding, save_guilds
+    from bot.repository import GuildBinding
+    from bot.services.tacticus.guild_client import KeyStatus
+
+    save_guilds(PROD_SERVER_ID, {
+        GUILD_WB: _CLUSTER["wb-key"][1],
+        GUILD_DM: _CLUSTER["dm-key"][1],
+    })
+    save_guild_binding(PROD_SERVER_ID, GUILD_WB, GuildBinding(
+        tacticus_guild_id=WORD_BEARERS.uuid,
+        tacticus_guild_tag=WORD_BEARERS.tag,
+        tacticus_guild_name=WORD_BEARERS.name,
+        identity_bound_at="2026-07-31T04:00:00Z",
+        key_status=KeyStatus.QUARANTINED.value,
+        quarantine_reason=(
+            f"resolves to {DARK_MECHANICUM.tag}, expected {WORD_BEARERS.tag}"
+        ),
+        quarantined_at="2026-07-31T04:00:00Z",
+    ))
 
 
 def _guild_ids_in_order() -> list[str]:

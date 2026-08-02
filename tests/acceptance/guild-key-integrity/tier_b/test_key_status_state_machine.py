@@ -141,19 +141,27 @@ class KeyStatusJourney(RuleBasedStateMachine):
 
 
 def _bound_identity(composition) -> GuildIdentity:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """The guild's bound identity, reconstructed from the in-memory binding.
+
+    `quarantine_is_never_a_trap` installs a key resolving to THIS identity to
+    prove the exit exists from any quarantined state — the rescue path the
+    operator takes in place of the SSH session the feature retires.
+    """
+    binding = composition.guilds[GUILD].binding
+    return GuildIdentity(
+        uuid=binding.tacticus_guild_id,
+        tag=binding.tacticus_guild_tag,
+        name=binding.tacticus_guild_name,
+    )
 
 
-TestKeyStatusJourney = pytest.mark.skip(
-    reason="RED scaffold — enable one at a time in DELIVER"
-)(KeyStatusJourney.TestCase)
+TestKeyStatusJourney = KeyStatusJourney.TestCase
 
 
 # ===========================================================================
 # Negative testing (Hebert ch.6) — relax an assumption, see if it still holds
 # ===========================================================================
 
-@RED
 def test_relaxing_the_matching_key_assumption_surfaces_the_force_path():
     """Deliberate under-specification probe.
 
