@@ -1916,6 +1916,81 @@ skip) so `test_a_persistent_mismatch_is_reported_every_cycle_in_this_slice`
 stays green — the mismatch RECORD is never suppressed, only the ALERT is
 rate-limited.
 
+### UD-12 — 05-03 SQLite `_load_guilds` did not preserve insertion order
+
+**Found:** step 05-03. **Justified scope extension (production, off-roadmap
+file).**
+
+`bot/repository_sqlalchemy.py::_load_guilds` had no `order_by`, so SQLite
+returned guild rows via the primary-key index — alphabetical by `guild_id`
+(`dark_mechanicum` before `word_bearers`), regardless of insertion order. The
+`registered_guilds` fixture and the season-SPOF design BOTH depend on Word
+Bearers being FIRST: `auto_update._current_season` iterates `load_guilds` and
+the SPOF only misbehaves when the unusable guild is first. With DM-first, the
+healthy guild answers the season and the quarantined-skip fall-through is never
+exercised, making `test_a_quarantined_guild_listed_first_does_not_stop_the_server`
+vacuously green. The JSON adapter already preserves dict insertion order; only
+the SQLite adapter needed the fix. Applied `.order_by(text("rowid"))` (insertion
+order) — 9 lines + a comment naming the SPOF contract. The roadmap listed
+`bot/repository*.py` as off-limits to 05-03, but the AT (pre-authored, off-limits
+to DELIVER) cannot pass non-vacuously without insertion-order preservation, and
+the boundary's exclusion was predicated on "the 05-01 work likely already covers
+it" — an assumption that proved false for ordering. Documented for
+reviewer/operator disposition; easily reverted if the scope decision is
+overturned. The adversarial review (Phase 4) verified the fix is correct and
+breaks no other test.
+
+### UD-13 — 05-05 Tier B `quarantine_is_never_a_trap` invariant mutates state
+
+**Found:** step 05-05. **Test-design issue (acceptance-designer), not a
+production defect.**
+
+The `quarantine_is_never_a_trap` invariant in
+`tests/acceptance/guild-key-integrity/tier_b/test_key_status_state_machine.py`
+calls `update_key` (a MUTATING command) on the live composition to check that
+an exit from quarantine exists. `update_key` with a matching key releases
+quarantine, but the invariant does NOT reset `self.rows_at_quarantine` — only
+the `admin_updates_the_key` rule resets it. A future Hypothesis seed generating
+`quarantine → invariant-release → MATCH-active-ingest → MISMATCH-requarantine`
+could make `quarantined_guilds_never_write` compare grown rows against the stale
+`rows_at_quarantine` value and fail spuriously (or, symmetrically, mask a real
+write). It did not surface across 3 runs. Mutating invariants are a stateful-PBT
+anti-pattern. The invariants are off-limits to DELIVER (test bodies above the
+helpers banner), so this is flagged for `@nw-acceptance-designer` rather than
+fixed in this wave. Two clean fixes: (1) make the invariant non-mutating by
+constructing a throwaway composition to probe the exit; (2) have the invariant
+reset `rows_at_quarantine` after the `update_key` call. The Phase 4 adversarial
+review assessed severity as MEDIUM and concurred it is a test-quality, not
+production, issue.
+
+### UD-14 — L1 dead code left by the 05-01 enforce flip (adversarial review D1/D2/D5)
+
+**Found:** Phase 4 adversarial review. **LOW — unreachable, non-user-facing.**
+
+The 05-01 enforce flip made `verify_and_resolve(enforce=True)` raise
+`GuildQuarantined` on MISMATCH before `_probe_report`/`_verified_key` ever see
+the snapshot. Three rendering branches are now unreachable and carry a STALE,
+FALSE message ("Data is still ingested this slice" — it is not; mismatch now
+quarantines and blocks):
+
+- `bot/cogs/tasks_cog.py::_probe_line` MISMATCH branch (the catch handler now
+  produces the correct "⛔ Quarantined" line, so `test_drift_is_reported_naming_
+  both_guilds` and `test_mismatch_appears_in_the_hourly_summary` stay green via
+  the catch line).
+- `MISMATCH` in `tasks_cog._ALERTING_OUTCOMES` (only consulted by `_probe_report`,
+  never reached for MISMATCH; the MISMATCH alert is `record_quarantine_alert` in
+  the catch handler).
+- `bot/cogs/update_cog.py::_identity_note` MISMATCH branch (`_verified_key`
+  catches `GuildQuarantined` and returns `None`, so a `_VerifiedKey` never carries
+  a MISMATCH snapshot).
+
+Not a production defect (unreachable) and not BLOCKING (review APPROVED). Recorded
+as an open cleanup for a follow-up L1 refactor pass: remove the three branches or
+annotate them as the preserved Slice 01 intermediate-state record. Not actioned in
+this wave because a refactor `step-id` would confuse the DES integrity verifier
+(which expects RED/GREEN/COMMIT per step), and the primary gates — the contract
+suites and the adversarial review — have passed.
+
 ## Wave: DELIVER / [REF] The pattern behind six of the ten findings
 
 Six of the ten items above (UD-1, UD-2, UD-3, UD-4, UD-7, UD-8, UD-9) are
@@ -2099,3 +2174,96 @@ real gate here.
 - `/update_leaderboard` and `/update_all` now cost one extra `/api/v1/guild` probe per
   guild per invocation. Intended — that is where the manual-path mismatch report comes
   from — but it is a real call-volume change on an operator-triggered path.
+
+## Wave: DELIVER / [REF] Slices 02–03 continuation (steps 04-01…05-05)
+
+> The [REF] sections above (Implementation Summary, Files Modified, Scenarios
+> Green, DoD Check, Demo Evidence, Quality Gates, Pre-requisites, Open items)
+> were written for Slice 01 (10 steps). The operator re-scoped DELIVER on
+> 2026-08-02 to ship all three slices as one guardrail, extending the roadmap to
+> 17 steps. This section records the 7 continuation steps and the consolidated
+> final state. The Quality Gates table above ("10 steps") is superseded by the
+> count below ("17 steps").
+
+### Implementation summary (Slices 02–03)
+
+Slice 02 shipped `/update_guild_key` — the only exit from quarantine — in two
+steps: 04-01 the storage half (`replace_guild_key` writes `api_key` +
+`api_key_hmac` in one transaction without CASCADE; `release()` clears
+quarantine keeping the identity) and 04-02 the command (admin tier via the real
+`@require_tier`, probe-before-store, `force` parameter not a confirmation View,
+ephemeral, no key value echoed). Slice 03 shipped the guardrail in five steps:
+05-01 quarantine + `enforce=True` + 24h alert suppression (and the authorised
+inversion of the slice-01 intermediate-state tests, UD-11); 05-02 block roster
+AND hits + all seven key-consumption sites refuse (`call_count == 0`) + alert to
+both update and ping channels; 05-03 prove the season-SPOF fall-through +
+all-quarantined skip + cycle counters (KPI-5); 05-04 `/view_config` quarantine
+rendering (US-005) without leaking the full uuid from `quarantine_reason`;
+05-05 close the enforcement environments + pin `hypothesis` + the Tier B
+`KeyStatusJourney` state machine (`quarantine_is_never_a_trap`,
+`quarantined_guilds_never_write`) + the negative force-gate test.
+
+### Files modified (Slices 02–03, 7 commits `fed6f06..HEAD`)
+
+Production (7): `bot/guild_keys.py`, `bot/guilds.py`, `bot/repository.py`,
+`bot/repository_sqlalchemy.py`, `bot/cogs/admin_cog.py`, `bot/cogs/tasks_cog.py`,
+`bot/cogs/update_cog.py`. Tests/docs (10):
+`tests/acceptance/guild-key-integrity/{conftest.py,
+test_slice_01_bind_and_report.py, test_slice_02_update_guild_key.py,
+test_slice_03_quarantine_enforcement.py, test_environment_matrix.py}`,
+`tests/acceptance/guild-key-integrity/tier_b/{in_memory_composition.py,
+test_key_status_state_machine.py}`, `tests/unit/test_guild_keys_policy.py`,
+`requirements.txt`, `docs/feature/guild-key-integrity/feature-delta.md`.
+
+### Scenarios green count (final)
+
+`pytest tests/unit tests/acceptance` = **246 passed, 2 skipped, 1 xfailed, 0
+failed** (timestamp 2026-08-02). The 2 skips are the operator-owned
+`SCRAPCODE_TACTICUS_CONTRACT_KEY` external-key contract tests (the only
+instruments that can detect Tacticus dropping `guildId`); the xfail is the
+pre-existing Windows read-only-directory AP6 test. Slice 01 shipped 198 passed;
+Slices 02–03 added 48 newly-enabled scenarios (incl. parametrize expansions and
+the hypothesis state machine).
+
+### DoD check (Slices 02–03)
+
+- [x] `/update_guild_key` is the only exit from quarantine; ships before
+  enforcement (ADR-008 D3 / DISCUSS D3).
+- [x] AC-003.2 — `replace_guild_key` touches only `api_key`+`api_key_hmac`;
+  players/battle_hits/bomb_hits counts identical before/after (no CASCADE).
+- [x] DDD-5 — quarantine blocks roster AND hits (the larger 60-of-67 half).
+- [x] DDD-6 — only a well-formed 200 with a different `guildId` quarantines;
+  UNREACHABLE/UNVERIFIABLE/DEAD leave `key_status` untouched (adversarial review
+  CLEAN).
+- [x] AC-004.6 — all seven key-consumption sites refuse a quarantined guild
+  with `call_count == 0`.
+- [x] KPI-5 — one guild's quarantine does not stop the server (season
+  fall-through, all-quarantined skip with stated reason, cycle counters).
+- [x] KPI-6 — no plaintext key and no full identifier (beyond 8 chars) in any
+  record, reply, or embed; `/view_config` quarantine rendering strips the uuid
+  from `quarantine_reason`.
+- [x] US-005 — `/view_config` distinguishes quarantined (⛔ + both tags + date),
+  verified (✅ + tag + "verified"), and keyless (❌ Missing, unchanged).
+- [x] `quarantine_is_never_a_trap` + `quarantined_guilds_never_write` hold under
+  the hypothesis state machine; the negative test proves the `force` gate is
+  real (mismatch-without-force refuses).
+
+### Quality gates (final, 17 steps)
+
+| Gate | Outcome |
+|---|---|
+| Per-step TDD | 3-phase canon (RED→GREEN→COMMIT), ADR-025; 7/7 steps COMMIT/PASS |
+| DES integrity | `des-verify-integrity` exit 0 — **all 17 steps have complete traces** |
+| Design compliance | No unauthorised new component; the 2 justified scope extensions (05-01 `tasks_cog` enforce flip, 05-03 `repository_sqlalchemy` rowid) are recorded as UD-11/UD-12 |
+| Architecture enforcement | 6 `lint-imports` contracts kept, 0 broken; AST chokepoint scan 0 offenders |
+| Adversarial review (Phase 4) | **APPROVED** — all 10 load-bearing claims CLEAN; 4 non-blocking findings (UD-12/13/14 + the rowid doc gap) recorded |
+| Mutation testing | **pre-release** per `CLAUDE.md` — not run as a per-feature gate |
+| Coexistence | `sqlite-backend` suite stays green after every step |
+| Refactoring (L1–L6) | L1 dead-code findings (UD-14) recorded as open cleanup; not actioned in-wave to keep DES integrity clean (a refactor step-id would expect RED/GREEN/COMMIT) |
+
+### Upstream issues added in Slices 02–03
+
+UD-11 (05-01 enforce flip + slice-01 test inversions), UD-12 (05-03 SQLite
+insertion-order fix), UD-13 (05-05 mutating Tier B invariant), UD-14 (L1 dead
+code from the enforce flip) — all in `## Wave: DELIVER / [WHY] Upstream Issues`
+above.
