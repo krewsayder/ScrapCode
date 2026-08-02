@@ -159,7 +159,6 @@ async def test_every_key_consumption_site_refuses_a_quarantined_guild(
     )
 
 
-@RED
 @pytest.mark.kpi
 async def test_a_quarantined_guild_listed_first_does_not_stop_the_server(
     sqlite_repo, fake_guild_service, update_channel, key_events
@@ -185,7 +184,6 @@ async def test_a_quarantined_guild_listed_first_does_not_stop_the_server(
     assert cycle.guilds_skipped == 1
 
 
-@RED
 @pytest.mark.error
 async def test_a_server_with_no_usable_key_is_skipped_for_a_stated_reason(
     sqlite_repo, fake_guild_service, update_channel, key_events
@@ -202,7 +200,6 @@ async def test_a_server_with_no_usable_key_is_skipped_for_a_stated_reason(
     assert "quarantined" in " ".join(cycle.skip_reasons)
 
 
-@RED
 @pytest.mark.kpi
 async def test_a_healthy_guild_beside_a_quarantined_one_updates_normally(
     sqlite_repo, fake_guild_service, update_channel, key_events
@@ -358,22 +355,35 @@ async def _run_hourly_cycle(service, channel, *, ping_channel=None) -> None:
 
 
 def _register_the_guilds_the_scenario_programmed(guild_service) -> None:
-    """Register exactly the guilds whose key the scenario programmed an answer for.
+    """Register the guilds the cycle must see, preserving a quarantined one.
 
-    Verbatim from `test_slice_01_bind_and_report.py`. Idempotent — several
-    scenarios run multiple cycles, and `save_guilds` leaves binding state
-    alone by construction (DDD-4 keeps it in its own table).
+    Slice-01 registered only the guilds whose key was programmed. Slice-03
+    pre-registers BOTH guilds (WB first) and quarantines WB BEFORE calling the
+    cycle; a `save_guilds` that rebuilt the dict from the programmed set alone
+    would drop WB's guild row. The quarantine binding survives in its own
+    table (DDD-4), but with the guild row gone `active_key(WB)` returns None
+    for "no_key_registered" instead of "quarantined", and `_guild_ids_in_order()
+    [0]` is no longer WB — the SPOF test's pinned precondition is lost.
+
+    So a guild the scenario ALREADY registered AND quarantined is preserved
+    alongside the programmed set. Re-registering WB with its api_key is safe:
+    the quarantine lives in `guild_key_bindings`, which `save_guilds` never
+    touches. The `_GUILD_REGISTRY` constant is WB-first, so iterating it
+    preserves the ordering the SPOF test pins.
     """
-    from bot.guilds import save_guilds
+    from bot.guilds import load_guilds, save_guilds
+    import bot.guild_keys as guild_keys
 
     programmed = set(guild_service._by_key)
     if guild_service._default is not None:
         programmed = set(_GUILD_REGISTRY)
 
+    existing = load_guilds(PROD_SERVER_ID)
     save_guilds(PROD_SERVER_ID, {
-        _GUILD_REGISTRY[key][0]: _GUILD_REGISTRY[key][1]
-        for key in _GUILD_REGISTRY
+        guild_id: guild_data
+        for key, (guild_id, guild_data) in _GUILD_REGISTRY.items()
         if key in programmed
+        or (guild_id in existing and guild_keys.active_key(PROD_SERVER_ID, guild_id) is None)
     })
 
 
@@ -714,11 +724,47 @@ from datetime import timedelta  # noqa: E402 — helpers-only dependency
 # ---------------------------------------------------------------------------
 
 def _quarantine_every_guild() -> None:
-    raise AssertionError("Not yet implemented — RED scaffold for 05-04")
+    """`Given a server where every guild is quarantined` — the all-skipped path.
+
+    The scenario requests no `registered_guilds` fixture, so the cluster is
+    registered here from `_GUILD_REGISTRY` (WB first) before each guild is
+    quarantined. `save_guilds` writes the guild rows; `_quarantine` then sets
+    each binding to QUARANTINED. The cycle's all-skipped branch reads the
+    quarantine from the binding, so both guilds skip with "quarantined".
+    """
+    from bot.guilds import load_guilds, save_guilds
+
+    save_guilds(PROD_SERVER_ID, {
+        GUILD_WB: _GUILD_REGISTRY["wb-key"][1],
+        GUILD_DM: _GUILD_REGISTRY["dm-key"][1],
+    })
+    for guild_id in load_guilds(PROD_SERVER_ID):
+        _quarantine(
+            guild_id,
+            reason=f"resolves to {DARK_MECHANICUM.tag}, expected {WORD_BEARERS.tag}",
+        )
 
 
 def _register_two_guilds_quarantined_first(repo) -> None:
-    raise AssertionError("Not yet implemented — RED scaffold for 05-04")
+    """`Given a cluster with a quarantined guild listed FIRST` — the SPOF setup.
+
+    WB is inserted before DM (regular dict, insertion order preserved) so
+    `_current_season` meets WB first. WB is then quarantined; the cycle's
+    fall-through must skip it and find DM's season, proving one bad key does
+    not halt the server (DDD-7 / KPI-5). `repo` is accepted to mirror the
+    fixture-driven scenarios; the write goes through the `bot.guilds` wrapper
+    that resolves to the per-test repository.
+    """
+    from bot.guilds import save_guilds
+
+    save_guilds(PROD_SERVER_ID, {
+        GUILD_WB: _GUILD_REGISTRY["wb-key"][1],
+        GUILD_DM: _GUILD_REGISTRY["dm-key"][1],
+    })
+    _quarantine(
+        GUILD_WB,
+        reason=f"resolves to {DARK_MECHANICUM.tag}, expected {WORD_BEARERS.tag}",
+    )
 
 
 def _register_guild_without_key(guild_id: str) -> None:
@@ -726,7 +772,15 @@ def _register_guild_without_key(guild_id: str) -> None:
 
 
 def _guild_ids_in_order() -> list[str]:
-    raise AssertionError("Not yet implemented — RED scaffold for 05-04")
+    """The guilds dict in insertion order — asserts WB is first.
+
+    The SPOF only misbehaves when the quarantined guild is FIRST; a test that
+    happens to place it second passes while the bug is fully present, so the
+    ordering is asserted rather than left to chance.
+    """
+    from bot.guilds import load_guilds
+
+    return list(load_guilds(PROD_SERVER_ID).keys())
 
 
 def _config_guilds_embed():

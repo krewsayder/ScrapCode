@@ -95,8 +95,17 @@ class SqlAlchemyClusterRepository(ClusterRepository):
             self._upsert_guilds(session, cluster.discord_server_id, cluster.guilds)
 
     def _load_guilds(self, session, discord_server_id: int) -> dict[str, Guild]:
+        # `order_by(rowid)` preserves insertion order. Without it SQLite
+        # returns rows via the primary-key index (`discord_server_id,
+        # guild_id`), i.e. alphabetical by guild_id, which breaks the season
+        # SPOF contract: `auto_update._current_season` iterates `load_guilds`
+        # and the `registered_guilds` fixture pins the quarantined guild FIRST
+        # so the fall-through is provably exercised (DDD-7 / KPI-5). A query
+        # that reorders the dict silently makes that test vacuous — the healthy
+        # guild answers the season and the skip path is never reached.
         rows = session.execute(
             select(GuildRow).where(GuildRow.discord_server_id == discord_server_id)
+            .order_by(text("rowid"))
         ).scalars().all()
         guilds: dict[str, Guild] = {}
         for row in rows:
