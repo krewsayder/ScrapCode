@@ -72,6 +72,7 @@ features:
         name: "Time to detect a wrong-guild key"
         baseline: "~72 h (2026-07-28 -> 2026-07-31, human-noticed)"
         target: "<= 1 h"
+        ga_baseline: "<= 1 h by construction (hourly probe + first-alert-of-a-quarantine-always-fires); recorded 2026-08-02 at DELIVER ship — not yet measured in production, dogfood pending"
         signal: log
         formula: "detection_latency = alerted_at - last_probe_ok_at"
         events: ["guild.key.probe.ok", "guild.key.mismatch", "guild.key.alert.sent"]
@@ -127,6 +128,7 @@ features:
         name: "Contaminated rows written after a mismatch is detectable"
         baseline: "50 (30 battle + 20 bomb, season 106)"
         target: "0"
+        ga_baseline: "0 — quarantine blocks roster AND hits (verified by test_a_quarantined_guild_writes_not_one_raid_record / _not_one_roster_record); recorded 2026-08-02 at DELIVER ship — pre-dogfood"
         signal: [log, sql]
         events: ["guild.key.ingest.blocked", "guild.key.quarantined"]
         query: |
@@ -169,6 +171,7 @@ features:
         name: "Wall-clock to replace a guild key"
         baseline: "~25 min, 1 SSH session, 1 DB backup, 1 throwaway script"
         target: "<= 60 s, 0 SSH sessions"
+        ga_baseline: "one Discord interaction (seconds, 0 SSH) via /update_guild_key; elapsed_ms recorded per use; recorded 2026-08-02 at DELIVER ship — not yet measured in production, dogfood pending"
         signal: log
         events: ["guild.key.updated"]
         formula: "elapsed_ms, measured from interaction receipt to write commit"
@@ -195,6 +198,7 @@ features:
         name: "False-positive quarantines"
         baseline: "n/a (feature does not exist)"
         target: "0 in 30 days"
+        ga_baseline: "0 false positives in the suite — a matching guild is completely silent (test_a_matching_guild_is_completely_silent, test_bound_matching_is_completely_silent) and a retag/rename never trips the lock (uuid-only comparison, D1); recorded 2026-08-02 at DELIVER ship, 30-day production window not yet started"
         signal: log
         events: ["guild.key.quarantined"]
         collection: |
@@ -230,6 +234,7 @@ features:
         name: "Guilds unaffected by another guild's quarantine"
         baseline: "0% — the season SPOF halts the whole server"
         target: "100%"
+        ga_baseline: "100% — season discovery falls through a quarantined guild to the next usable key and a healthy sibling ingests normally (test_a_quarantined_guild_listed_first_does_not_stop_the_server, test_a_healthy_guild_beside_a_quarantined_one_updates_normally, test_mixed_cluster_survives_a_quarantined_first_guild); recorded 2026-08-02 at DELIVER ship — pre-dogfood"
         signal: log
         events: ["auto_update.cycle"]
         formula: "guilds_processed == guilds_total - guilds_quarantined"
@@ -269,6 +274,7 @@ features:
         name: "Key values leaked to logs or Discord"
         baseline: "1 known exposure (replacement key in shell history and a temp file)"
         target: "0"
+        ga_baseline: "0 by construction — no guild.key.* record carries api_key (correlation is key_ref, the first 8 hex of api_key_hmac), the /update_guild_key reply is ephemeral and echoes no key, and /view_config renders no key and no identifier beyond 8 characters (the quarantine line strips the uuid embedded in quarantine_reason). Asserted by the parametrized leak tests across every outcome and every render state; recorded 2026-08-02 at DELIVER ship"
         signal: test
         collection: |
           Two gates, one runtime and one build:

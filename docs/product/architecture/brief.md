@@ -853,21 +853,30 @@ methods. It introduces no new architectural style.
 
 | Component (status) | Responsibility | Depends on (inward only) |
 |---|---|---|
-| `bot/services/tacticus/guild_client.py` (NEW) | `fetch_guild_snapshot(api_key) -> GuildSnapshot` — the **only** issuer of `GET /api/v1/guild`. Returns guild identity (`guildId`/`guildTag`/`name`) **and** member ids from one response (ADR-008 D2). Classifies dead / unreachable / unverifiable (D6). | `httpx` only. |
-| `bot/guild_keys.py` (NEW) | The single key-policy chokepoint (D3). `verify_and_resolve` (async — probes, compares, quarantines, returns the verified snapshot) and `active_key` (sync — storage only, for season discovery). The only sanctioned reader of a guild `api_key`. | `bot.guilds`, `bot.services.tacticus.guild_client`. |
-| `guild_key_bindings` table (NEW) | 1:1 with `guilds`, CASCADE. `tacticus_guild_id` (the binding), `tacticus_guild_tag` + `tacticus_guild_name` (display), `identity_bound_at`, `key_status`, `quarantine_reason`, `quarantined_at`, `last_alerted_at`. | — |
+| `bot/services/tacticus/guild_client.py` (**SHIPPED** — DELIVER 2026-08-02) | `fetch_guild_snapshot(api_key) -> GuildSnapshot` — the **only** issuer of `GET /api/v1/guild`. Returns guild identity (`guildId`/`guildTag`/`name`) **and** member ids from one response (ADR-008 D2). Classifies dead / unreachable / unverifiable (D6). | `httpx` only. |
+| `bot/guild_keys.py` (**SHIPPED** — DELIVER 2026-08-02) | The single key-policy chokepoint (D3). `verify_and_resolve` (async — probes, compares, quarantines, returns the verified snapshot; `enforce=True` raises `GuildQuarantined` on mismatch) and `active_key` (sync — storage only, returns `None` when quarantined, for season discovery). Also `quarantine()`, `release()`, `install_guild_key()` (the `/update_guild_key` policy half), `record_quarantine_alert()` (24h suppression). The only sanctioned reader of a guild `api_key`. | `bot.guilds`, `bot.services.tacticus.guild_client`. |
+| `guild_key_bindings` table (**SHIPPED** — DELIVER 2026-08-02) | 1:1 with `guilds`, CASCADE. `tacticus_guild_id` (the binding), `tacticus_guild_tag` + `tacticus_guild_name` (display), `identity_bound_at`, `key_status`, `quarantine_reason`, `quarantined_at`, `last_alerted_at`. | — |
 
 ### D. Modified components
 
 `bot/repository.py` (ABC + JSON impl) and `bot/repository_sqlalchemy.py` gain
 `load_guild_binding` / `save_guild_binding` / `list_guild_bindings` — the
-ADR-007 pattern. `bot/guilds.py` gains two thin wrappers; **`Guild` and
-`save_guilds` are deliberately untouched** (D4).
+ADR-007 pattern — plus a fourth binding-adjacent method `replace_guild_key`
+(DELIVER 04-01) that writes ONLY `api_key` + `api_key_hmac` in one transaction
+without touching dependent rows (AC-003.2 — no CASCADE). `bot/guilds.py` gains
+thin wrappers over the four; **`Guild` and `save_guilds` are deliberately
+untouched** (D4). `_load_guilds` in the SQLite adapter is `order_by(rowid)` so
+guilds are returned in insertion order — the season-SPOF contract depends on
+the quarantined guild being FIRST when the cluster was registered that way
+(DELIVER 05-03 / UD-12).
 `bot/services/chronicl3r/player_service.py` loses `_fetch_roster` entirely —
 `refresh_guild` / `validate_if_stale` now take a `GuildSnapshot` and make no
-HTTP call. `admin_cog` gains `/update_guild_key` and renders binding state in
-`_config_guilds`; `update_cog` and `tasks_cog` route their key reads through the
-chokepoint.
+HTTP call. `admin_cog` gains `/update_guild_key` (admin tier, `force`
+parameter) and renders binding/quarantine state in `_config_guilds`;
+`update_cog` and `tasks_cog` route their key reads through the chokepoint.
+`tasks_cog.auto_update` calls `verify_and_resolve(..., enforce=True)` and
+catches `GuildQuarantined` — a drifted guild writes zero rows while siblings
+update normally (DELIVER 05-01, UD-11).
 
 ### E. Correction to §4.1 and to the `sqlite-backend` section
 
