@@ -406,13 +406,22 @@ async def test_mismatch_appears_in_the_hourly_summary(
 
 @pytest.mark.kpi
 async def test_a_matching_guild_is_completely_silent(
-    sqlite_repo, matching_guild, update_channel, ping_channel, key_events
+    bound_guild, matching_guild, update_channel, ping_channel, key_events
 ):
     """AC-002.4 — the silence test.
 
     A suite that only covers drift passes against an implementation that
     alerts on every cycle. This is the scenario that fails it, and it is the
     empirical basis for KPI-4's zero-false-positive target.
+
+    Takes `bound_guild`, and that is what makes the claim above true. With
+    only `sqlite_repo` the guild was UNBOUND, so the cycle took the
+    trust-on-first-use path and never performed a comparison at all — the
+    silence was the silence of a check that never ran. Demonstrated: with
+    `GuildIdentity.matches` hard-wired to return False, the old version still
+    passed. The most load-bearing scenario in the slice was asserting nothing.
+    Found during DELIVER step 03-05; see the feature-delta
+    `## Wave: DELIVER / [WHY] Upstream Issues`, UD-9.
     """
     await _run_hourly_cycle(matching_guild, update_channel)
 
