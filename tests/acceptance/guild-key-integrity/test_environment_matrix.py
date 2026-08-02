@@ -50,7 +50,6 @@ def test_environment_names_match_the_devops_artifact():
 # One per environment
 # ===========================================================================
 
-@RED
 @pytest.mark.real_io
 async def test_clean_adopts_every_identity_once(
     sqlite_repo, fake_guild_service, update_channel, key_events
@@ -71,7 +70,6 @@ async def test_clean_adopts_every_identity_once(
     assert _adoption_messages(update_channel) == []
 
 
-@RED
 @pytest.mark.kpi
 async def test_bound_matching_is_completely_silent(
     sqlite_repo, matching_guild, update_channel, ping_channel, key_events
@@ -110,7 +108,6 @@ async def test_bound_drifted_writes_nothing_once_enforcement_is_on(
     assert _row_counts(sqlite_repo, GUILD_WB) == before
 
 
-@RED
 @pytest.mark.error
 @pytest.mark.kpi
 async def test_unverifiable_alerts_loudly_and_blocks_nothing(
@@ -137,7 +134,6 @@ async def test_unverifiable_alerts_loudly_and_blocks_nothing(
     assert not key_events.any_named("guild.key.mismatch")
 
 
-@RED
 @pytest.mark.error
 @pytest.mark.kpi
 async def test_tacticus_unreachable_leaves_every_binding_byte_identical(
@@ -158,7 +154,6 @@ async def test_tacticus_unreachable_leaves_every_binding_byte_identical(
     assert _all_bindings() == before
 
 
-@RED
 @pytest.mark.error
 async def test_dead_key_is_reported_not_quarantined(
     sqlite_repo, fake_guild_service, update_channel, key_events
@@ -228,44 +223,303 @@ async def test_json_backend_rollback_goes_inert_without_raising(
 
 
 # ===========================================================================
-# Helpers — wiring only
+# Environment arrangement that no shared fixture can express
 # ===========================================================================
 
+@pytest.fixture
+def matching_guild(bound_cluster, fake_guild_service):
+    """Module-local override: `bound-matching` is TWO facts, cluster-wide.
+
+    The conftest `matching_guild` programs the key and stops there, because the
+    slice-01 scenarios that use it are about trust-on-first-use and would break
+    against a pre-existing binding — `test_first_verification_adopts_the_
+    identity_and_announces_once` asserts exactly one `guild.key.bound`, which a
+    bound guild can never produce. So the shared fixture cannot carry the
+    binding, and this module cannot do without it.
+
+    `environments.yaml` defines this environment as "a cluster where EVERY
+    guild is bound to the identity its key resolves to". Without the stored
+    bindings the cycle takes the adoption path, which is ALSO silent — so
+    `test_bound_matching_is_completely_silent` would report "no alert was
+    raised" against an implementation whose comparison is broken or absent.
+    That is the fifth recurrence of the vacuity pattern this suite keeps
+    hitting (UD-4, UD-7), and it is the one scenario whose stated job is to
+    fail an implementation that alerts unconditionally.
+
+    Overriding here rather than in conftest.py is deliberate: the cluster-wide
+    arrangement belongs to the environment matrix, and pushing it into the
+    shared fixture would break the slice-01 adoption scenarios above.
+    `bound_cluster` — the reusable half — DOES live in conftest.py.
+    """
+    fake_guild_service.program(
+        "wb-key",
+        GuildServiceResponse(identity=WORD_BEARERS, members=["u1", "u2", "u3"]),
+    )
+    fake_guild_service.program(
+        "dm-key",
+        GuildServiceResponse(identity=DARK_MECHANICUM, members=["u4", "u5"]),
+    )
+    return fake_guild_service
+
+
+# ===========================================================================
+# Helpers — wiring only.
+#
+# The composition is IMPORTED from `test_slice_01_bind_and_report`, not
+# re-derived: the double goes in at the Tacticus transport, below
+# `bot.services.tacticus.guild_client`, so every classification asserted above
+# is made by production code reading a real vendor body. A second, independent
+# composition here would be free to drift from the one the slice suites run,
+# and the environment matrix would then be certifying a wiring nobody ships.
+# ===========================================================================
+from typing import NamedTuple  # noqa: E402 — helpers-only dependency
+
+from test_slice_01_bind_and_report import (  # noqa: E402
+    _GUILD_REGISTRY,
+    _FakeChroniclerClient,
+    _entry_total,
+    _tacticus_answered_by,
+)
+
+# The cluster the environment scenarios draw from. Word Bearers FIRST:
+# `auto_update` derives the season from the first guild whose key can answer,
+# and the season SPOF only misbehaves in that ordering. The first two entries
+# are the slice-01 registry verbatim — the incident's two guilds — so a
+# three-guild environment is the two-guild suite plus one, not a parallel
+# fixture that could describe a different cluster.
+_CLUSTER: dict[str, tuple[str, dict]] = {
+    **_GUILD_REGISTRY,
+    "iw-key": ("iron_warriors", {
+        "name": "Iron Warriors", "api_key": "iw-key", "role_id": 3,
+        "notification_channel_id": None, "member_role_ids": [],
+    }),
+}
+
+# The one phrase `TasksCog._announce_adoption` posts on trust-on-first-use.
+# Matched on the sentence rather than the emoji: the emoji is decoration an
+# operator never reads out loud, and pinning it would make a cosmetic edit look
+# like a lost announcement.
+_ADOPTION_PHRASE = "is now bound to"
+
+
 async def _run_hourly_cycle(service, channel, *, ping_channel=None, enforcement=False):
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """Drive one `auto_update` tick over a WHOLE cluster.
+
+    Registration is left alone when the scenario built its own cluster with
+    `_register_guilds` — these are cluster-scale environments, and a helper
+    that re-registered would silently shrink a three-guild environment back to
+    the two-guild default.
+
+    `enforcement` records the environment's declared posture and is INERT in
+    Slice 01. It is not quietly dropped: `guild_keys.verify_and_resolve`
+    refuses `enforce=True` with NotImplementedError on purpose (ADR-008 D3 —
+    enforcement ships in Slice 03, one slice AFTER `/update_guild_key` provides
+    the only exit from quarantine), and `tasks_cog` passes `enforce=False`
+    unconditionally. Honouring the flag here would raise, not enforce. What the
+    four Slice-01 scenarios that pass it actually assert is that their
+    environment produces NO quarantine even when enforcement is requested —
+    which is true of this slice by construction and must stay true of the next
+    one. Slice 03 is where this parameter starts reaching production.
+    """
+    _register_the_guilds_the_scenario_programmed(service)
+    cog = _tasks_cog_posting_to(channel, ping_channel)
+    with _tacticus_answered_by(service):
+        await cog.auto_update()
+
+
+def _register_the_guilds_the_scenario_programmed(service) -> None:
+    """Register the guilds whose key the scenario programmed an answer for.
+
+    Idempotent by short-circuit: a scenario that already called
+    `_register_guilds` owns its cluster and this leaves it untouched.
+
+    Not every guild unconditionally — `FakeGuildService.answer_for` refuses an
+    unprogrammed key precisely so a scenario cannot silently exercise a path it
+    did not declare, and registering a guild nobody programmed would trip that
+    guard on every single-guild environment.
+    """
+    from bot.guilds import load_guilds, save_guilds
+
+    if load_guilds(PROD_SERVER_ID):
+        return
+
+    programmed = set(_CLUSTER) if service._default is not None else set(service._by_key)
+    save_guilds(PROD_SERVER_ID, {
+        _CLUSTER[key][0]: _CLUSTER[key][1]
+        for key in _CLUSTER
+        if key in programmed
+    })
+
+
+def _tasks_cog_posting_to(channel, ping_channel):
+    """The real cog, minus the scheduler — same construction as slice 01.
+
+    `TasksCog.__init__` calls `.start()` on both `@tasks.loop`s, which would
+    hand the hourly cycle to the event loop and race the assertions.
+    """
+    from bot.cogs.tasks_cog import TasksCog
+    from bot.services.chronicl3r.player_service import PlayerService
+
+    cog = TasksCog.__new__(TasksCog)
+    cog.bot = _ClusterBot(channel, ping_channel)
+    cog.player_service = PlayerService(_FakeChroniclerClient())
+    return cog
+
+
+class _ClusterBot:
+    """Routes by channel id, so "nothing was pinged" is a real observation.
+
+    `UPDATE_CHANNEL_ID` is 0 under test (conftest sets it before collection);
+    every OTHER id a scenario can reach is a guild's own
+    `notification_channel_id`. Handing back the update channel for both — the
+    single-channel shape the slice-01 helper uses — would make
+    `ping_channel.messages == []` true no matter what the loop posted, because
+    the ping channel would never be handed out at all.
+    """
+
+    def __init__(self, update_channel, ping_channel) -> None:
+        self._update_channel = update_channel
+        self._ping_channel = ping_channel
+
+    def get_channel(self, channel_id: int):
+        from config import UPDATE_CHANNEL_ID
+        if channel_id == UPDATE_CHANNEL_ID:
+            return self._update_channel
+        return self._ping_channel or self._update_channel
 
 
 def _register_guilds(repo, *, count: int) -> None:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """Register the first `count` guilds of `_CLUSTER`, in cluster order."""
+    import bot.guilds as guilds_mod
+    from bot.guilds import save_guilds
+
+    assert guilds_mod.repo is repo, (
+        "the composition root is pointing at a different repository than the "
+        "scenario's — the singleton escaped the fixture and the cycle would "
+        "read state this scenario never wrote"
+    )
+    keys = list(_CLUSTER)[:count]
+    assert len(keys) == count, (
+        f"the environment asked for {count} guilds and the cluster defines "
+        f"{len(_CLUSTER)}"
+    )
+    save_guilds(PROD_SERVER_ID, {
+        _CLUSTER[key][0]: _CLUSTER[key][1] for key in keys
+    })
 
 
 def _register_two_guilds_quarantined_first(repo) -> None:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    raise AssertionError(
+        "Not yet implemented — needs `guild_keys.quarantine`, which is a "
+        "Slice 03 scaffold. `test_mixed_cluster_survives_a_quarantined_first_"
+        "guild` stays @RED until then."
+    )
 
 
 def _guild_ids_in_order() -> list[str]:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """Registration order as `auto_update` walks it — the season SPOF only
+    misbehaves when the unusable guild is first."""
+    from bot.guilds import load_guilds
+    return list(load_guilds(PROD_SERVER_ID))
 
 
-def _row_counts(repo, guild_id: str):
-    raise AssertionError("Not yet implemented — RED scaffold")
+class _RowCounts(NamedTuple):
+    """Everything the 2026-07-28 incident corrupted, in one comparable value.
+
+    Battle hits, bomb hits AND players together: the incident put 30/30 battle
+    rows and 20/20 bomb rows off-roster and inverted 60 of 67 `players` rows,
+    so a count that omitted any of the three would report "unchanged" for a
+    cluster that had been contaminated in the other two.
+    """
+
+    battle_hits: int
+    bomb_hits: int
+    players: int
+
+
+def _row_counts(repo, guild_id: str) -> _RowCounts:
+    """`SEASON` is resolved HERE, at call time, and not imported at module
+    scope — deliberately, and the same way `_hit_counts` does it in slice 01.
+
+    `tests/acceptance/sqlite-backend/conftest.py` and this suite's conftest are
+    BOTH top-level module `conftest`, and in a combined
+    `pytest tests/unit tests/acceptance` run they collide: whichever one is
+    resident in `sys.modules` when a helper does `from conftest import SEASON`
+    is the one it gets, and the sqlite-backend suite says 94 where this one
+    says 106. A module-scope import here bound 106 while `_tacticus_body` — the
+    helper that decides which raid URL the double answers — lazily resolved 94,
+    so the cycle wrote season-94 rows and this counted season-106 ones and read
+    zero. Resolving it at the same moment the loop does keeps the two ends of
+    the assertion on the same season whichever conftest wins.
+    """
+    from conftest import SEASON
+    from bot.guilds import load_player_list
+    return _RowCounts(
+        battle_hits=_entry_total(repo.load_battle_hits(PROD_SERVER_ID, guild_id, SEASON)),
+        bomb_hits=_entry_total(repo.load_bomb_hits(PROD_SERVER_ID, guild_id, SEASON)),
+        players=len(load_player_list(PROD_SERVER_ID, guild_id).get("players", {})),
+    )
 
 
 def _quarantined_guild_ids() -> list[str]:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """Every registered guild whose binding says quarantined.
+
+    Read through the registry rather than through `list_guild_bindings`: a
+    guild with no binding row has no quarantine either, and the question these
+    environments ask is "did the cluster survive", which is a question about
+    registered guilds.
+    """
+    from bot.guilds import load_guild_binding, load_guilds
+    from bot.services.tacticus.guild_client import KeyStatus
+    return [
+        guild_id
+        for guild_id in load_guilds(PROD_SERVER_ID)
+        if load_guild_binding(PROD_SERVER_ID, guild_id).key_status
+        == KeyStatus.QUARANTINED.value
+    ]
 
 
 def _all_bindings() -> dict:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """One `GuildBinding` per registered guild, unbound placeholders included.
+
+    `GuildBinding` is frozen and value-compared, so `==` on this mapping is the
+    byte-identical claim D6 makes — an implementation that refreshed
+    `identity_bound_at`, cleared a display field or dropped a row during an
+    outage shows up as an inequality here.
+    """
+    from bot.guilds import load_guild_binding, load_guilds
+    return {
+        guild_id: load_guild_binding(PROD_SERVER_ID, guild_id)
+        for guild_id in load_guilds(PROD_SERVER_ID)
+    }
 
 
 def _all_guilds_ingested(repo) -> bool:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """True when EVERY registered guild recorded raid data this cycle.
+
+    Asserts the cluster is non-empty first: "all of an empty set ingested" is
+    vacuously true, and this predicate exists to prove a vendor change did not
+    take the cluster down.
+    """
+    from bot.guilds import load_guilds
+    guild_ids = list(load_guilds(PROD_SERVER_ID))
+    assert guild_ids, "no guild is registered — 'every guild ingested' is vacuous"
+    return all(_row_counts(repo, guild_id).battle_hits > 0 for guild_id in guild_ids)
 
 
 def _adoption_messages(channel) -> list[str]:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """The trust-on-first-use announcements, and nothing else the cycle posts."""
+    return [message for message in channel.messages if _ADOPTION_PHRASE in message]
 
 
 def _a_binding():
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """A binding worth persisting — so the JSON adapter's no-op write is a
+    no-op on real content, not on an empty placeholder that would round-trip
+    unbound either way."""
+    from bot.repository import GuildBinding
+    return GuildBinding(
+        tacticus_guild_id=WORD_BEARERS.uuid,
+        tacticus_guild_tag=WORD_BEARERS.tag,
+        tacticus_guild_name=WORD_BEARERS.name,
+        identity_bound_at="2026-07-31T04:00:00Z",
+    )

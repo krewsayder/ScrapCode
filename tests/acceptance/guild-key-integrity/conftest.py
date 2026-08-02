@@ -252,6 +252,42 @@ def bound_guild(registered_guilds):
     return binding
 
 
+@pytest.fixture
+def bound_cluster(registered_guilds):
+    """`Given a cluster where EVERY guild is bound to the identity its key
+    resolves to` — the cluster-wide equivalent of `bound_guild`.
+
+    `bound_guild` binds one guild, which is all a single-guild scenario needs.
+    The `bound-matching` ENVIRONMENT is a claim about a whole cluster in its
+    steady state, and a cluster with one bound guild and one unbound one is not
+    that state: the unbound guild takes the trust-on-first-use path (DDD-8),
+    which is silent for a different reason than the one the environment is
+    about. A scenario that accepted it would report "no alert was raised" while
+    never having compared an identity at all — the same vacuity that made
+    `drifted_guild` need `bound_guild` (UD-7).
+
+    Each guild is bound to ITS OWN canonical identity, so the arrangement is
+    stated here rather than inferred from whatever the guild-service double was
+    later programmed to return.
+
+    Added during DELIVER step 03-05 for `test_environment_matrix.py`.
+    """
+    from bot.guilds import save_guild_binding
+    from bot.repository import GuildBinding
+
+    bindings: dict[str, GuildBinding] = {}
+    for guild_id, identity in ((GUILD_WB, WORD_BEARERS), (GUILD_DM, DARK_MECHANICUM)):
+        binding = GuildBinding(
+            tacticus_guild_id=identity.uuid,
+            tacticus_guild_tag=identity.tag,
+            tacticus_guild_name=identity.name,
+            identity_bound_at="2026-07-31T04:00:00Z",
+        )
+        save_guild_binding(PROD_SERVER_ID, guild_id, binding)
+        bindings[guild_id] = binding
+    return bindings
+
+
 # ---------------------------------------------------------------------------
 # The guild-service double
 # ---------------------------------------------------------------------------
