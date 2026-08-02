@@ -270,9 +270,8 @@ async def test_a_missing_identifier_never_quarantines_anything(
 # US-005 — show it
 # ===========================================================================
 
-@RED
 @pytest.mark.driving_port
-def test_the_guild_list_shows_quarantine_and_why(sqlite_repo, env_vars):
+def test_the_guild_list_shows_quarantine_and_why(sqlite_repo, env_vars, bound_guild):
     """AC-005.1."""
     _quarantine(GUILD_WB, reason=f"resolves to {DARK_MECHANICUM.tag}, expected {WORD_BEARERS.tag}")
 
@@ -284,9 +283,8 @@ def test_the_guild_list_shows_quarantine_and_why(sqlite_repo, env_vars):
     assert "2026" in field
 
 
-@RED
 @pytest.mark.driving_port
-def test_the_guild_list_shows_a_healthy_guild_as_verified(sqlite_repo, env_vars):
+def test_the_guild_list_shows_a_healthy_guild_as_verified(sqlite_repo, env_vars, bound_guild):
     """AC-005.2."""
     field = _guild_field(_config_guilds_embed(), GUILD_WB)
 
@@ -295,7 +293,6 @@ def test_the_guild_list_shows_a_healthy_guild_as_verified(sqlite_repo, env_vars)
     assert "verified" in field.lower()
 
 
-@RED
 @pytest.mark.error
 def test_a_guild_with_no_key_reads_exactly_as_before(sqlite_repo, env_vars):
     """AC-005.3 — an explicit no-regression assertion on the existing
@@ -307,7 +304,6 @@ def test_a_guild_with_no_key_reads_exactly_as_before(sqlite_repo, env_vars):
     assert "❌ Missing" in field
 
 
-@RED
 @pytest.mark.error
 @pytest.mark.kpi
 @pytest.mark.parametrize("state", ["healthy", "quarantined", "unbound", "keyless"])
@@ -768,7 +764,21 @@ def _register_two_guilds_quarantined_first(repo) -> None:
 
 
 def _register_guild_without_key(guild_id: str) -> None:
-    raise AssertionError("Not yet implemented — RED scaffold for 05-05")
+    """`Given a registered guild with no api_key` — the AC-005.3 no-regression
+    precondition. The guild row exists but carries no key, so the existing
+    `has_api_key` If/IfExp renders `❌ Missing` and the suffix is empty
+    (an unbound guild is the default binding)."""
+    from bot.guilds import save_guilds
+
+    save_guilds(PROD_SERVER_ID, {
+        guild_id: {
+            "name": "Keyless Guild",
+            "api_key": "",
+            "role_id": 1,
+            "notification_channel_id": None,
+            "member_role_ids": [],
+        },
+    })
 
 
 def _guild_ids_in_order() -> list[str]:
@@ -784,27 +794,121 @@ def _guild_ids_in_order() -> list[str]:
 
 
 def _config_guilds_embed():
-    raise AssertionError("Not yet implemented — RED scaffold for 05-05")
+    """Render the /view_config guilds embed through the admin cog.
+
+    Replicated from `test_slice_01_bind_and_report.py` (do NOT cross-import —
+    UD-10 conftest-name collision). `AdminCog._config_guilds` is the real read
+    side of `/view_config config:guilds`; `__new__` skips the collaborators the
+    read side never touches.
+    """
+    from bot.cogs.admin_cog import AdminCog
+
+    return AdminCog.__new__(AdminCog)._config_guilds(PROD_SERVER_ID)
 
 
 def _guild_field(embed, guild_id: str) -> str:
-    raise AssertionError("Not yet implemented — RED scaffold for 05-05")
+    """The one embed field for `guild_id`, name and value together.
+
+    Replicated from slice 01: `/view_config` splits a guild's state across the
+    field name and value, so a scenario asserting on "what the officer sees"
+    reads both halves.
+    """
+    fields = [f for f in embed.fields if f"`{guild_id}`" in f.name]
+    assert len(fields) == 1, (
+        f"the guilds embed has {len(fields)} fields for {guild_id!r}, expected "
+        f"exactly one: {[f.name for f in embed.fields]}"
+    )
+    return f"{fields[0].name}\n{fields[0].value}"
 
 
 def _embed_text(embed) -> str:
-    raise AssertionError("Not yet implemented — RED scaffold for 05-05")
+    """All text the officer sees in the embed — title, description and every
+    field — so the leak test asserts over the WHOLE rendered surface, not just
+    the one guild's field (KPI-6 is an officer-tier, non-ephemeral embed)."""
+    parts: list[str] = []
+    if embed.title:
+        parts.append(embed.title)
+    if embed.description:
+        parts.append(embed.description)
+    for field in embed.fields:
+        parts.append(f"{field.name}\n{field.value}")
+    return "\n".join(parts)
 
 
 def _put_guild_in_state(guild_id: str, state: str) -> None:
-    raise AssertionError("Not yet implemented — RED scaffold for 05-05")
+    """Place GUILD_WB into one of four states for the parametrized leak test.
+
+    `healthy`     — registered with a key, bound to WORD_BEARERS, key_status=active.
+    `quarantined` — bound to WORD_BEARERS, then quarantined with a PRODUCTION-
+                    FORMAT reason (the kind `_quarantine_reason` emits, which
+                    embeds the full observed uuid). Using this format here is
+                    what makes the leak test non-vacuous: the rendering MUST
+                    strip the uuid, and this state puts one on disk to strip.
+    `unbound`     — registered with a key but no binding row (TOFU state).
+    `keyless`     — registered with an empty api_key (AC-005.3 no-regression).
+    """
+    from bot.guilds import save_guilds, save_guild_binding
+    from bot.repository import GuildBinding
+
+    if state == "keyless":
+        save_guilds(PROD_SERVER_ID, {
+            guild_id: {
+                "name": "Keyless Guild",
+                "api_key": "",
+                "role_id": 1,
+                "notification_channel_id": None,
+                "member_role_ids": [],
+            },
+        })
+        return
+
+    save_guilds(PROD_SERVER_ID, {guild_id: _GUILD_REGISTRY["wb-key"][1]})
+
+    if state == "unbound":
+        return
+
+    save_guild_binding(PROD_SERVER_ID, guild_id, GuildBinding(
+        tacticus_guild_id=WORD_BEARERS.uuid,
+        tacticus_guild_tag=WORD_BEARERS.tag,
+        tacticus_guild_name=WORD_BEARERS.name,
+        identity_bound_at="2026-07-31T04:00:00Z",
+    ))
+
+    if state == "healthy":
+        return
+
+    if state == "quarantined":
+        _quarantine(guild_id, reason=(
+            f"key drift: bound 【{WORD_BEARERS.tag}】 {WORD_BEARERS.name} "
+            f"but resolves to 【{DARK_MECHANICUM.tag}】 {DARK_MECHANICUM.name} "
+            f"— observed={DARK_MECHANICUM.uuid}"
+        ))
+        return
+
+    raise AssertionError(f"unknown state {state!r}")
 
 
 def _stored_key_plaintext() -> str:
-    raise AssertionError("Not yet implemented — RED scaffold for 05-05")
+    """The stored plaintext api_key for GUILD_WB, for the KPI-6 leak check.
+
+    A keyless guild has no key; an empty string is trivially a substring of
+    every rendered string, so a sentinel replaces it to keep the leak
+    assertion non-vacuous in the keyless state.
+    """
+    from bot.guilds import load_guilds
+
+    data = load_guilds(PROD_SERVER_ID).get(GUILD_WB, {})
+    return data.get("api_key") or "<<no-key-stored>>"
 
 
 def _contains_uuid(text: str) -> bool:
-    raise AssertionError("Not yet implemented — RED scaffold for 05-05")
+    """True if `text` contains a full 36-char uuid (KPI-6: never)."""
+    import re
+
+    return bool(re.search(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        text,
+    ))
 
 
 def _transport_failure(failure: TransportFailure) -> GuildServiceResponse:

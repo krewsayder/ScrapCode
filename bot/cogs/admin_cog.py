@@ -18,7 +18,7 @@ from bot.guilds import (
 from bot.embeds import guild_autocomplete, encounter_limit
 from bot.permissions import require_tier, check_tier
 from bot.services.chronicl3r.player_service import PlayerService
-from bot.services.tacticus.guild_client import GuildSnapshot
+from bot.services.tacticus.guild_client import GuildSnapshot, KeyStatus
 
 # Shown in place of a display field the guild service did not send. Display
 # fields are never load-bearing (ADR-008 D1): a guild that has not set a tag
@@ -665,9 +665,17 @@ def _binding_suffix(binding) -> str:
     `❌ Missing` rendering this feature must leave alone is reached by exactly
     the path it always was, and a guild whose key has simply never been probed
     yet reads the same as it did yesterday.
+
+    A quarantined guild (AC-005.1) renders ⛔ and BOTH tags so an officer can
+    tell at a glance what the key was pointing at and what it should point at.
+    The quarantine date's year answers "when did this happen" without crowding
+    the field. Never the full uuid: `quarantine_reason` carries one for drift
+    re-reporting, and `/view_config` is officer-tier and non-ephemeral (KPI-6).
     """
     if binding.is_unbound:
         return ""
+    if binding.key_status == KeyStatus.QUARANTINED.value:
+        return f" ⛔ {_quarantine_line(binding)}"
     return (
         f" {_identity_label(binding)}"
         f" • verified {_verified_on(binding.identity_bound_at)}"
@@ -694,6 +702,55 @@ def _identity_label(binding) -> str:
 def _verified_on(identity_bound_at: str | None) -> str:
     """The date half of an ISO-8601 UTC instant, or an em dash."""
     return (identity_bound_at or EM_DASH)[:ISO_DATE_LENGTH]
+
+
+# ==========================================
+# Quarantine rendering (AC-005.1 / KPI-6)
+# ==========================================
+
+_UUID_PATTERN = (
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+)
+
+
+def _quarantine_line(binding) -> str:
+    """Both tags and the quarantine date, never the full uuid.
+
+    `quarantine_reason` (set by `bot.guild_keys._quarantine_reason`) embeds the
+    FULL observed uuid for drift re-reporting, so the reason is NEVER rendered
+    raw. The bound tag comes from the binding; the observed tag is extracted
+    from the reason's `resolves to 【TAG】` marker. A short-form reason without
+    the marker is sanitized of any uuid and rendered as-is so both tags remain
+    visible (KPI-6: 0 full-identifier leaks across every state).
+    """
+    bound_tag = binding.tacticus_guild_tag or EM_DASH
+    observed_tag = _observed_tag_from_reason(binding.quarantine_reason or "")
+    date = (binding.quarantined_at or EM_DASH)[:ISO_DATE_LENGTH]
+    return f"Quarantined: bound 【{bound_tag}】 resolves to 【{observed_tag}】 ({date})"
+
+
+def _observed_tag_from_reason(reason: str) -> str:
+    """The observed guild's tag, without the uuid the reason carries.
+
+    The production reason shape is `key drift: bound 【T】 N but resolves to
+    【T】 N — observed=UUID`; the FIRST `【...】` after `resolves to` is the
+    observed tag (the name's `【alliance】` prefix follows it, not precedes it).
+    A reason without the marker (test short-form) is sanitized of uuids and
+    returned verbatim so both tags remain visible without leaking an id.
+    """
+    import re
+
+    match = re.search(r"resolves to 【([^】]*)】", reason)
+    if match:
+        return match.group(1) or EM_DASH
+    return _strip_uuids(reason) or EM_DASH
+
+
+def _strip_uuids(text: str) -> str:
+    """Remove any full uuid from `text` (KPI-6)."""
+    import re
+
+    return re.sub(_UUID_PATTERN, "", text).strip()
 
 
 def _registration_binding_line(snapshot: GuildSnapshot) -> str:
