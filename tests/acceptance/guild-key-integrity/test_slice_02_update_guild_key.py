@@ -20,7 +20,7 @@ from domain_types import (
     DeadKeyStatus,
     TransportFailure,
 )
-from conftest import GUILD_WB, PROD_SERVER_ID, GuildServiceResponse
+from conftest import GUILD_DM, GUILD_WB, PROD_SERVER_ID, GuildServiceResponse
 
 RED = pytest.mark.skip(reason="RED scaffold — enable one at a time in DELIVER")
 
@@ -29,11 +29,10 @@ NEW_KEY = "new-key-for-word-bearers"
 
 # ===========================================================================
 
-@RED
 @pytest.mark.driving_port
 @pytest.mark.real_io
 async def test_admin_installs_a_new_key_and_is_told_which_guild_it_belongs_to(
-    sqlite_repo, fake_guild_service, key_events
+    sqlite_repo, fake_guild_service, key_events, bound_guild
 ):
     """AC-003.1 + KPI-3.
 
@@ -77,10 +76,11 @@ async def test_replacing_a_key_destroys_nothing(
     assert _row_counts(sqlite_repo, GUILD_WB) == before
 
 
-@RED
 @pytest.mark.error
 @pytest.mark.kpi
-async def test_a_key_for_the_wrong_guild_is_refused(sqlite_repo, fake_guild_service):
+async def test_a_key_for_the_wrong_guild_is_refused(
+    sqlite_repo, fake_guild_service, bound_guild
+):
     """AC-003.3. The probe runs against the SUBMITTED key, before storing —
     an unverified key is never written, so a fat-fingered paste cannot
     recreate the incident."""
@@ -95,8 +95,9 @@ async def test_a_key_for_the_wrong_guild_is_refused(sqlite_repo, fake_guild_serv
     assert DARK_MECHANICUM.name in interaction.reply_text
 
 
-@RED
-async def test_force_installs_the_key_and_rebinds(sqlite_repo, fake_guild_service, key_events):
+async def test_force_installs_the_key_and_rebinds(
+    sqlite_repo, fake_guild_service, key_events, bound_guild
+):
     """AC-003.4 / DDD-9.
 
     `force:true` is a parameter rather than a confirmation button because a
@@ -120,11 +121,10 @@ async def test_force_installs_the_key_and_rebinds(sqlite_repo, fake_guild_servic
     assert record.rebound_from == WORD_BEARERS.uuid
 
 
-@RED
 @pytest.mark.error
 @pytest.mark.parametrize("status", list(DeadKeyStatus), ids=lambda s: str(s.value))
 async def test_a_rejected_key_is_never_installed(
-    sqlite_repo, fake_guild_service, status: DeadKeyStatus
+    sqlite_repo, fake_guild_service, registered_guilds, status: DeadKeyStatus
 ):
     """AC-003.5."""
     fake_guild_service.program(NEW_KEY, GuildServiceResponse(status=status.value))
@@ -137,7 +137,6 @@ async def test_a_rejected_key_is_never_installed(
     assert "dead" in interaction.reply_text.lower() or "rejected" in interaction.reply_text.lower()
 
 
-@RED
 @pytest.mark.error
 @pytest.mark.parametrize(
     "failure",
@@ -145,7 +144,7 @@ async def test_a_rejected_key_is_never_installed(
     ids=lambda f: f.value,
 )
 async def test_an_unverifiable_key_is_never_installed(
-    sqlite_repo, fake_guild_service, failure: TransportFailure
+    sqlite_repo, fake_guild_service, registered_guilds, failure: TransportFailure
 ):
     """AC-003.6 — never install a key you could not check.
 
@@ -174,10 +173,11 @@ async def test_an_unverifiable_key_is_never_installed(
     assert "verify" in interaction.reply_text.lower()
 
 
-@RED
 @pytest.mark.error
 @pytest.mark.driving_port
-async def test_an_officer_cannot_replace_a_guild_key(sqlite_repo, fake_guild_service):
+async def test_an_officer_cannot_replace_a_guild_key(
+    sqlite_repo, fake_guild_service, registered_guilds
+):
     """AC-003.7. The key grants read access to a guild's full roster and raid
     history, so officer tier is deliberately not sufficient. Entered through
     the real `require_tier` decorator (ADR-001: one place for permissions)."""
@@ -193,7 +193,6 @@ async def test_an_officer_cannot_replace_a_guild_key(sqlite_repo, fake_guild_ser
     )
 
 
-@RED
 @pytest.mark.error
 @pytest.mark.kpi
 @pytest.mark.parametrize(
@@ -243,11 +242,10 @@ async def test_installing_a_matching_key_releases_a_quarantined_guild(
     assert binding.quarantined_at is None
 
 
-@RED
 @pytest.mark.error
 @pytest.mark.driving_port
 async def test_an_unknown_guild_is_refused_with_the_list_of_real_ones(
-    sqlite_repo, fake_guild_service
+    sqlite_repo, fake_guild_service, registered_guilds
 ):
     """AC-003.10. The operator reaching for this command is mid-incident;
     a bare "not found" costs another round trip to discover the id."""
@@ -314,47 +312,59 @@ class _RecordedTacticus:
 
 
 async def _invoke_update_guild_key(interaction, guild_id, api_key, *, force=False, service):
-    """Invoke the policy function driving `/update_guild_key` with a Discord double.
+    """Drive the REAL `/update_guild_key` Command on `AdminCog`.
 
-    The 04-01 scenarios assert on storage state only, so the driving port is
-    the policy function in `bot.guild_keys` (the cog command comes in 04-02).
-    The Tacticus call is patched at the httpx transport boundary so all
-    classification stays in production code.
+    Port-to-port at the implementation layer (04-02): the driving port is the
+    `app_commands.Command` registered on the cog, exercised through its own
+    `checks` predicates and then its `callback` — NOT a direct call to
+    `install_guild_key`. The Tacticus call is patched at the httpx transport
+    boundary (`_tacticus_answered_by`) so all classification stays in
+    production code while the command runs.
+
+    The checks are run by hand to mimic `main.py::on_app_command_error`: a
+    failed `require_tier` predicate sends an ephemeral denial and returns
+    WITHOUT calling the callback, so the probe never fires (AC-003.7 — the
+    command must not be an oracle for whether a key is valid).
     """
     with _tacticus_answered_by(service):
-        from bot.guild_keys import install_guild_key
-
-        result = await install_guild_key(
-            PROD_SERVER_ID, guild_id, api_key, force=force
+        cmd = _find_update_guild_key_command()
+        for chk in cmd.checks:
+            # `app_commands.Command.checks` holds the predicate coroutine
+            # directly in this discord.py build (a `Check` wrapper with a
+            # `.predicate` attribute in others). Accept either shape.
+            predicate = chk.predicate if hasattr(chk, "predicate") else chk
+            if not await predicate(interaction):
+                await interaction.response.send_message(
+                    "❌ You don't have permission to use this command.",
+                    ephemeral=True,
+                )
+                return
+        from bot.cogs.admin_cog import AdminCog
+        cog = AdminCog.__new__(AdminCog)
+        await cmd.callback(
+            cog, interaction,
+            guild_id=guild_id, api_key=api_key, force=force,
         )
-    _render_update_reply(interaction, result)
-    return result
 
 
-def _render_update_reply(interaction, result) -> None:
-    """Render the policy result to the Discord double's reply surface.
+def _find_update_guild_key_command():
+    """Locate the `update_guild_key` Command on `AdminCog` via
+    `__cog_app_commands__` (the list of `app_commands.Command` objects —
+    slash commands live here, not in `__cog_commands__`).
 
-    Minimal for 04-01 (no scenario asserts on reply text here). 04-02's
-    scenarios assert on the resolved guild name and refusal reasons, so the
-    shape is in place now; the cog (04-02) will render through the same result.
+    Litmus for port-to-port: delete the `update_guild_key` method (or its
+    `@require_tier` decorator) and the scenarios that depend on it go red.
     """
-    from bot.services.tacticus.guild_client import ProbeOutcome
+    from bot.cogs.admin_cog import AdminCog
 
-    if result.outcome is ProbeOutcome.MATCH:
-        name = result.identity.name if result.identity else "the guild"
-        interaction.reply(f"✅ Key updated for {name}.")
-    elif result.outcome is ProbeOutcome.MISMATCH and not result.forced:
-        bound_name = result.bound_name or "the bound guild"
-        observed_name = result.identity.name if result.identity else "the submitted key"
-        interaction.reply(
-            f"❌ {observed_name} does not match {bound_name}."
-        )
-    elif result.outcome is ProbeOutcome.DEAD:
-        interaction.reply("❌ The key was rejected (dead).")
-    elif result.outcome is ProbeOutcome.UNVERIFIABLE:
-        interaction.reply("❌ The key could not be verified.")
-    else:
-        interaction.reply("❌ The guild service could not be reached; key not installed.")
+    for cmd in AdminCog.__cog_app_commands__:
+        if cmd.name == "update_guild_key":
+            return cmd
+    raise AssertionError(
+        "no `update_guild_key` command is registered on AdminCog — "
+        "delete the command method and this helper errors, which is the "
+        "port-to-port litmus test"
+    )
 
 
 class _FakeResponse:
@@ -364,6 +374,7 @@ class _FakeResponse:
     async def send_message(self, content="", *, embed=None, ephemeral=False, **kwargs):
         self._interaction.reply_text = content or (getattr(embed, "description", "") or "")
         self._interaction.was_ephemeral = ephemeral
+        self._interaction._replied = True
 
     async def defer(self, *, ephemeral=False, **kwargs):
         self._interaction.was_ephemeral = ephemeral
@@ -381,35 +392,54 @@ class _FakeFollowup:
         self._interaction.was_ephemeral = ephemeral
 
 
+class _FakePermissions:
+    """`interaction.user.guild_permissions` — only `administrator` is read."""
+
+    def __init__(self, *, administrator: bool) -> None:
+        self.administrator = administrator
+
+
+class _FakeUser:
+    """`interaction.user` — `guild_permissions` and `roles` are the read surface."""
+
+    def __init__(self, *, administrator: bool, roles=None) -> None:
+        self.guild_permissions = _FakePermissions(administrator=administrator)
+        self.roles = roles or []
+
+
 class _FakeInteraction:
     """A Discord interaction double capturing the reply text + ephemerality.
 
     `reply_text` / `was_ephemeral` are the observable surface the 04-02
-    scenarios assert on; 04-01's two scenarios ignore them.
+    scenarios assert on. `user.guild_permissions.administrator` and
+    `user.roles` drive the real `require_tier` decorator's predicate
+    (`check_tier`): a Discord-admin bypasses the tier check without touching
+    the repo; an officer with no admin role fails it.
     """
 
-    def __init__(self, *, guild_id: int = PROD_SERVER_ID) -> None:
+    def __init__(self, *, guild_id: int = PROD_SERVER_ID, administrator: bool = True,
+                 roles=None) -> None:
         self.guild_id = guild_id
         self.reply_text = ""
         self.was_ephemeral = False
         self._replied = False
+        self.user = _FakeUser(administrator=administrator, roles=roles)
         self.response = _FakeResponse(self)
         self.followup = _FakeFollowup(self)
 
-    def reply(self, content: str, *, ephemeral: bool = True) -> None:
-        self.reply_text = content
-        self.was_ephemeral = ephemeral
-        self._replied = True
-
 
 def _admin_interaction():
-    """An interaction double authorized at admin tier (04-02 adds the real
-    `require_tier` check; 04-01 calls the policy directly)."""
-    return _FakeInteraction()
+    """An interaction double that passes the admin tier check via the Discord
+    administrator bypass (`check_tier` returns True without touching the repo),
+    so the gate is robust to the by-value `repo` import in `bot.permissions`."""
+    return _FakeInteraction(administrator=True)
 
 
 def _officer_interaction():
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """An interaction double that FAILS the admin tier check: not a Discord
+    administrator and no admin role, so `check_tier("admin")` is False regardless
+    of which repository `role_tiers` come from."""
+    return _FakeInteraction(administrator=False, roles=[])
 
 
 def _stored_key(guild_id: str) -> str:
@@ -420,8 +450,21 @@ def _stored_key(guild_id: str) -> str:
 
 
 def _stored_key_plaintext_before() -> str:
-    """The plaintext of the key GUILD_WB was registered with, for leak tests."""
-    return "wb-key"
+    """The plaintext of the key a registered guild was storing BEFORE the
+    command ran, for the KPI-6 leak test.
+
+    `_program_outcome` stashes the pre-invoke stored key here so this helper
+    returns a genuinely-stored key for EVERY param: GUILD_WB's when GUILD_WB is
+    registered (accepted / wrong-guild / dead / unreachable), else GUILD_DM's
+    (the unknown-guild param registers GUILD_DM only). The empty string is a
+    substring of every haystack, so returning "" would make the leak assert
+    fail rather than pass — the stashed value is always non-empty for a
+    param that registered at least one guild.
+    """
+    return _STORED_KEY_PLAINTEXT_BEFORE
+
+
+_STORED_KEY_PLAINTEXT_BEFORE = ""
 
 
 def _stored_key_hmac(guild_id: str) -> str | None:
@@ -481,4 +524,79 @@ def _quarantine(guild_id: str, *, reason: str) -> None:
 
 
 def _program_outcome(service, outcome: str, api_key: str) -> None:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """Wire BOTH the fake-service response AND the storage precondition per
+    outcome for the KPI-6 leak test. Branching on the outcome string is
+    wiring/setup, not policy.
+
+      accepted      — register+bind GUILD_WB to WORD_BEARERS, key resolves to
+                      WORD_BEARERS (MATCH install path).
+      wrong-guild   — register+bind GUILD_WB to WORD_BEARERS, key resolves to
+                      DARK_MECHANICUM (mismatch-without-force refusal).
+      dead          — register GUILD_WB, submitted key 401/403 (DEAD refusal).
+      unreachable   — register GUILD_WB, submitted key times out / 503
+                      (UNREACHABLE refusal).
+      unknown-guild — register GUILD_DM only (GUILD_WB absent) and leave the
+                      service unprogrammed; the command must refuse BEFORE
+                      probing, so `call_count` stays 0. Registering GUILD_DM
+                      keeps `_stored_key_plaintext_before()` non-empty AND
+                      meaningful (a real stored key the guild listing must not
+                      leak).
+
+    Stashes the pre-invoke stored key so `_stored_key_plaintext_before()`
+    returns the genuinely-stored key that must not leak into the reply or logs.
+    """
+    global _STORED_KEY_PLAINTEXT_BEFORE
+    import httpx
+
+    from bot.guilds import load_guilds, save_guilds, save_guild_binding
+    from bot.repository import GuildBinding
+
+    def _register(guild_id, key):
+        save_guilds(PROD_SERVER_ID, {
+            **load_guilds(PROD_SERVER_ID),
+            guild_id: {
+                "name": guild_id.replace("_", " ").title(),
+                "api_key": key,
+                "role_id": 0,
+                "notification_channel_id": None,
+                "member_role_ids": [],
+            },
+        })
+
+    def _bind(guild_id, identity):
+        save_guild_binding(PROD_SERVER_ID, guild_id, GuildBinding(
+            tacticus_guild_id=identity.uuid,
+            tacticus_guild_tag=identity.tag,
+            tacticus_guild_name=identity.name,
+            identity_bound_at="2026-07-31T04:00:00Z",
+        ))
+
+    if outcome == "accepted":
+        _register(GUILD_WB, "wb-key")
+        _bind(GUILD_WB, WORD_BEARERS)
+        service.program(api_key, GuildServiceResponse(identity=WORD_BEARERS))
+    elif outcome == "wrong-guild":
+        _register(GUILD_WB, "wb-key")
+        _bind(GUILD_WB, WORD_BEARERS)
+        service.program(api_key, GuildServiceResponse(identity=DARK_MECHANICUM))
+    elif outcome == "dead":
+        _register(GUILD_WB, "wb-key")
+        service.program(api_key, GuildServiceResponse(status=401))
+    elif outcome == "unreachable":
+        _register(GUILD_WB, "wb-key")
+        service.program(api_key, GuildServiceResponse(raises=httpx.TimeoutException("x")))
+    elif outcome == "unknown-guild":
+        _register(GUILD_DM, "dm-key")
+        # GUILD_WB is NOT registered; the command refuses before probing, so
+        # the service is intentionally left unprogrammed.
+    else:
+        raise AssertionError(f"unrecognised outcome {outcome!r}")
+
+    guilds = load_guilds(PROD_SERVER_ID)
+    _STORED_KEY_PLAINTEXT_BEFORE = (
+        guilds.get(GUILD_WB, {}).get("api_key", "")
+        or guilds.get(GUILD_DM, {}).get("api_key", "")
+    )
+    assert _STORED_KEY_PLAINTEXT_BEFORE, (
+        "leak-test wiring must register at least one guild with a real stored key"
+    )

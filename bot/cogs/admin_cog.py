@@ -136,6 +136,63 @@ class AdminCog(commands.Cog):
             )
 
     # ==========================================
+    # SLASH COMMAND: UPDATE_GUILD_KEY
+    # ==========================================
+
+    @app_commands.command(
+        name="update_guild_key",
+        description=(
+            "Replace a guild's Tacticus API key. The new key is verified "
+            "against the guild before it is stored."
+        ),
+    )
+    @require_tier("admin")
+    @app_commands.describe(
+        guild_id="The registered guild whose key is being replaced",
+        api_key="The new Tacticus API key for the guild",
+        force="Rebind the guild if the new key resolves to a different Tacticus guild",
+    )
+    @app_commands.autocomplete(guild_id=guild_autocomplete)
+    async def update_guild_key(
+        self,
+        interaction: discord.Interaction,
+        guild_id: str,
+        api_key: str,
+        force: bool = False,
+    ):
+        # AC-003.6: probe the SUBMITTED key before storing anything. An
+        # unverified key is never written, so a fat-fingered paste cannot
+        # recreate the incident. All probe/store/release logic stays in
+        # `install_guild_key` (step 04-01); this command is a thin renderer
+        # plus the unknown-guild guard and the admin permission gate.
+        await interaction.response.defer(ephemeral=True)
+
+        server_id = interaction.guild_id
+        registered = load_guilds(server_id)
+        if guild_id not in registered:
+            # Unknown-guild guard BEFORE the probe (AC-003.10): the command
+            # must never become an oracle for whether an arbitrary key is
+            # valid, so the probe does not fire when the guild is not
+            # registered. The reply names the real guild ids so an operator
+            # mid-incident does not need another round trip to discover them.
+            registered_ids = ", ".join(registered) or "(none)"
+            await interaction.followup.send(
+                f"❌ No guild `{guild_id}` is registered. "
+                f"Registered guilds: {registered_ids}",
+                ephemeral=True,
+            )
+            return
+
+        result = await guild_keys.install_guild_key(
+            server_id, guild_id, api_key, force=force
+        )
+        # KPI-6: no key value ever reaches the reply. The renderer names the
+        # resolved guild and the outcome, never the submitted or stored key.
+        await interaction.followup.send(
+            _render_update_result(result), ephemeral=True
+        )
+
+    # ==========================================
     # SLASH COMMAND: DEREGISTER_GUILD
     # ==========================================
 
@@ -561,6 +618,37 @@ class AdminCog(commands.Cog):
             ephemeral=True,
         )
 
+
+
+def _render_update_result(result) -> str:
+    """Render an `InstallResult` to the `/update_guild_key` reply text.
+
+    The cog is a thin renderer over `install_guild_key` (step 04-01): every
+    outcome the policy can return has a reply here, and no reply carries the
+    submitted or stored key (KPI-6). The reply names the resolved guild for a
+    successful install (AC-003.1) and names BOTH guilds on a mismatch refused
+    without force (AC-003.3).
+    """
+    from bot.services.tacticus.guild_client import ProbeOutcome
+
+    if result.outcome is ProbeOutcome.MATCH:
+        name = result.identity.name if result.identity else "the guild"
+        return f"✅ Key updated for {name}."
+    if result.outcome is ProbeOutcome.MISMATCH and result.forced:
+        name = result.identity.name if result.identity else "the new guild"
+        return f"✅ Key installed and rebound to {name}."
+    if result.outcome is ProbeOutcome.MISMATCH:
+        bound = result.bound_name or "the bound guild"
+        observed = result.identity.name if result.identity else "the submitted key"
+        return (
+            f"❌ The new key resolves to {observed}, which does not match "
+            f"{bound}. Use `force=True` to rebind."
+        )
+    if result.outcome is ProbeOutcome.DEAD:
+        return "❌ The key was rejected (dead)."
+    # UNREACHABLE or UNVERIFIABLE — an untrusted key must not enter on an
+    # outage (AC-003.6); both report a verification failure, never a key value.
+    return "❌ Could not verify the key."
 
 
 # ==========================================

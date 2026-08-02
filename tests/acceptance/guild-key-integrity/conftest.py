@@ -163,10 +163,17 @@ def _repo_singleton_never_escapes_tmp_path(monkeypatch, tmp_path: Path):
     `## Wave: DELIVER / [WHY] Upstream Issues`, UD-3.
     """
     import bot.guilds as guilds_mod
+    import bot.permissions as permissions_mod
     from bot.repository import JsonClusterRepository
-    monkeypatch.setattr(
-        guilds_mod, "repo", JsonClusterRepository(base_path=tmp_path / "clusters")
-    )
+    tmp_repo = JsonClusterRepository(base_path=tmp_path / "clusters")
+    monkeypatch.setattr(guilds_mod, "repo", tmp_repo)
+    # `bot/permissions.py:4` does `from bot.guilds import repo` (by value), so
+    # `check_tier` reads the IMPORT-TIME singleton, NOT the per-test monkey-
+    # patched `bot.guilds.repo`. Without this, the officer scenario in slice 02
+    # would have `check_tier("admin")` read the real `clusters/` tree (UD-3
+    # shape). Defensive wiring consistent with the fixture's stated purpose;
+    # only applies to this acceptance suite (monkeypatch auto-reverts).
+    monkeypatch.setattr(permissions_mod, "repo", tmp_repo)
     yield
 
 
