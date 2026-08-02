@@ -1907,3 +1907,150 @@ Two additional gates would have caught all five:
 Recommendation for the next DISTILL wave: run mutation-based non-vacuity on
 every scenario whose Gherkin contains a `Given` about stored state, before
 handing off. The tooling exists — it is `git checkout --` and a loop.
+
+## Wave: DELIVER / [REF] Implementation Summary
+
+Slice 01 ships the provenance guard in its **non-blocking** form: every guild's
+key is probed once per hourly cycle, the resolved Tacticus identity is compared
+against a stored binding, and drift is reported to the update channel within the
+hour. Nothing is refused. Guilds with no binding adopt one on first successful
+probe and the adoption is announced exactly once (trust-on-first-use, DDD-8).
+
+The seven call sites that read a guild `api_key` and fired it at Tacticus now
+route through one module, `bot/guild_keys.py`, and an AST test fails the build if
+an eighth appears. `PlayerService._fetch_roster` — the function that performed no
+identity check and whose roster writes corrupted 60 of 67 `players` rows — is
+deleted; the Chronicler package no longer makes any Tacticus call.
+
+Detection goes from **~72 hours, human-noticed** to **one hourly cycle, in a
+Discord channel**.
+
+## Wave: DELIVER / [REF] Files Modified
+
+**Production — new (4)**
+
+| Path | Role |
+|---|---|
+| `bot/services/tacticus/guild_client.py` | the only issuer of `GET /api/v1/guild`; identity + roster from one read (DDD-2) |
+| `bot/guild_keys.py` | the key-policy chokepoint; the only sanctioned reader of a guild `api_key` |
+| `bot/obs.py` | dependency-free structured-log helper (DEVOPS U1) — `json` and `logging` only |
+| `bot/db/alembic/versions/0003_guild_key_bindings.py` | additive migration, `down_revision = "0002"` |
+
+**Production — modified (9)**
+
+`bot/db/models.py` (`GuildKeyBindingRow`) · `bot/db/session.py` (imports the promoted helper) ·
+`bot/repository.py` (`GuildBinding` port DTO + 3 ABC methods + JSON adapter) ·
+`bot/repository_sqlalchemy.py` (SQLite impl) · `bot/guilds.py` (3 wrappers; `Guild` and
+`save_guilds` untouched) · `bot/services/chronicl3r/player_service.py` (`_fetch_roster`
+deleted; takes a snapshot) · `bot/cogs/tasks_cog.py` · `bot/cogs/update_cog.py` ·
+`bot/cogs/admin_cog.py`
+
+**Config (3)** — `requirements.txt` (`import-linter`, `pytest-archon`) ·
+`pyproject.toml` (`[tool.pytest.ini_options]`, contracts 5 and 6) · `.gitignore`
+
+**Tests** — `tests/unit/test_guild_keys_policy.py` (27) and
+`tests/unit/test_player_service_roster_guard.py` (18), both new; fixture and helper
+work across the `guild-key-integrity` acceptance suite.
+
+19 commits, each carrying a `Step-Id` trailer for the ten DES-monitored steps.
+
+## Wave: DELIVER / [REF] Scenarios Green
+
+**46 of 46 Slice 01 scenarios** (2026-08-01). Whole repository:
+**198 passed, 49 skipped, 1 xfailed, 0 failed.**
+
+| Suite | Result |
+|---|---|
+| `tests/acceptance/guild-key-integrity` | 46 passed, 49 skipped |
+| `tests/acceptance/sqlite-backend` | 100 passed, 1 xfailed (coexistence held every step) |
+| `tests/unit` | 52 passed (7 pre-existing + 45 new) |
+| `lint-imports` | 6 contracts kept, 0 broken |
+
+The 49 skips are all deliberate and all outside Slice 01: 17 Slice 02, 27+2 Slice 03,
+2 `@requires_external` (no `SCRAPCODE_TACTICUS_CONTRACT_KEY`), 1 Tier B module
+(`hypothesis` deliberately not pinned — its state machine is Slice 03 behaviour, and
+pinning it would convert an honest skip into a failure).
+
+## Wave: DELIVER / [REF] DoD Check
+
+Against the nine items in `## Wave: DISCUSS / [REF] Definition of Ready`.
+
+| # | Item | Status |
+|---|---|---|
+| 1 | All 43 ACs pass as automated tests | **Partial — Slice 01 only, as scoped.** US-006/001/002 green. US-003 (Slice 02), US-004/005 (Slice 03) remain scaffolded. |
+| 2 | Alembic applies and downgrades cleanly against a production copy | **Met on a populated test DB** — upgrade/downgrade/re-upgrade with data intact, FK CASCADE proven live. **Not yet run against a copy of the real production database** — operator step before deploy. |
+| 3 | All seven D6 call sites route through the chokepoint | **Met.** AST scan reports zero offenders. |
+| 4 | `load_guilds`/`save_guilds` round-trip preserves every new field | **Met, and now non-vacuously** — see UD-4. |
+| 5 | No API key in `discord.log`, journal or any Discord response | **Met by construction** — no `guild.key.*` schema carries `api_key`; correlation uses `key_ref`. Not yet grep-verified against a real `discord.log`. |
+| 6 | `/update_guild_key` leaves row counts unchanged | **N/A — Slice 02.** |
+| 7 | Quarantining one guild does not stop another | **N/A — Slice 03.** The season SPOF fix that enables it shipped here: discovery now falls through to the next usable key. |
+| 8 | The Dark Mechanicum key is refused end-to-end | **N/A — Slice 03.** Slice 01 reports it and still ingests, by design (AC-002.2). |
+| 9 | `jobs.yaml`, `journeys/`, `personas/` updated; ADR-003 amended | **Met** in prior waves. |
+
+## Wave: DELIVER / [REF] Demo Evidence
+
+**The Phase 3.5 Elevator Pitch gate could not be executed as specified, and this
+records why rather than reporting a pass it did not earn.**
+
+The gate requires executing each story's `After: run … → sees …` line as a
+subprocess and asserting on stdout. Every demo line in this feature is a **Discord
+slash command** — `/view_config config:guilds`, `/update_leaderboard guild_id:…`.
+None is a shell command. Executing them needs a live gateway connection, a real bot
+token, and a real guild; there is no stdout to capture and no exit code to check.
+The gate assumes a CLI-shaped deliverable.
+
+The closest evidence that exists, and it is strong: the DISTILL suite's
+`@driving_port` scenarios enter through the **real cog callbacks** rather than
+through service functions, which is the port-to-port principle the demo gate is a
+proxy for. `test_guild_list_shows_the_bound_guild_and_when_it_was_checked` renders
+through `AdminCog._config_guilds` — the actual read side of `/view_config` — and
+asserts the officer-visible text. `_run_hourly_cycle` drives the real
+`TasksCog.auto_update` with the double injected at the httpx boundary, so every
+identity classification is made by production code reading a real vendor body.
+
+What that does NOT establish: that the command is reachable in Discord, correctly
+registered in the tree, or renders acceptably inside an embed's field limits. Those
+need the operator's own eyes on the first post-deploy cycle. The DEVOPS
+post-deploy verify step (stage 6: probe records + first-bind announcements) is the
+real gate here.
+
+## Wave: DELIVER / [REF] Quality Gates
+
+| Gate | Outcome |
+|---|---|
+| Roadmap review | 10 steps; scenario coverage cross-checked mechanically — 0 orphans, no step over the 8-scenario sizing threshold |
+| Per-step TDD | 3-phase canon (RED → GREEN → COMMIT), ADR-025 |
+| DES integrity | **`des-verify-integrity` exit 0 — all 10 steps have complete traces** |
+| Design compliance | No unauthorised new component. The 4 new modules are exactly DESIGN's 3 plus `bot/obs.py`, itself authorised by DEVOPS U1. |
+| Refactoring (L1–L6) | Applied per step by the crafter, batch-then-verify |
+| Mutation testing | **pre-release** per `CLAUDE.md` — not run as a per-feature gate. Ad-hoc mutation WAS used to prove non-vacuity on ~15 scenarios; see the pattern note. |
+| Architecture enforcement | AST chokepoint scan (0 offenders) + 6 `lint-imports` contracts + 2 `pytest-archon` rules |
+| Coexistence | `sqlite-backend` 100 passed / 1 xfailed after every single step |
+
+## Wave: DELIVER / [REF] Pre-requisites — status
+
+| # | DISTILL item | Status |
+|---|---|---|
+| 1 | `hypothesis` pinned | **Deliberately not done.** Its only consumer exercises the Slice 03 quarantine state machine; pinning now converts an honest skip into a failure. Do it with Slice 03. |
+| 2 | `import-linter`, `pytest-archon` pinned | **Done** (step 01-01) |
+| 3 | Fifth `lint-imports` contract | **Done**, plus a sixth pinning `bot.obs` as dependency-free |
+| 4 | Alembic revision, `down_revision = "0002"` | **Done** (step 02-01) |
+| 5 | `SCRAPCODE_TACTICUS_CONTRACT_KEY` | **Open — operator.** 2 scenarios skip without it, and they are the ONLY instruments that can detect Tacticus dropping `guildId`. |
+| 6 | Re-record `fixtures/guild_response_recorded.json` from a live response | **Open — operator.** Still the shape as documented. |
+
+## Wave: DELIVER / [REF] Open items carried out of the slice
+
+- **UD-6** — a 200 response with `guildId` but no `members` yields an empty roster.
+  Guarded in `PlayerService` (refuses the write, emits `player_list.refresh.refused`),
+  but **no acceptance scenario covers the shape**; it is held by unit tests only.
+  Belongs in the contract suite.
+- **UD-10** — the two acceptance suites share a `conftest` module name and silently
+  swap same-named constants in a combined run. Latent; worked around per-helper.
+- **Duplicated identity rendering** across `tasks_cog`, `admin_cog` and `update_cog`.
+  The right home is `bot/guild_keys.py`, which already owns `key_ref`.
+- **By-value `repo` imports** in `admin_cog` and `tasks_cog` (`from bot.guilds import
+  repo`) bypass the test-suite monkeypatch — the same shape as UD-3. Not currently
+  reachable from a test, but it is the production-tree-write hazard again.
+- `/update_leaderboard` and `/update_all` now cost one extra `/api/v1/guild` probe per
+  guild per invocation. Intended — that is where the manual-path mismatch report comes
+  from — but it is a real call-volume change on an operator-triggered path.
