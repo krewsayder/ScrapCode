@@ -1,6 +1,6 @@
 """Tacticus guild endpoint — identity + roster from a single read.
 
-RED scaffold created by DISTILL (Mandate 7). DELIVER implements it.
+The only module in the codebase that issues `GET /api/v1/guild`.
 
 This module owns the vocabulary the rest of the feature classifies against:
 `ProbeOutcome`, `KeyStatus` and `GuildIdentity` are defined HERE and imported
