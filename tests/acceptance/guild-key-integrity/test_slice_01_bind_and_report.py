@@ -194,11 +194,15 @@ async def test_second_verification_refreshes_the_date_without_announcing(
     assert WORD_BEARERS.name not in update_channel.text
 
 
-@RED
 @pytest.mark.driving_port
-def test_guild_list_shows_the_bound_guild_and_when_it_was_checked(sqlite_repo, env_vars):
+def test_guild_list_shows_the_bound_guild_and_when_it_was_checked(bound_guild, env_vars):
     """AC-001.2. Entered through the read side of /view_config, not through
-    a formatter helper — the AC is about what the officer sees."""
+    a formatter helper — the AC is about what the officer sees.
+
+    Takes `bound_guild`: the Gherkin says `Given a guild bound to
+    "【UNDV】Word Bearers" with tag "EUVQZ"`, and there is nothing to display
+    without it.
+    """
     embed = _config_guilds_embed()
     field = _guild_field(embed, GUILD_WB)
 
@@ -239,7 +243,6 @@ async def test_missing_identifier_is_unverifiable_and_never_falls_back_to_the_ta
     )
 
 
-@RED
 @pytest.mark.error
 @pytest.mark.parametrize(
     "drop_fields",
@@ -712,12 +715,36 @@ def _raid_entries() -> list[dict]:
 
 
 def _config_guilds_embed():
-    """Render the /view_config guilds embed through the admin cog."""
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """Render the /view_config guilds embed through the admin cog.
+
+    `AdminCog._config_guilds` is the real read side of `/view_config
+    config:guilds` — the AC is about what the officer sees, so the embed is
+    produced by the command's own renderer, not by a formatter helper living
+    here.
+
+    `__new__` for the same reason `_tasks_cog_posting_to` uses it: the read
+    side touches neither collaborator the constructor takes, and building a
+    bot and a player service it never asks for would only add ways for this
+    helper to fail for reasons the scenario is not about.
+    """
+    from bot.cogs.admin_cog import AdminCog
+
+    return AdminCog.__new__(AdminCog)._config_guilds(PROD_SERVER_ID)
 
 
 def _guild_field(embed, guild_id: str) -> str:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """The one embed field for `guild_id`, name and value together.
+
+    Both halves, because `/view_config` splits one guild's state across them
+    and a scenario asserting on "what the officer sees for this guild" should
+    not have to know which half a given token landed in.
+    """
+    fields = [f for f in embed.fields if f"`{guild_id}`" in f.name]
+    assert len(fields) == 1, (
+        f"the guilds embed has {len(fields)} fields for {guild_id!r}, expected "
+        f"exactly one: {[f.name for f in embed.fields]}"
+    )
+    return f"{fields[0].name}\n{fields[0].value}"
 
 
 def _hit_counts(repo) -> tuple[int, int]:

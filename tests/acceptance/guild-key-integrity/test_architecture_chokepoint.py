@@ -154,7 +154,6 @@ def _api_key_reads(tree: ast.AST) -> list[tuple[int, frozenset[str], bool]]:
 
 # ===========================================================================
 
-@RED
 def test_no_cog_or_service_reads_a_guild_api_key_directly():
     """DESIGN rule 1 — the rule the incident's blast radius depended on.
 

@@ -3,9 +3,11 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from bot import guild_keys
 from bot.guilds import (
     load_guilds,
     save_guilds,
+    load_guild_binding,
     load_live_leaderboards,
     save_live_leaderboards,
     load_player_list,
@@ -16,6 +18,21 @@ from bot.guilds import (
 from bot.embeds import guild_autocomplete, encounter_limit
 from bot.permissions import require_tier, check_tier
 from bot.services.chronicl3r.player_service import PlayerService
+from bot.services.tacticus.guild_client import GuildSnapshot
+
+# Shown in place of a display field the guild service did not send. Display
+# fields are never load-bearing (ADR-008 D1): a guild that has not set a tag
+# must still render, still bind, and never look like an error (AC-001.6).
+EM_DASH = "—"
+
+# The first EIGHT characters of an identifier. No more than this ever reaches
+# an embed, and no key value ever does — AC-005.4 / KPI-6 is 0 leaks.
+IDENTIFIER_PREFIX_LENGTH = 8
+
+# `identity_bound_at` is ISO-8601 UTC; the officer is asking "was this checked
+# recently", so the date answers it and the time only crowds a field that
+# already carries a name, a tag and an identifier.
+ISO_DATE_LENGTH = 10
 
 CONFIG_OPTIONS = [
     app_commands.Choice(name="guilds",        value="guilds"),
@@ -93,11 +110,23 @@ class AdminCog(commands.Cog):
         )
 
         try:
-            await self.player_service.refresh_guild(server_id, guild_id, api_key)
+            # One call does both jobs, which is why it is here and not in two
+            # places. The key was installed a line ago and has never been
+            # probed, so this is trust-on-first-use (DDD-8) at the cheapest
+            # possible moment — the operator learns what the key resolves to
+            # NOW instead of waiting up to an hour for the next cycle. The
+            # same probe returns the roster snapshot `refresh_guild` needs:
+            # `PlayerService` no longer fetches for itself (DDD-2) and takes a
+            # snapshot, never a key.
+            snapshot = await guild_keys.verify_and_resolve(
+                server_id, guild_id, enforce=False
+            )
+            await self.player_service.refresh_guild(server_id, guild_id, snapshot)
             await interaction.followup.send(
                 f"✅ Player list populated for **{name}**.\n"
                 f"• ID: `{guild_id}`\n"
-                f"• Leader role: {role.mention}",
+                f"• Leader role: {role.mention}\n"
+                f"• Bound to: {_registration_binding_line(snapshot)}",
                 ephemeral=True,
             )
         except Exception as e:
@@ -181,6 +210,7 @@ class AdminCog(commands.Cog):
             role_id      = guild_data.get("role_id")
             role_mention = f"<@&{role_id}>" if role_id else "❌ No role set"
             has_api_key  = "✅" if guild_data.get("api_key") else "❌ Missing"
+            binding      = load_guild_binding(server_id, guild_id)
             ping_channel = guild_data.get("notification_channel_id")
             ping_line    = f"<#{ping_channel}>" if ping_channel else "❌ Not set"
 
@@ -194,7 +224,7 @@ class AdminCog(commands.Cog):
                 name=f"{guild_name} • `{guild_id}`",
                 value=(
                     f"**Leader role:** {role_mention}\n"
-                    f"**API key:** {has_api_key}\n"
+                    f"**API key:** {has_api_key}{_binding_suffix(binding)}\n"
                     f"**Ping channel:** {ping_line}\n"
                     f"**Roster:** {roster_line}"
                 ),
@@ -308,8 +338,14 @@ class AdminCog(commands.Cog):
             return
 
         guild_name = guild_data["name"]
-        api_key    = guild_data.get("api_key")
-        if not api_key:
+
+        # THE chokepoint (ADR-008 D3). Season discovery needs the key string
+        # and nothing else, so it takes `active_key` — sync, storage-only, no
+        # probe (DDD-7). Asking Tacticus who this key belongs to just to learn
+        # a season number would double the call for an answer this command
+        # never reads.
+        credential = guild_keys.active_key(server_id, guild_id)
+        if credential is None:
             await interaction.followup.send(f"❌ Guild `{guild_id}` has no API key set.", ephemeral=True)
             return
 
@@ -317,7 +353,7 @@ class AdminCog(commands.Cog):
             async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.get(
                     "https://api.tacticusgame.com/api/v1/guildRaid",
-                    headers={"accept": "application/json", "X-API-KEY": api_key}
+                    headers={"accept": "application/json", "X-API-KEY": credential}
                 )
                 resp.raise_for_status()
                 season = resp.json().get("season")
@@ -383,13 +419,27 @@ class AdminCog(commands.Cog):
             await interaction.followup.send("❌ No guilds registered yet.", ephemeral=True)
             return
 
-        first_gd  = next(iter(guilds.values()))
-        first_key = first_gd.get("api_key")
+        # Same chokepoint, same reason as `set_live_leaderboard`: this reads a
+        # season number, never a roster, so it pays for no probe (DDD-7).
+        # Refusing here rather than sending an empty credential is deliberate —
+        # an unregistered key produces a 401 the officer then has to interpret,
+        # and the answer to "why did this fail" would be a Tacticus error
+        # message about a request this command should never have made.
+        first_guild_id = next(iter(guilds))
+        credential     = guild_keys.active_key(server_id, first_guild_id)
+        if credential is None:
+            await interaction.followup.send(
+                f"❌ `{first_guild_id}` has no usable key, so the current season "
+                f"could not be determined.",
+                ephemeral=True,
+            )
+            return
+
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.get(
                     "https://api.tacticusgame.com/api/v1/guildRaid",
-                    headers={"accept": "application/json", "X-API-KEY": first_key}
+                    headers={"accept": "application/json", "X-API-KEY": credential}
                 )
                 resp.raise_for_status()
                 season = resp.json().get("season")
@@ -511,6 +561,70 @@ class AdminCog(commands.Cog):
             ephemeral=True,
         )
 
+
+
+# ==========================================
+# Binding rendering (AC-001.2 / AC-005.2 / AC-005.4)
+# ==========================================
+
+def _binding_suffix(binding) -> str:
+    """What this guild's key resolves to, and when that was last verified.
+
+    Renders ALONGSIDE the API-key presence check, never instead of it. An
+    unbound guild returns the empty string, which is what keeps AC-005.3 true
+    by construction rather than by a second test on the key: a guild with no
+    key can never be bound — adoption requires a probe that SUCCEEDED — so the
+    `❌ Missing` rendering this feature must leave alone is reached by exactly
+    the path it always was, and a guild whose key has simply never been probed
+    yet reads the same as it did yesterday.
+    """
+    if binding.is_unbound:
+        return ""
+    return (
+        f" {_identity_label(binding)}"
+        f" • verified {_verified_on(binding.identity_bound_at)}"
+    )
+
+
+def _identity_label(binding) -> str:
+    """Name, tag and the first eight characters of the identifier.
+
+    All three, always. The comparison is on the identifier alone (DDD-1), but
+    an identifier tells an officer nothing about what to do next — and both
+    guilds in the 2026-07-28 incident carried the 【UNDV】 alliance prefix, so
+    the name alone does not tell them apart either. Never more than eight
+    characters of the identifier and never a key value: KPI-6 is 0 leaks.
+    """
+    identifier = binding.tacticus_guild_id or ""
+    return (
+        f"{binding.tacticus_guild_name or EM_DASH} "
+        f"【{binding.tacticus_guild_tag or EM_DASH}】 "
+        f"({identifier[:IDENTIFIER_PREFIX_LENGTH] or EM_DASH})"
+    )
+
+
+def _verified_on(identity_bound_at: str | None) -> str:
+    """The date half of an ISO-8601 UTC instant, or an em dash."""
+    return (identity_bound_at or EM_DASH)[:ISO_DATE_LENGTH]
+
+
+def _registration_binding_line(snapshot: GuildSnapshot) -> str:
+    """What `/register_guild` just bound the new key to.
+
+    A probe that produced no identity says so rather than reporting a bind
+    that did not happen: `verify_and_resolve` leaves the binding untouched on
+    UNVERIFIABLE, UNREACHABLE and DEAD, and a line claiming otherwise is the
+    reassuring-but-false signal this whole feature exists to remove.
+    """
+    if snapshot.identity is None:
+        return (
+            f"nothing yet — the key could not be verified "
+            f"({snapshot.outcome.value}). The hourly cycle retries."
+        )
+    return (
+        f"{snapshot.identity.name or EM_DASH} "
+        f"【{snapshot.identity.tag or EM_DASH}】 ({snapshot.identity.short})"
+    )
 
 
 async def setup_admin(bot: commands.Bot, player_service: PlayerService):
