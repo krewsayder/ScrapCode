@@ -214,7 +214,15 @@ class TasksCog(commands.Cog):
 
         if season is None:
             for guild_id in guilds:
-                cycle.skipped(guild_id, _unusable_key_reason(server_id, guild_id))
+                reason = _unusable_key_reason(server_id, guild_id)
+                if reason == "quarantined":
+                    # A persisting quarantine re-reports the drift and
+                    # rate-limits the alert even when the season cannot be
+                    # determined (e.g. the only guild is quarantined). The
+                    # mismatch RECORD is never suppressed (AC-002.6).
+                    guild_keys.re_report_persisting_drift(server_id, guild_id)
+                    guild_keys.record_quarantine_alert(server_id, guild_id, channel)
+                cycle.skipped(guild_id, reason)
             cycle.emit(season=None)
             print(f"[auto_update] Could not determine season for server {server_id}, skipping.")
             return
@@ -281,6 +289,13 @@ class TasksCog(commands.Cog):
         credential = guild_keys.active_key(server_id, guild_id)
         if credential is None:
             reason = _unusable_key_reason(server_id, guild_id)
+            if reason == "quarantined":
+                # A persisting quarantine: the alert decision is rate-limited
+                # here (not in verify_and_resolve, which is not called on the
+                # skip path). The mismatch RECORD is re-emitted so a repeat
+                # still reads as "the operator has not acted yet" (AC-002.6).
+                guild_keys.re_report_persisting_drift(server_id, guild_id)
+                guild_keys.record_quarantine_alert(server_id, guild_id, channel)
             cycle.skipped(guild_id, reason)
             return [f"⛔ **{guild_name}** — skipped, no usable key ({reason})."]
 
@@ -288,7 +303,27 @@ class TasksCog(commands.Cog):
         # (DDD-8) and a mismatch names the guild it WAS bound to, neither of
         # which is recoverable from the snapshot afterwards.
         bound_before = load_guild_binding(server_id, guild_id)
-        snapshot = await guild_keys.verify_and_resolve(server_id, guild_id, enforce=False)
+        try:
+            snapshot = await guild_keys.verify_and_resolve(
+                server_id, guild_id, enforce=True,
+            )
+        except guild_keys.GuildQuarantined as exc:
+            # The raise happens BEFORE any further request (DDD-2/5): no
+            # roster fetch, no raid fetch, zero writes. The summary line names
+            # both identities so the operator can act without re-reading the
+            # binding. The FIRST alert of a quarantine always fires —
+            # `record_quarantine_alert` sets `last_alerted_at` and the 24h
+            # clock starts here.
+            line = (
+                f"⚠️ **{guild_name}** — key mismatch: bound to "
+                f"{_identity_label(exc.bound.name, exc.bound.tag, exc.bound.uuid)} "
+                f"but the key resolves to "
+                f"{_identity_label(exc.observed.name, exc.observed.tag, exc.observed.uuid)}. "
+                f"⛔ Quarantined — run /update_guild_key to install the correct key."
+            )
+            guild_keys.record_quarantine_alert(server_id, guild_id, channel)
+            cycle.skipped(guild_id, "quarantined")
+            return [line]
 
         await self._announce_adoption(guild_name, bound_before, snapshot, channel)
         results = self._probe_report(server_id, guild_id, guild_name,

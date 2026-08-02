@@ -30,7 +30,6 @@ RED = pytest.mark.skip(reason="RED scaffold — enable one at a time in DELIVER"
 # US-004 — enforce
 # ===========================================================================
 
-@RED
 @pytest.mark.kpi
 @pytest.mark.driving_port
 async def test_a_drifted_guild_is_quarantined_with_both_identities_recorded(
@@ -113,7 +112,6 @@ async def test_entering_quarantine_alerts_both_channels(
     assert key_events.named("guild.key.alert.sent")
 
 
-@RED
 @pytest.mark.error
 async def test_a_persisting_quarantine_alerts_at_most_once_a_day(
     sqlite_repo, drifted_guild, update_channel, key_events, monkeypatch
@@ -227,7 +225,6 @@ async def test_a_healthy_guild_beside_a_quarantined_one_updates_normally(
     assert cycle.guilds_skipped == 1
 
 
-@RED
 @pytest.mark.error
 @pytest.mark.kpi
 @pytest.mark.parametrize("failure", list(TransportFailure), ids=lambda f: f.value)
@@ -244,7 +241,6 @@ async def test_an_outage_never_quarantines_anything(
     assert _quarantined_guild_ids() == []
 
 
-@RED
 @pytest.mark.error
 @pytest.mark.kpi
 async def test_a_missing_identifier_never_quarantines_anything(
@@ -339,72 +335,306 @@ class _QuarantinedError(Exception):
 
 
 async def _run_hourly_cycle(service, channel, *, ping_channel=None) -> None:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """Drive one `auto_update` tick through the production composition root.
+
+    Replicated from `test_slice_01_bind_and_report.py` (do NOT cross-import —
+    see open item UD-10 about same-name `conftest` constants colliding). The
+    double goes in at the Tacticus transport, BELOW
+    `bot.services.tacticus.guild_client`, so every classification a scenario
+    asserts on is made by production code reading a real vendor body.
+    """
+    _register_the_guilds_the_scenario_programmed(service)
+    cog = _tasks_cog_posting_to(channel)
+    with _tacticus_answered_by(service):
+        await cog.auto_update()
+
+
+def _register_the_guilds_the_scenario_programmed(guild_service) -> None:
+    """Register exactly the guilds whose key the scenario programmed an answer for.
+
+    Verbatim from `test_slice_01_bind_and_report.py`. Idempotent — several
+    scenarios run multiple cycles, and `save_guilds` leaves binding state
+    alone by construction (DDD-4 keeps it in its own table).
+    """
+    from bot.guilds import save_guilds
+
+    programmed = set(guild_service._by_key)
+    if guild_service._default is not None:
+        programmed = set(_GUILD_REGISTRY)
+
+    save_guilds(PROD_SERVER_ID, {
+        _GUILD_REGISTRY[key][0]: _GUILD_REGISTRY[key][1]
+        for key in _GUILD_REGISTRY
+        if key in programmed
+    })
+
+
+# Word Bearers FIRST: `auto_update` derives the season from the first guild
+# that can answer, and the season SPOF only misbehaves in that ordering.
+_GUILD_REGISTRY: dict[str, tuple[str, dict]] = {
+    "wb-key": ("word_bearers", {
+        "name": "Word Bearers", "api_key": "wb-key", "role_id": 1,
+        "notification_channel_id": 4242, "member_role_ids": [],
+    }),
+    "dm-key": ("dark_mechanicum", {
+        "name": "Dark Mechanicum", "api_key": "dm-key", "role_id": 2,
+        "notification_channel_id": None, "member_role_ids": [],
+    }),
+}
+
+_CANONICAL_IDENTITY = {"word_bearers": WORD_BEARERS, "dark_mechanicum": DARK_MECHANICUM}
+
+
+def _tasks_cog_posting_to(channel):
+    """The real cog, minus the scheduler (verbatim from slice 01)."""
+    from bot.cogs.tasks_cog import TasksCog
+    from bot.services.chronicl3r.player_service import PlayerService
+
+    cog = TasksCog.__new__(TasksCog)
+    cog.bot = _FakeBot(channel)
+    cog.player_service = PlayerService(_FakeChroniclerClient())
+    return cog
+
+
+class _FakeBot:
+    """`UPDATE_CHANNEL_ID` is 0 under test, so the single global update channel
+    is whatever the scenario passed in (verbatim from slice 01)."""
+
+    def __init__(self, channel) -> None:
+        self._channel = channel
+
+    def get_channel(self, channel_id: int):
+        return self._channel
+
+
+class _FakeChroniclerClient:
+    """Chronicler is a paid external service — faked (verbatim from slice 01)."""
+
+    def register_user(self, tacticus_user_id: str) -> dict:
+        return self.get_profile(tacticus_user_id)
+
+    def get_profile(self, tacticus_user_id: str) -> dict:
+        assert tacticus_user_id, "chronicl3r rejects an empty tacticus_user_id"
+        return {
+            "tacticus_user_id": tacticus_user_id,
+            "tacticus_display_nm": f"player-{tacticus_user_id}",
+        }
+
+
+from contextlib import contextmanager  # noqa: E402 — helpers-only dependency
+
+
+@contextmanager
+def _tacticus_answered_by(guild_service):
+    """Answer every Tacticus call from the scenario's programmed doubles
+    (verbatim from slice 01)."""
+    import httpx
+
+    real_client = httpx.AsyncClient
+    httpx.AsyncClient = lambda *args, **kwargs: _RecordedTacticus(guild_service)
+    try:
+        yield
+    finally:
+        httpx.AsyncClient = real_client
+
+
+class _RecordedTacticus:
+    """An `httpx.AsyncClient` answering from the programmed doubles
+    (verbatim from slice 01)."""
+
+    def __init__(self, guild_service) -> None:
+        self._guild_service = guild_service
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def get(self, url: str, headers: dict | None = None, **kwargs):
+        import httpx
+        status, body = _tacticus_body(
+            self._guild_service, url, (headers or {}).get("X-API-KEY", "")
+        )
+        return httpx.Response(status, json=body, request=httpx.Request("GET", url))
+
+
+def _tacticus_body(guild_service, url: str, credential: str) -> tuple[int, dict]:
+    from bot.cogs.tasks_cog import TACTICUS_CURRENT_RAID, TACTICUS_RAID_URL
+    from bot.services.tacticus.guild_client import TACTICUS_GUILD_URL
+    from conftest import SEASON
+
+    if url == TACTICUS_GUILD_URL:
+        answer = guild_service.answer_for(credential)
+        return answer.status, answer.payload()
+    if url == TACTICUS_RAID_URL.format(season=SEASON):
+        return 200, {"entries": _raid_entries()}
+    if url == TACTICUS_CURRENT_RAID:
+        return 200, {"season": SEASON}
+    raise AssertionError(f"the loop called an endpoint no scenario declared: {url}")
+
+
+def _raid_entries() -> list[dict]:
+    """One battle hit and one bomb hit, in raw vendor shape (verbatim)."""
+    common = {
+        "unitId": "Avatar", "encounterIndex": 0, "rarity": "Legendary",
+        "set": 0, "userId": "u1", "heroDetails": [{"unitId": "Aethana"}],
+        "machineOfWarDetails": None,
+    }
+    return [
+        {**common, "damageType": "Battle", "encounterType": "Battle",
+         "damageDealt": 12000, "completedOn": "2026-08-01T10:00:00Z"},
+        {**common, "damageType": "Bomb", "encounterType": "Bomb",
+         "damageDealt": 3400, "completedOn": "2026-08-01T10:05:00Z"},
+    ]
 
 
 async def _exercise_site(site: KeyConsumptionSite, guild_id: str, *, service) -> None:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    raise AssertionError("Not yet implemented — RED scaffold for 05-02")
+
+
+# ---------------------------------------------------------------------------
+# Slice-03-specific helpers
+# ---------------------------------------------------------------------------
+
+from collections import namedtuple  # noqa: E402 — helpers-only dependency
+
+_RowCounts = namedtuple("_RowCounts", ["players", "former_players", "battle_hits", "bomb_hits"])
 
 
 def _row_counts(repo, guild_id: str):
-    """Namedtuple-ish: .players, .former_players, .battle_hits, .bomb_hits."""
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """Everything the 2026-07-28 incident corrupted, in one comparable value.
+
+    Battle hits, bomb hits AND players together: the incident put 30/30 battle
+    rows, 20/20 bomb rows and 60 of 67 player rows on the wrong guild.
+    """
+    from conftest import SEASON
+    from bot.guilds import load_player_list
+
+    roster = load_player_list(PROD_SERVER_ID, guild_id)
+    players = roster.get("players", {})
+    return _RowCounts(
+        players=len(players),
+        former_players=sum(1 for p in players.values() if p.get("is_former")),
+        battle_hits=_entry_total(repo.load_battle_hits(PROD_SERVER_ID, guild_id, SEASON)),
+        bomb_hits=_entry_total(repo.load_bomb_hits(PROD_SERVER_ID, guild_id, SEASON)),
+    )
+
+
+def _entry_total(hits: dict) -> int:
+    return sum(
+        len(entries)
+        for encounters in hits.get("boss_hits", {}).values()
+        for tiers in encounters.values()
+        for entries in tiers.values()
+    )
 
 
 def _quarantine(guild_id: str, *, reason: str) -> None:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """Place a guild into quarantine directly, for a scenario's `Given`."""
+    from bot.guilds import load_guild_binding, save_guild_binding
+    from bot.repository import GuildBinding
+    from bot.services.tacticus.guild_client import KeyStatus
 
-
-def _quarantine_every_guild() -> None:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    binding = load_guild_binding(PROD_SERVER_ID, guild_id)
+    save_guild_binding(PROD_SERVER_ID, guild_id, GuildBinding(
+        tacticus_guild_id=binding.tacticus_guild_id,
+        tacticus_guild_tag=binding.tacticus_guild_tag,
+        tacticus_guild_name=binding.tacticus_guild_name,
+        identity_bound_at=binding.identity_bound_at,
+        key_status=KeyStatus.QUARANTINED.value,
+        quarantine_reason=reason,
+        quarantined_at="2026-07-31T04:00:00Z",
+    ))
 
 
 def _quarantined_guild_ids() -> list[str]:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """Every guild currently in quarantine, cluster-wide."""
+    from bot.guilds import load_guilds
+    from bot.guilds import load_guild_binding
+    from bot.services.tacticus.guild_client import KeyStatus
 
-
-def _register_two_guilds_quarantined_first(repo) -> None:
-    raise AssertionError("Not yet implemented — RED scaffold")
-
-
-def _register_guild_without_key(guild_id: str) -> None:
-    raise AssertionError("Not yet implemented — RED scaffold")
-
-
-def _guild_ids_in_order() -> list[str]:
-    raise AssertionError("Not yet implemented — RED scaffold")
-
-
-def _config_guilds_embed():
-    raise AssertionError("Not yet implemented — RED scaffold")
-
-
-def _guild_field(embed, guild_id: str) -> str:
-    raise AssertionError("Not yet implemented — RED scaffold")
-
-
-def _embed_text(embed) -> str:
-    raise AssertionError("Not yet implemented — RED scaffold")
-
-
-def _put_guild_in_state(guild_id: str, state: str) -> None:
-    raise AssertionError("Not yet implemented — RED scaffold")
-
-
-def _stored_key_plaintext() -> str:
-    raise AssertionError("Not yet implemented — RED scaffold")
-
-
-def _contains_uuid(text: str) -> bool:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    return [
+        guild_id
+        for guild_id in load_guilds(PROD_SERVER_ID)
+        if load_guild_binding(PROD_SERVER_ID, guild_id).key_status
+        == KeyStatus.QUARANTINED.value
+    ]
 
 
 def _is_iso8601_utc(value: str) -> bool:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """Confirm `value` is in the `YYYY-MM-DDTHH:MM:SS.mmmZ` shape `_utc_now`
+    produces and `battle_hits.completed_on` carries — KPI-2 compares them AS
+    STRINGS, so a shape mismatch silently returns the wrong result set.
+    """
+    import re
+    return bool(re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", value or "",
+    ))
 
 
 def _advance_clock(monkeypatch, *, hours: int) -> None:
-    raise AssertionError("Not yet implemented — RED scaffold")
+    """Advance the time source `record_quarantine_alert` and `quarantine` use
+    for the 24h comparison. Patches `bot.guild_keys._utc_now` so every
+    timestamp emitted this cycle advances consistently.
+    """
+    import bot.guild_keys as gk
+    from datetime import datetime, timezone
+
+    base = datetime(2026, 8, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+    def _fixed_now() -> str:
+        now = base + timedelta(hours=hours)
+        return f"{now.strftime('%Y-%m-%dT%H:%M:%S')}.{now.microsecond // 1000:03d}Z"
+
+    monkeypatch.setattr(gk, "_utc_now", _fixed_now)
+
+
+from datetime import timedelta  # noqa: E402 — helpers-only dependency
+
+
+# ---------------------------------------------------------------------------
+# RED scaffolds for later steps (05-02 / 05-03 / 05-04 / 05-05)
+# ---------------------------------------------------------------------------
+
+def _quarantine_every_guild() -> None:
+    raise AssertionError("Not yet implemented — RED scaffold for 05-04")
+
+
+def _register_two_guilds_quarantined_first(repo) -> None:
+    raise AssertionError("Not yet implemented — RED scaffold for 05-04")
+
+
+def _register_guild_without_key(guild_id: str) -> None:
+    raise AssertionError("Not yet implemented — RED scaffold for 05-05")
+
+
+def _guild_ids_in_order() -> list[str]:
+    raise AssertionError("Not yet implemented — RED scaffold for 05-04")
+
+
+def _config_guilds_embed():
+    raise AssertionError("Not yet implemented — RED scaffold for 05-05")
+
+
+def _guild_field(embed, guild_id: str) -> str:
+    raise AssertionError("Not yet implemented — RED scaffold for 05-05")
+
+
+def _embed_text(embed) -> str:
+    raise AssertionError("Not yet implemented — RED scaffold for 05-05")
+
+
+def _put_guild_in_state(guild_id: str, state: str) -> None:
+    raise AssertionError("Not yet implemented — RED scaffold for 05-05")
+
+
+def _stored_key_plaintext() -> str:
+    raise AssertionError("Not yet implemented — RED scaffold for 05-05")
+
+
+def _contains_uuid(text: str) -> bool:
+    raise AssertionError("Not yet implemented — RED scaffold for 05-05")
 
 
 def _transport_failure(failure: TransportFailure) -> GuildServiceResponse:

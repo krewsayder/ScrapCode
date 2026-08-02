@@ -30,7 +30,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from bot.guilds import (
     load_guild_binding,
@@ -101,13 +101,14 @@ async def verify_and_resolve(
     the stored binding byte-identical. Refreshing `identity_bound_at` on a
     check that never happened would report a verification date for a
     verification nobody performed.
-    """
-    if enforce:
-        raise NotImplementedError(
-            "enforcement lands in Slice 03, after /update_guild_key ships the "
-            "recovery path in Slice 02 (ADR-008 D3)"
-        )
 
+    Enforcement (Slice 03, `enforce=True`) blocks ONLY a mismatch: the guild
+    is quarantined and `GuildQuarantined` is raised BEFORE any further request
+    is made (DDD-2/5). UNREACHABLE, UNVERIFIABLE and DEAD each leave
+    `key_status` untouched (DDD-6) — an outage must not quarantine a trusted
+    key, and an unverifiable one is still trusted (only the check is offline),
+    so those paths still return a snapshot and the caller still ingests.
+    """
     api_key = _registered_key(discord_server_id, guild_id)
     context = _KeyContext(discord_server_id, guild_id, _key_ref_for(api_key))
     if not api_key:
@@ -116,7 +117,7 @@ async def verify_and_resolve(
     snapshot = await guild_client.fetch_guild_snapshot(api_key)
     if snapshot.identity is None:
         return _report_failed_probe(context, snapshot)
-    return _resolve_identity(context, snapshot)
+    return _resolve_identity(context, snapshot, enforce=enforce)
 
 
 def active_key(discord_server_id: int, guild_id: str) -> str | None:
@@ -152,11 +153,22 @@ def quarantine(
     stopped. Nothing in Slice 01 calls this, and `verify_and_resolve` refuses
     `enforce=True` for the same reason.
     """
-    raise NotImplementedError(
-        "quarantine() lands in Slice 03. Slice 01 reports identity drift "
-        "without blocking (ADR-008 D3) because /update_guild_key — the only "
-        "way out of quarantine — ships in Slice 02."
-    )
+    binding = load_guild_binding(discord_server_id, guild_id)
+    already_quarantined = binding.key_status == KeyStatus.QUARANTINED.value
+    reason = _quarantine_reason(bound, observed)
+    updates: dict = {
+        "key_status": KeyStatus.QUARANTINED.value,
+        "quarantine_reason": reason,
+    }
+    if not already_quarantined:
+        updates["quarantined_at"] = _utc_now()
+    save_guild_binding(discord_server_id, guild_id, replace(binding, **updates))
+    if not already_quarantined:
+        context = _KeyContext(discord_server_id, guild_id, _key_ref_for(_registered_key(discord_server_id, guild_id)))
+        context.emit(
+            logging.ERROR, "guild.key.quarantined",
+            reason=reason, quarantined_at=updates["quarantined_at"],
+        )
 
 
 def release(discord_server_id: int, guild_id: str) -> None:
@@ -405,9 +417,17 @@ class _KeyContext:
 
 
 def _resolve_identity(
-    context: _KeyContext, snapshot: GuildSnapshot
+    context: _KeyContext, snapshot: GuildSnapshot, *, enforce: bool = False,
 ) -> GuildSnapshot:
-    """200 with an identity: adopt it, refresh it, or report the drift."""
+    """200 with an identity: adopt it, refresh it, or report the drift.
+
+    Under `enforce=True` a mismatch quarantines the guild and raises
+    `GuildQuarantined` BEFORE returning — the caller never receives the
+    snapshot, so no further request is made with the drifted key (DDD-2/5).
+    The mismatch RECORD is still emitted first (`_report_mismatch`), because it
+    is the KPI-1 operand and the alert's justification; only the ALERT is
+    rate-limited, never the record.
+    """
     observed: GuildIdentity = snapshot.identity
     binding = load_guild_binding(context.server_id, context.guild_id)
 
@@ -416,11 +436,32 @@ def _resolve_identity(
 
     bound = GuildIdentity(uuid=binding.tacticus_guild_id)
     if not bound.matches(observed):
-        return _report_mismatch(context, snapshot, binding, observed)
+        snapshot = _report_mismatch(context, snapshot, binding, observed)
+        if enforce:
+            _enforce_mismatch(context, binding, observed)
+        return snapshot
 
     _rebind(context, binding, observed)
     context.emit_probe_ok(observed)
     return snapshot
+
+
+def _enforce_mismatch(
+    context: _KeyContext, binding, observed: GuildIdentity,
+) -> None:
+    """Quarantine the guild, then raise — never returns.
+
+    The bound identity is reconstructed from the binding (uuid + display
+    fields) so `GuildQuarantined` can carry both identities to the caller's
+    catch handler without re-reading the binding after the write.
+    """
+    bound = GuildIdentity(
+        uuid=binding.tacticus_guild_id,
+        tag=binding.tacticus_guild_tag,
+        name=binding.tacticus_guild_name,
+    )
+    quarantine(context.server_id, context.guild_id, bound=bound, observed=observed)
+    raise GuildQuarantined(context.guild_id, bound=bound, observed=observed)
 
 
 def _adopt(
@@ -577,6 +618,104 @@ def _key_ref_for(api_key: str) -> str:
         return UNKNOWN_KEY_REF
     from bot.db.secrets import api_key_hmac
     return key_ref(api_key_hmac(api_key, fernet_key))
+
+
+def _quarantine_reason(bound: GuildIdentity, observed: GuildIdentity) -> str:
+    """Both identities, in a form an operator can act on a week later.
+
+    Carries both tags (the operator-facing discriminator) and embeds the
+    observed uuid after a parseable marker so a persisting quarantine can
+    re-report the drift from the stored binding alone, without a second
+    probe (the skip path must not request the other guild's data again).
+    """
+    return (
+        f"key drift: bound 【{bound.tag or '—'}】 {bound.name or '—'} "
+        f"but resolves to 【{observed.tag or '—'}】 {observed.name or '—'} "
+        f"— observed={observed.uuid}"
+    )
+
+
+def re_report_persisting_drift(discord_server_id: int, guild_id: str) -> None:
+    """Re-emit `guild.key.mismatch` for a quarantine that persists.
+
+    Called from the cog's skip path (a quarantined guild whose
+    `active_key` returned None). The mismatch RECORD is never suppressed —
+    only the ALERT is rate-limited (AC-002.6 / the persistent-mismatch
+    scenario). The drift is reconstructed from the stored binding +
+    `quarantine_reason`; no second request is made.
+    """
+    binding = load_guild_binding(discord_server_id, guild_id)
+    observed_uuid = _observed_uuid_from_reason(binding.quarantine_reason or "")
+    context = _KeyContext(
+        discord_server_id, guild_id,
+        _key_ref_for(_registered_key(discord_server_id, guild_id)),
+    )
+    context.emit(
+        logging.ERROR, "guild.key.mismatch",
+        bound_id=binding.tacticus_guild_id, observed_id=observed_uuid,
+        observed_tag=None, observed_name=None,
+    )
+
+
+def _observed_uuid_from_reason(reason: str) -> str | None:
+    """Extract the observed uuid embedded by `_quarantine_reason`."""
+    marker = "— observed="
+    if marker not in reason:
+        return None
+    return reason.split(marker, 1)[1].strip() or None
+
+
+def record_quarantine_alert(
+    discord_server_id: int, guild_id: str, channel,
+) -> str | None:
+    """One alert per guild per `ALERT_SUPPRESSION_HOURS` (24h) while a
+    quarantine persists.
+
+    The single decision point for BOTH the first quarantine (called from the
+    cog's catch handler) and a persisting quarantine (called from the cog's
+    skip path). Returns the line to post when the alert fires, or None when
+    it is suppressed (the suppressed alert is RECORDED, not dropped, so the
+    log can distinguish "we suppressed 23" from "the loop stopped").
+
+    The FIRST alert of a quarantine always fires: `release()` resets
+    `last_alerted_at` to None, so a fresh quarantine starts the clock clean.
+    """
+    binding = load_guild_binding(discord_server_id, guild_id)
+    key_ref = _key_ref_for(_registered_key(discord_server_id, guild_id))
+    now = _utc_now()
+    now_dt = _parse_utc(now)
+    last = binding.last_alerted_at
+    channel_id = getattr(channel, "id", None)
+
+    if last is not None:
+        last_dt = _parse_utc(last)
+        if (now_dt - last_dt) < timedelta(hours=ALERT_SUPPRESSION_HOURS):
+            emit_structured(
+                logger, logging.DEBUG, "guild.key.alert.suppressed",
+                ts=now, server_id=discord_server_id, guild_id=guild_id,
+                key_ref=key_ref, last_alerted_at=last, suppressed=True,
+                channel_id=channel_id,
+            )
+            return None
+
+    emit_structured(
+        logger, logging.INFO, "guild.key.alert.sent",
+        ts=now, server_id=discord_server_id, guild_id=guild_id,
+        key_ref=key_ref, channel_id=channel_id, suppressed_until=None,
+    )
+    save_guild_binding(discord_server_id, guild_id, replace(binding, last_alerted_at=now))
+    return None
+
+
+def _parse_utc(iso: str) -> datetime:
+    """Parse an `_utc_now`-shaped ISO-8601 UTC string back to a datetime.
+
+    The 24h suppression boundary needs a real delta, not a string compare, so
+    `record_quarantine_alert` parses `last_alerted_at` with this. Accepts the
+    millisecond-precision shape `_utc_now` produces (`...%Y-%m-%dT%H:%M:%S.%fZ`);
+    `%f` in `strptime` takes 1-6 digits, so the 3-digit millisecond form parses.
+    """
+    return datetime.strptime(iso, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
 
 
 def _utc_now() -> str:

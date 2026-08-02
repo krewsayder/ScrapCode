@@ -1871,6 +1871,51 @@ other suite's value. Worth a dedicated fix (unique module names, or a shared
 Note this became reachable only once UD-5 made the combined invocation work at
 all. It was always latent; the gate that would have surfaced it had never run.
 
+### UD-11 — 05-01 flips the caller to enforce=True and inverts the slice-01 intermediate-state assertions
+
+**Found:** step 05-01. **Operator decision, 2026-08-02 — authorised scope
+extension.**
+
+05-01's scenarios run the real `auto_update` and require enforcement on, so
+05-01 necessarily flips `tasks_cog._update_one_guild` from `enforce=False` to
+`enforce=True`. This inverts every assertion that encoded the Slice 01
+non-blocking intermediate state, because enforcement is now the live
+behaviour and the non-blocking form is the historical one.
+
+Two tests asserted that intermediate state and were inverted in this step
+rather than deleted (deleting would erase the visible record that the
+intermediate state shipped and soaked for the D11 7-day window):
+
+- `test_slice_01_still_ingests_on_a_mismatch` (acceptance,
+  `test_slice_01_bind_and_report.py`) — renamed to
+  `test_a_mismatch_quarantines_and_blocks_ingest`; asserts the BLOCKING state
+  (`_hit_counts == before`, `_is_quarantined`). The only acceptance-test body
+  edited in this step, per the operator decision.
+- `test_asking_for_enforcement_fails_loudly_instead_of_pretending` (unit,
+  `tests/unit/test_guild_keys_policy.py`) — renamed to
+  `test_enforcement_quarantines_on_mismatch_and_raises`; asserts
+  `GuildQuarantined` is raised and the binding is quarantined. This is the
+  unit-level analog of the same inversion: it encoded `enforce=True` raising
+  `NotImplementedError`, which the enforcement implementation removes by
+  design. The operator decision's rationale covers it; leaving it red would
+  violate the 100% green bar, and re-implementing `NotImplementedError`
+  defeats the step.
+
+The scope extension also touched `bot/cogs/tasks_cog.py` (the caller flip +
+`GuildQuarantined` catch handler + the 24h re-alert on the skip path), which
+is not in the roadmap's `files_to_modify` for 05-01 but is required because
+05-01's scenarios drive the real `auto_update`. The catch handler posts a
+summary line naming both identities (so `test_drift_is_reported_naming_both_
+guilds` and `test_mismatch_appears_in_the_hourly_summary` stay green) and
+calls `record_quarantine_alert` so the first alert and the 24h counter share
+one decision point with the persisting-quarantine skip path.
+
+The persisting-mismatch record (`guild.key.mismatch`) is re-emitted on the
+skip path (both the per-guild skip and the `season is None` whole-server
+skip) so `test_a_persistent_mismatch_is_reported_every_cycle_in_this_slice`
+stays green — the mismatch RECORD is never suppressed, only the ALERT is
+rate-limited.
+
 ## Wave: DELIVER / [REF] The pattern behind six of the ten findings
 
 Six of the ten items above (UD-1, UD-2, UD-3, UD-4, UD-7, UD-8, UD-9) are

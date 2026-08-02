@@ -366,20 +366,26 @@ async def test_drift_is_reported_naming_both_guilds(
         assert token in text, f"the mismatch report omits {token!r}"
 
 
-async def test_slice_01_still_ingests_on_a_mismatch(
+async def test_a_mismatch_quarantines_and_blocks_ingest(
     sqlite_repo, drifted_guild, update_channel
 ):
-    """AC-002.2. Deliberately asserts the non-blocking intermediate state.
+    """AC-002.2, INVERTED in DELIVER step 05-01 (2026-08-02).
 
-    This test is expected to be INVERTED by Slice 03, not deleted — the
-    inversion is the visible record that enforcement turned on. Deleting it
-    instead would leave no evidence the intermediate state ever shipped.
+    This scenario originally asserted the Slice 01 non-blocking intermediate
+    state ("data is still written, guild is not quarantined"). The operator
+    decision of 2026-08-02 flipped `auto_update` to `enforce=True` in step 05-01
+    because 05-01's scenarios run the real `auto_update` and require
+    enforcement on, which necessarily inverts this assertion. The inversion is
+    the visible record that enforcement turned on: deleting it instead would
+    leave no evidence the intermediate state ever shipped. The historical
+    (pre-inversion) claim is preserved here for audit: the non-blocking form
+    shipped in Slice 01 and soaked in production for the D11 7-day window.
     """
     before = _hit_counts(sqlite_repo)
     await _run_hourly_cycle(drifted_guild, update_channel)
 
-    assert _hit_counts(sqlite_repo) != before
-    assert not _is_quarantined(GUILD_WB)
+    assert _hit_counts(sqlite_repo) == before
+    assert _is_quarantined(GUILD_WB)
 
 
 @pytest.mark.driving_port

@@ -604,19 +604,30 @@ async def test_the_key_ref_is_stable_across_every_record_of_one_probe(
 
 
 # ===========================================================================
-# Enforcement is Slice 03 — and says so out loud
+# Enforcement (Slice 03) — quarantines on mismatch, before any further request
 # ===========================================================================
 
-async def test_asking_for_enforcement_fails_loudly_instead_of_pretending(
+async def test_enforcement_quarantines_on_mismatch_and_raises(
     bound_guild, guild_service
 ):
-    """`enforce=True` is Slice 03. Shipping the block before the recovery path
-    (`/update_guild_key`, Slice 02) would make the first quarantine
-    unrecoverable without an SSH session (ADR-008 D3). A caller that asks for
-    protection this slice cannot give must be told, not quietly served an
-    unenforced result."""
-    from bot.guild_keys import verify_and_resolve
+    """INVERTED in DELIVER step 05-01 (2026-08-02).
+
+    Originally asserted that `enforce=True` raised `NotImplementedError`
+    because the block could not ship before `/update_guild_key` (Slice 02)
+    provided the only exit from quarantine (ADR-008 D3). The operator decision
+    of 2026-08-02 turned enforcement on in step 05-01, so this test now asserts
+    the BLOCKING state: a mismatch under `enforce=True` quarantines the guild
+    and raises `GuildQuarantined` BEFORE any further request. The non-blocking
+    intermediate state shipped in Slice 01 and soaked for the D11 7-day window.
+    """
+    from bot.guilds import load_guild_binding
+    from bot.guild_keys import GuildQuarantined, verify_and_resolve
 
     guild_service.returns_ok(DARK_MECHANICUM)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(GuildQuarantined):
         await verify_and_resolve(SERVER_ID, GUILD_WB, enforce=True)
+
+    binding = load_guild_binding(SERVER_ID, GUILD_WB)
+    assert binding.key_status == KeyStatus.QUARANTINED.value
+    assert WORD_BEARERS.tag in (binding.quarantine_reason or "")
+    assert DARK_MECHANICUM.tag in (binding.quarantine_reason or "")
