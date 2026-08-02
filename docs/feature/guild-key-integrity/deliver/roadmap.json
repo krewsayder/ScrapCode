@@ -2,15 +2,17 @@
   "roadmap": {
     "project_id": "guild-key-integrity",
     "created_at": "2026-08-01",
-    "total_steps": 10
+    "total_steps": 17
   },
-  "slice_scope": "Slice 01 only — US-006 (binding store), US-001 (bind and show), US-002 (report drift). Slices 02 and 03 are separate deploys per DEVOPS D6/D11; the 7-day soak between 01 and 03 is the empirical basis for KPI-4.",
+  "slice_scope": "ALL THREE SLICES, shipped as one guardrail. Re-scoped 2026-08-01 by operator decision: Slice 01 alone detects drift and still writes the contaminated roster, which does not meet the requirement (\"I don't want to just detect something but not act on it because I'd have the same issue again\"). Slices 01-03 now deploy together.",
+  "scope_change_note": "The DEVOPS D11 7-day soak between Slice 01 and Slice 03 was premised on a risk that no longer exists. Its purpose was to catch a binding adopted from an ALREADY-DRIFTED key at deploy time — trust-on-first-use would cement the wrong identity behind a green tick. The operator has remediated the incident and every registered key now resolves to its correct guild, so the first probe binds correctly by construction. The residual risk the soak addressed (intermittent drift) is separately bounded by DDD-6: an outage classifies UNREACHABLE and a dropped guildId classifies UNVERIFIABLE, neither of which quarantines. Only a well-formed 200 returning a DIFFERENT guildId does. Operator must still eyeball the first-bind announcements on the first post-deploy cycle.",
   "non_goals": [
-    "Quarantine enforcement (Slice 03) — verify_and_resolve ships with enforce=False and no caller passes True",
-    "/update_guild_key (Slice 02)",
-    "hypothesis pin — its only consumer, tier_b, exercises the Slice 03 state machine; pinning it now converts an honest skip into a red",
-    "player_registrations.api_key — out of scope per DISCUSS"
+    "player_registrations.api_key — out of scope per DISCUSS; /registration validate_keys covers liveness there",
+    "Contaminated-data remediation — no purge command, no is_former cleanup (DISCUSS Out of Scope)",
+    "Alerting outside Discord",
+    "Automatic key recovery — a quarantined guild stays quarantined until a human installs a key"
   ],
+  "build_order_constraint": "Slice 02 MUST be implemented before Slice 03 (DISCUSS D3 / ADR-008 D3). /update_guild_key is the ONLY exit from quarantine. Building enforcement first means the first quarantine is unrecoverable without SSH, with updates also stopped — worse than the bug being fixed. This constraint governs BUILD order; it no longer implies separate deploys.",
   "validation": {
     "status": "approved",
     "gate": "orchestrator automated gate 2026-08-01: AC coupling clean, decomposition ratio 9 steps / 15 files = 0.60, no identical patterns, no validation-only steps, all ids match ^\\d{2}-\\d{2}$, every step carries test_file + scenario_name"
@@ -205,6 +207,138 @@
           "scenario_name": "test_clean_adopts_every_identity_once, test_bound_matching_is_completely_silent, test_unverifiable_alerts_loudly_and_blocks_nothing, test_tacticus_unreachable_leaves_every_binding_byte_identical, test_dead_key_is_reported_not_quarantined, test_json_backend_rollback_goes_inert_without_raising, test_environment_names_match_the_devops_artifact, test_the_player_key_exemptions_still_describe_real_code",
           "files_to_modify": ["bot/guild_keys.py", "bot/cogs/tasks_cog.py"],
           "implementation_notes": "Mandate 4, Environmental Realism. These are whole-cluster properties over the six Slice 01 environments, not repeats of the single-guild scenarios: each drives auto_update across a cluster and asserts the environment's headline invariant. Expect most to pass once 03-01..03-04 are green — treat any that does not as a real defect in the per-guild logic that only shows up in aggregate, which is the entire reason this layer exists. bound-drifted and mixed-cluster are deliberately NOT here: both assert quarantine, which is Slice 03. The last two names are regression guards that pass today and must still pass at the end."
+        }
+      ]
+    },
+    {
+      "id": "04",
+      "name": "The recovery path — /update_guild_key (US-003, Slice 02)",
+      "description": "The only exit from quarantine. Ships BEFORE enforcement so the exit provably exists before the entrance opens.",
+      "default_agent": "nw-software-crafter",
+      "default_deps_strategy": "sequential",
+      "steps": [
+        {
+          "id": "04-01",
+          "name": "Write a guild key and clear quarantine",
+          "agent": "nw-software-crafter",
+          "deps": ["03-05"],
+          "criteria": [
+            "a key write updates api_key and api_key_hmac in one transaction",
+            "release clears key_status, quarantine_reason and quarantined_at",
+            "the stored key is unchanged when a probe does not succeed",
+            "no key value reaches any log record"
+          ],
+          "test_file": "tests/acceptance/guild-key-integrity/test_slice_02_update_guild_key.py",
+          "scenario_name": "test_replacing_a_key_destroys_nothing, test_installing_a_matching_key_releases_a_quarantined_guild",
+          "files_to_modify": ["bot/guild_keys.py", "bot/repository.py", "bot/repository_sqlalchemy.py", "bot/guilds.py"],
+          "implementation_notes": "ADR-006 D7: api_key is Fernet ciphertext and api_key_hmac is a deterministic HKDF-SHA256 derivation carrying a UNIQUE constraint. BOTH must be produced in the SAME transaction — a write that updates one without the other leaves a row whose uniqueness check no longer matches its key. Raw-SQL key edits are forbidden. AC-003.2 is the property that makes this command safe where /deregister_guild is not: players, battle_hits and bomb_hits counts must be IDENTICAL before and after, so nothing may CASCADE. release() currently raises NotImplementedError as a deliberate slice boundary; implement it here — quarantine must never be a trap (DISCUSS D3), and this is the slice that proves the exit exists before Slice 03 opens the entrance."
+        },
+        {
+          "id": "04-02",
+          "name": "Add the /update_guild_key command",
+          "agent": "nw-software-crafter",
+          "deps": ["04-01"],
+          "criteria": [
+            "the key is probed BEFORE it is stored and the reply names the resolved guild",
+            "a key resolving to a different guild is refused without force and installed with it",
+            "dead and unverifiable keys are refused and the stored key is unchanged",
+            "officer tier is refused and the probe never fires",
+            "the reply is ephemeral and contains no key value"
+          ],
+          "test_file": "tests/acceptance/guild-key-integrity/test_slice_02_update_guild_key.py",
+          "scenario_name": "test_admin_installs_a_new_key_and_is_told_which_guild_it_belongs_to, test_a_key_for_the_wrong_guild_is_refused, test_force_installs_the_key_and_rebinds, test_a_rejected_key_is_never_installed, test_an_unverifiable_key_is_never_installed, test_an_officer_cannot_replace_a_guild_key, test_no_key_value_is_ever_shown_or_written_down, test_an_unknown_guild_is_refused_with_the_list_of_real_ones",
+          "files_to_modify": ["bot/cogs/admin_cog.py"],
+          "implementation_notes": "DDD-9: a `force: bool` PARAMETER, not a stateful confirmation. A discord.ui.View button would hold the plaintext key in process memory until click or timeout, which is a KPI-6 leak surface with a several-minute window. Probe the SUBMITTED key before storing anything — never install a key that could not be verified (AC-003.6). Tier is admin, matching /register_guild, via the real @require_tier decorator (ADR-001); officer is deliberately insufficient because the key grants read access to a guild's full roster and raid history. test_an_officer_cannot_replace_a_guild_key additionally asserts the probe NEVER fired — otherwise the command is an oracle for whether an arbitrary key is valid. Reuse bot/embeds.py:guild_autocomplete unchanged."
+        }
+      ]
+    },
+    {
+      "id": "05",
+      "name": "Enforcement — quarantine (US-004, US-005, Slice 03)",
+      "description": "The guardrail itself. A drifted key writes zero rows, and quarantining one guild does not stop any other.",
+      "default_agent": "nw-software-crafter",
+      "default_deps_strategy": "sequential",
+      "steps": [
+        {
+          "id": "05-01",
+          "name": "Quarantine on drift and rate-limit the alert",
+          "agent": "nw-software-crafter",
+          "deps": ["04-02"],
+          "criteria": [
+            "a mismatch sets key_status quarantined and records both identities and the moment",
+            "verify_and_resolve honours enforce=True and raises GuildQuarantined before any request",
+            "an outage or a missing identifier never quarantines anything",
+            "at most one alert per guild per 24 hours while the state persists",
+            "suppressed alerts are recorded, not dropped silently"
+          ],
+          "test_file": "tests/acceptance/guild-key-integrity/test_slice_03_quarantine_enforcement.py",
+          "scenario_name": "test_a_drifted_guild_is_quarantined_with_both_identities_recorded, test_a_persisting_quarantine_alerts_at_most_once_a_day, test_an_outage_never_quarantines_anything, test_a_missing_identifier_never_quarantines_anything",
+          "files_to_modify": ["bot/guild_keys.py"],
+          "implementation_notes": "quarantine() currently raises NotImplementedError as a deliberate slice boundary — implement it, and flip verify_and_resolve to honour enforce=True. quarantined_at MUST be ISO-8601 UTC in the SAME String(32) shape as battle_hits.completed_on; KPI-2's query compares them AS STRINGS and a shape mismatch returns a wrong result set silently rather than erroring. DDD-6 is the decision that keeps a Tacticus outage from quarantining the whole cluster: only a well-formed 200 carrying a DIFFERENT guildId quarantines. UNREACHABLE, UNVERIFIABLE and DEAD must each leave key_status untouched. GuildQuarantined must raise BEFORE any request is made — fetching the other guild's data and then discarding it puts it in memory and possibly in a traceback. ALERT_SUPPRESSION_HOURS = 24 via last_alerted_at; the FIRST alert of a quarantine always fires."
+        },
+        {
+          "id": "05-02",
+          "name": "Block every write for a quarantined guild",
+          "agent": "nw-software-crafter",
+          "deps": ["05-01"],
+          "criteria": [
+            "no battle-hit or bomb-hit row is written for a quarantined guild",
+            "no player row is inserted, updated or flipped to former",
+            "all seven key-consumption sites refuse and make no request",
+            "the alert reaches the update channel and the guild ping channel"
+          ],
+          "test_file": "tests/acceptance/guild-key-integrity/test_slice_03_quarantine_enforcement.py",
+          "scenario_name": "test_a_quarantined_guild_writes_not_one_raid_record, test_a_quarantined_guild_writes_not_one_roster_record, test_every_key_consumption_site_refuses_a_quarantined_guild, test_entering_quarantine_alerts_both_channels",
+          "files_to_modify": ["bot/cogs/tasks_cog.py", "bot/cogs/update_cog.py"],
+          "implementation_notes": "DDD-5: quarantine blocks roster AND hits. Blocking only hits still lets refresh_guild invert the roster, which was 60 of the 67 corrupted players rows — the LARGER half of the damage. test_every_key_consumption_site_refuses_a_quarantined_guild is parametrized over the seven-member KeyConsumptionSite enum AND asserts call_count == 0, so an implementation that fetches the other guild's data and then discards it still fails. This is the step where test_slice_01_still_ingests_on_a_mismatch INVERTS: it asserted the non-blocking intermediate state deliberately, and Slice 03 is where that stops being true. Do NOT delete it — report it to the orchestrator, which owns the decision about how to record the inversion."
+        },
+        {
+          "id": "05-03",
+          "name": "Keep one guild's quarantine from stopping the server",
+          "agent": "nw-software-crafter",
+          "deps": ["05-02"],
+          "criteria": [
+            "season discovery skips a quarantined guild and uses the next usable key",
+            "a healthy guild beside a quarantined one updates normally",
+            "a server whose guilds are all quarantined is skipped with a stated reason",
+            "the cycle records how many guilds it processed and skipped"
+          ],
+          "test_file": "tests/acceptance/guild-key-integrity/test_slice_03_quarantine_enforcement.py",
+          "scenario_name": "test_a_quarantined_guild_listed_first_does_not_stop_the_server, test_a_server_with_no_usable_key_is_skipped_for_a_stated_reason, test_a_healthy_guild_beside_a_quarantined_one_updates_normally",
+          "files_to_modify": ["bot/cogs/tasks_cog.py"],
+          "implementation_notes": "DDD-7 / KPI-5, and the reason active_key exists as a separate sync entry point. auto_update derived the season from next(iter(guilds.values())) and skipped the ENTIRE server when that one key failed — so quarantining one guild would have halted every guild, which is worse than the bug being fixed. The fall-through was written in step 03-03 and is dormant because nothing could be quarantined; this step is where it becomes reachable and must be proven. The fixture pins the quarantined guild FIRST in dict order and asserts that precondition, because the SPOF only misbehaves in that ordering — a test that happens to put it second passes while the bug is fully present. An all-quarantined server must be skipped with an explicit reason, never a silent continue."
+        },
+        {
+          "id": "05-04",
+          "name": "Show quarantine state in the guild list",
+          "agent": "nw-software-crafter",
+          "deps": ["05-03"],
+          "criteria": [
+            "a quarantined guild shows the state, both tags and the quarantine date",
+            "an active bound guild shows a tick, its tag and the verification date",
+            "a guild with no key reads exactly as it did before this feature",
+            "no key value and no identifier beyond eight characters appears"
+          ],
+          "test_file": "tests/acceptance/guild-key-integrity/test_slice_03_quarantine_enforcement.py",
+          "scenario_name": "test_the_guild_list_shows_quarantine_and_why, test_the_guild_list_shows_a_healthy_guild_as_verified, test_a_guild_with_no_key_reads_exactly_as_before, test_no_key_value_and_no_full_identifier_is_ever_shown",
+          "files_to_modify": ["bot/cogs/admin_cog.py"],
+          "implementation_notes": "US-005. The officer's job here is to tell the difference between 'nothing happened this hour' and 'this guild is blocked and needs an admin'. AC-005.3 pins the existing Missing rendering as UNCHANGED for a keyless guild — admin_cog:183 must stay an If/IfExp test or the architecture scan's structural exemption stops applying and correctly starts failing. Step 03-04 noted identity-label rendering is now duplicated across tasks_cog, admin_cog and update_cog; consolidating it into bot/guild_keys.py alongside key_ref is in scope for this step if it does not widen the diff unreasonably."
+        },
+        {
+          "id": "05-05",
+          "name": "Close the enforcement environments and the state machine",
+          "agent": "nw-software-crafter",
+          "deps": ["05-04"],
+          "criteria": [
+            "bound-drifted writes nothing once enforcement is on",
+            "mixed-cluster survives a quarantined first guild",
+            "quarantine is never a trap — every quarantined state has a path back to active",
+            "a quarantined guild never writes under any interleaving"
+          ],
+          "test_file": "tests/acceptance/guild-key-integrity/test_environment_matrix.py",
+          "scenario_name": "test_bound_drifted_writes_nothing_once_enforcement_is_on, test_mixed_cluster_survives_a_quarantined_first_guild",
+          "files_to_modify": ["requirements.txt", "tests/acceptance/guild-key-integrity/test_environment_matrix.py"],
+          "implementation_notes": "The last two environment scenarios, plus the Tier B layer that has been skipping since DISTILL. Pin hypothesis in requirements.txt NOW — this is the slice its state machine exercises, so the skip stops being honest and starts being missing coverage. tier_b/test_key_status_state_machine.py asserts two whole-state-space properties no enumerated example establishes: quarantine_is_never_a_trap (from every reachable quarantined state there EXISTS a path back to active — DISCUSS D3 is exactly this claim, and a single example only shows that one path works) and quarantined_guilds_never_write (zero rows under every interleaving of probes and key updates, not just the orderings someone thought to write). Plus one negative test per Hebert ch.6: relax 'the admin installs a matching key' and the property must FAIL without force, or the force gate is decorative."
         }
       ]
     }
