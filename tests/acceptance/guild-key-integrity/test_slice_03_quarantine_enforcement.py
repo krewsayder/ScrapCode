@@ -21,7 +21,14 @@ from domain_types import (
     KeyStatus,
     TransportFailure,
 )
-from conftest import GUILD_DM, GUILD_WB, PROD_SERVER_ID, GuildServiceResponse
+from conftest import (
+    GUILD_DM,
+    GUILD_WB,
+    PROD_SERVER_ID,
+    SEASON,
+    FakeChannel,
+    GuildServiceResponse,
+)
 
 RED = pytest.mark.skip(reason="RED scaffold — enable one at a time in DELIVER")
 
@@ -58,7 +65,6 @@ async def test_a_drifted_guild_is_quarantined_with_both_identities_recorded(
     )
 
 
-@RED
 @pytest.mark.kpi
 async def test_a_quarantined_guild_writes_not_one_raid_record(
     sqlite_repo, drifted_guild, update_channel, key_events
@@ -75,7 +81,6 @@ async def test_a_quarantined_guild_writes_not_one_raid_record(
     assert key_events.named("guild.key.ingest.blocked")
 
 
-@RED
 @pytest.mark.kpi
 async def test_a_quarantined_guild_writes_not_one_roster_record(
     sqlite_repo, drifted_guild, update_channel
@@ -96,7 +101,6 @@ async def test_a_quarantined_guild_writes_not_one_roster_record(
     assert after.former_players == before.former_players
 
 
-@RED
 @pytest.mark.driving_port
 async def test_entering_quarantine_alerts_both_channels(
     sqlite_repo, drifted_guild, update_channel, ping_channel, key_events
@@ -131,7 +135,6 @@ async def test_a_persisting_quarantine_alerts_at_most_once_a_day(
     assert len(key_events.named("guild.key.alert.suppressed")) == 23
 
 
-@RED
 @pytest.mark.kpi
 @pytest.mark.parametrize("site", list(KeyConsumptionSite), ids=lambda s: s.name.lower())
 async def test_every_key_consumption_site_refuses_a_quarantined_guild(
@@ -342,9 +345,14 @@ async def _run_hourly_cycle(service, channel, *, ping_channel=None) -> None:
     double goes in at the Tacticus transport, BELOW
     `bot.services.tacticus.guild_client`, so every classification a scenario
     asserts on is made by production code reading a real vendor body.
+
+    `ping_channel` is wired into the FakeBot's channel routing so the catch
+    handler's `self.bot.get_channel(notification_channel_id)` reaches it; the
+    single-channel slice-01 shape would hand back the update channel for every
+    id and make `ping_channel.text` an observation of nothing.
     """
     _register_the_guilds_the_scenario_programmed(service)
-    cog = _tasks_cog_posting_to(channel)
+    cog = _tasks_cog_posting_to(channel, ping_channel=ping_channel)
     with _tacticus_answered_by(service):
         await cog.auto_update()
 
@@ -385,25 +393,38 @@ _GUILD_REGISTRY: dict[str, tuple[str, dict]] = {
 _CANONICAL_IDENTITY = {"word_bearers": WORD_BEARERS, "dark_mechanicum": DARK_MECHANICUM}
 
 
-def _tasks_cog_posting_to(channel):
+def _tasks_cog_posting_to(channel, *, ping_channel=None):
     """The real cog, minus the scheduler (verbatim from slice 01)."""
     from bot.cogs.tasks_cog import TasksCog
     from bot.services.chronicl3r.player_service import PlayerService
 
     cog = TasksCog.__new__(TasksCog)
-    cog.bot = _FakeBot(channel)
+    cog.bot = _FakeBot(channel, ping_channel=ping_channel)
     cog.player_service = PlayerService(_FakeChroniclerClient())
     return cog
 
 
 class _FakeBot:
     """`UPDATE_CHANNEL_ID` is 0 under test, so the single global update channel
-    is whatever the scenario passed in (verbatim from slice 01)."""
+    is whatever the scenario passed in (verbatim from slice 01).
 
-    def __init__(self, channel) -> None:
+    `ping_channel` routes a guild's `notification_channel_id` to a distinct
+    channel so the catch handler's dual-channel post is observable. Without
+    it, `get_channel(4242)` would return the update channel and
+    `ping_channel.text` would read as the update channel — making the
+    `Then both channels contain the tags` assertion vacuous.
+    """
+
+    def __init__(self, channel, *, ping_channel=None) -> None:
         self._channel = channel
+        self._ping_channel = ping_channel
 
     def get_channel(self, channel_id: int):
+        from config import UPDATE_CHANNEL_ID
+        if channel_id == UPDATE_CHANNEL_ID:
+            return self._channel
+        if self._ping_channel is not None and channel_id is not None:
+            return self._ping_channel
         return self._channel
 
 
@@ -490,7 +511,92 @@ def _raid_entries() -> list[dict]:
 
 
 async def _exercise_site(site: KeyConsumptionSite, guild_id: str, *, service) -> None:
-    raise AssertionError("Not yet implemented — RED scaffold for 05-02")
+    """Drive the REAL production entry point for one key-consumption site.
+
+    Port-to-port litmus: if any site bypassed `active_key` and read the guild
+    key directly, driving that site would issue a Tacticus guild call and
+    `fake_guild_service.call_count` would climb above zero — which is the
+    assertion the parametrized scenario hangs on. So each branch MUST drive
+    the actual site entry point (not just call `active_key` in a vacuum).
+
+    Refusal is observed from production behaviour (a None return, a skip
+    line, or a quarantined refusal) and converted to `_QuarantinedError`, the
+    shape the scenario's `pytest.raises` is looking for. The guild is
+    quarantined via `_quarantine(...)` by the scenario BEFORE this is called.
+    """
+    import bot.guild_keys as guild_keys
+    from bot.cogs.tasks_cog import _CycleReport
+    from bot.guilds import load_guilds, save_guilds
+
+    server_id = PROD_SERVER_ID
+
+    # The two `player_service` sites consume a `GuildSnapshot`, never a key
+    # (DDD-2 moved the fetch out). The key-consumption point is the CALLER
+    # that produces the snapshot via `active_key`; for a quarantined guild
+    # that returns None and the caller never assembles a snapshot, so
+    # `refresh_guild`/`validate_if_stale` are never reached.
+    if site in (KeyConsumptionSite.PLAYER_SERVICE_REFRESH,
+                KeyConsumptionSite.PLAYER_SERVICE_STALE):
+        with _tacticus_answered_by(service):
+            if guild_keys.active_key(server_id, guild_id) is None:
+                raise _QuarantinedError()
+        return
+
+    if site is KeyConsumptionSite.AUTO_UPDATE_SEASON:
+        cog = _tasks_cog_posting_to(FakeChannel(channel_id=1))
+        _ensure_guild_registered(server_id, guild_id)
+        guilds = load_guilds(server_id)
+        with _tacticus_answered_by(service):
+            season = await cog._current_season(server_id, guilds)
+        if season is None:
+            raise _QuarantinedError()
+        return
+
+    if site in (KeyConsumptionSite.AUTO_UPDATE_RAID,
+                KeyConsumptionSite.AUTO_UPDATE_ROSTER):
+        channel = FakeChannel(channel_id=1)
+        cog = _tasks_cog_posting_to(channel)
+        _ensure_guild_registered(server_id, guild_id)
+        guilds = load_guilds(server_id)
+        guild_data = guilds[guild_id]
+        cycle = _CycleReport(server_id, guilds_total=len(guilds))
+        with _tacticus_answered_by(service):
+            results = await cog._update_one_guild(
+                server_id, guild_id, guild_data, SEASON, channel, cycle,
+            )
+        # Refusal = the skip path returned a "skipped" line and never reached
+        # `_validate_roster` or `_ingest_raid`.
+        if any("skipped" in line for line in results):
+            raise _QuarantinedError()
+        return
+
+    if site in (KeyConsumptionSite.UPDATE_LEADERBOARD,
+                KeyConsumptionSite.UPDATE_ALL):
+        from bot.cogs.update_cog import UpdateCog
+
+        cog = UpdateCog.__new__(UpdateCog)
+        with _tacticus_answered_by(service):
+            verified = await cog._verified_key(server_id, guild_id)
+        if verified is None:
+            raise _QuarantinedError()
+        return
+
+
+def _ensure_guild_registered(server_id: int, guild_id: str) -> None:
+    """Register the single guild the site drives, if it is not already.
+
+    The parametrized scenario quarantines the guild via `_quarantine` (which
+    writes only a binding) but never registers the guild row, so `load_guilds`
+    would return `{}` and `_update_one_guild` would KeyError on the name
+    before reaching the key-consumption point. Wiring, not a `Given`.
+    """
+    from bot.guilds import load_guilds, save_guilds
+
+    if guild_id in load_guilds(server_id):
+        return
+    save_guilds(server_id, {
+        guild_id: _GUILD_REGISTRY["wb-key"][1],
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -532,9 +638,19 @@ def _entry_total(hits: dict) -> int:
 
 def _quarantine(guild_id: str, *, reason: str) -> None:
     """Place a guild into quarantine directly, for a scenario's `Given`."""
-    from bot.guilds import load_guild_binding, save_guild_binding
+    from bot.guilds import load_guild_binding, load_guilds, save_guild_binding, save_guilds
     from bot.repository import GuildBinding
     from bot.services.tacticus.guild_client import KeyStatus
+
+    # `guild_key_bindings` references the `guilds` table; the parametrized
+    # site-refusal scenario quarantines without `registered_guilds`, so the
+    # parent row must exist or `save_guild_binding` fails the FK before the
+    # scenario reaches the assertion. Wiring, not a `Given` the scenario
+    # declares.
+    if guild_id not in load_guilds(PROD_SERVER_ID):
+        save_guilds(PROD_SERVER_ID, {
+            guild_id: _GUILD_REGISTRY["wb-key"][1],
+        })
 
     binding = load_guild_binding(PROD_SERVER_ID, guild_id)
     save_guild_binding(PROD_SERVER_ID, guild_id, GuildBinding(

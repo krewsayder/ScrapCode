@@ -44,6 +44,12 @@ CYCLE_EVENT = "auto_update.cycle"
 # is the second operand of the formula and its `ts` must be real.
 ALERT_SENT_EVENT = "guild.key.alert.sent"
 
+# Emitted when a quarantined guild's ingestion is blocked (DDD-2/5). The
+# record is the machine-readable confirmation that the block fired at all —
+# without it "no rows were written" is an absence, not a signal, and a future
+# site that quietly re-enables ingestion reads as silent success.
+INGEST_BLOCKED_EVENT = "guild.key.ingest.blocked"
+
 
 class TasksCog(commands.Cog):
     def __init__(self, bot: commands.Bot, player_service: PlayerService):
@@ -296,6 +302,7 @@ class TasksCog(commands.Cog):
                 # still reads as "the operator has not acted yet" (AC-002.6).
                 guild_keys.re_report_persisting_drift(server_id, guild_id)
                 guild_keys.record_quarantine_alert(server_id, guild_id, channel)
+                _emit_ingest_blocked(server_id, guild_id, guild_keys.UNKNOWN_KEY_REF)
             cycle.skipped(guild_id, reason)
             return [f"⛔ **{guild_name}** — skipped, no usable key ({reason})."]
 
@@ -322,6 +329,10 @@ class TasksCog(commands.Cog):
                 f"⛔ Quarantined — run /update_guild_key to install the correct key."
             )
             guild_keys.record_quarantine_alert(server_id, guild_id, channel)
+            _emit_ingest_blocked(
+                server_id, guild_id, guild_keys._key_ref_for(credential),
+            )
+            await self._post_to_ping_channel(guild_data, line)
             cycle.skipped(guild_id, "quarantined")
             return [line]
 
@@ -390,6 +401,23 @@ class TasksCog(commands.Cog):
             # arrives with quarantine in Slice 03, where the state persists.
             suppressed_until=None,
         )
+
+    async def _post_to_ping_channel(self, guild_data: dict, line: str) -> None:
+        """Mirror the quarantine alert to the guild's own notification channel.
+
+        The guild's officers see their leaderboard stop moving and need to know
+        why without asking the cluster admin (AC-004.4). `notification_channel_id`
+        is the channel the guild configured for cap pings; reusing it for the
+        quarantine alert keeps the audience to the people who can act. No-op
+        when the guild has no ping channel configured.
+        """
+        channel_id = guild_data.get("notification_channel_id")
+        if not channel_id:
+            return
+        ping_channel = self.bot.get_channel(channel_id)
+        if ping_channel is None:
+            return
+        await self._post(ping_channel, line)
 
     async def _validate_roster(
         self, server_id: int, guild_id: str, guild_name: str, snapshot: GuildSnapshot
@@ -668,6 +696,24 @@ def _unusable_key_reason(server_id: int, guild_id: str) -> str:
     if binding.key_status == KeyStatus.QUARANTINED.value:
         return "quarantined"
     return "no_key_registered"
+
+
+def _emit_ingest_blocked(server_id: int, guild_id: str, key_ref: str) -> None:
+    """Record that a quarantined guild's ingestion was refused (DDD-2/5).
+
+    Emitted from BOTH the catch handler (first quarantine, key_ref derivable
+    from the credential in scope) and the persisting-quarantine skip path
+    (credential is None, so `UNKNOWN_KEY_REF`). The event is the
+    machine-readable signal that the block fired — without it "no rows were
+    written" is an absence, not a verified outcome.
+    """
+    emit_structured(
+        logger, logging.INFO, INGEST_BLOCKED_EVENT,
+        ts=_now(),
+        server_id=server_id,
+        guild_id=guild_id,
+        key_ref=key_ref,
+    )
 
 
 # The probe outcomes an operator has to act on. UNREACHABLE is deliberately

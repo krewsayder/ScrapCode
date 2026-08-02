@@ -160,6 +160,13 @@ class UpdateCog(commands.Cog):
 
         None means refuse. `active_key` is sync and storage-only (DDD-7), so a
         guild with no usable key costs no probe and no Tacticus round trip.
+
+        DDD-5 (Slice 03): a drifted guild is refused here too, not only by the
+        hourly loop. `enforce=True` makes `verify_and_resolve` quarantine on a
+        mismatch and raise `GuildQuarantined` BEFORE returning a snapshot, so
+        the commands' existing `if verified is None: refuse` path fires with no
+        Tacticus raid round trip and no row write — the same block the auto loop
+        applies, reachable from a manual command.
         """
         credential = guild_keys.active_key(server_id, guild_id)
         if credential is None:
@@ -169,9 +176,12 @@ class UpdateCog(commands.Cog):
         # the key WAS bound to, and `verify_and_resolve` refreshes the display
         # fields on its way through, so afterwards is too late.
         bound_before = load_guild_binding(server_id, guild_id)
-        snapshot = await guild_keys.verify_and_resolve(
-            server_id, guild_id, enforce=False
-        )
+        try:
+            snapshot = await guild_keys.verify_and_resolve(
+                server_id, guild_id, enforce=True,
+            )
+        except guild_keys.GuildQuarantined:
+            return None
         return _VerifiedKey(credential, bound_before, snapshot)
 
     async def _register_unknown_players(self, server_id: int, guild_id: str, api_data: dict) -> None:
