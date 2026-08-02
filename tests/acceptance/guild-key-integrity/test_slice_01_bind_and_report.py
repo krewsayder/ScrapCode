@@ -168,17 +168,23 @@ async def test_first_verification_adopts_the_identity_and_announces_once(
     assert update_channel.text.count(WORD_BEARERS.name) == 1
 
 
-@RED
 async def test_second_verification_refreshes_the_date_without_announcing(
     sqlite_repo, matching_guild, update_channel, key_events
 ):
     """AC-001.4. An announcement on every cycle is alert fatigue by
-    construction, and would bury the one announcement that matters."""
+    construction, and would bury the one announcement that matters.
+
+    Both the channel AND the log are cleared between cycles. Only the channel
+    was, which left cycle one's mandatory adoption record visible to a
+    `guild.key.bound == []` assertion about cycle two — unsatisfiable by any
+    implementation. See the feature-delta upstream issues, UD-8.
+    """
     from bot.guilds import load_guild_binding
 
     await _run_hourly_cycle(matching_guild, update_channel)
     first = load_guild_binding(PROD_SERVER_ID, GUILD_WB).identity_bound_at
     update_channel.messages.clear()
+    key_events.clear()
 
     await _run_hourly_cycle(matching_guild, update_channel)
     second = load_guild_binding(PROD_SERVER_ID, GUILD_WB).identity_bound_at
@@ -304,7 +310,7 @@ async def test_rejected_key_is_dead_not_quarantined(
 @pytest.mark.kpi
 @pytest.mark.parametrize("failure", list(TransportFailure), ids=lambda f: f.value)
 async def test_unreachable_leaves_the_binding_byte_identical(
-    sqlite_repo, fake_guild_service, update_channel, key_events,
+    bound_guild, fake_guild_service, update_channel, key_events,
     failure: TransportFailure,
 ):
     """AC-001.9 / D6 — the decision that keeps a Tacticus outage from
@@ -313,6 +319,10 @@ async def test_unreachable_leaves_the_binding_byte_identical(
     Byte-identical, not "still active": an implementation that rewrites
     `identity_bound_at` on a failed probe would report a fresh verification
     date for a check that never happened, which is worse than no date.
+
+    Takes `bound_guild`, not a bare repository. With no stored binding this
+    compared an unbound placeholder against an unbound placeholder and could
+    not have failed — there was no date to preserve.
     """
     from bot.guilds import load_guild_binding
 
@@ -371,10 +381,16 @@ async def test_slice_01_still_ingests_on_a_mismatch(
 
 @pytest.mark.driving_port
 async def test_mismatch_appears_in_the_hourly_summary(
-    sqlite_repo, fake_guild_service, update_channel
+    bound_guild, fake_guild_service, update_channel
 ):
     """AC-002.3. The mismatch has to appear where the operator already
-    looks; a line in `discord.log` nobody greps is not detection."""
+    looks; a line in `discord.log` nobody greps is not detection.
+
+    Takes `bound_guild`: this scenario programs its own drift rather than
+    using the `drifted_guild` fixture, so it needs the stored binding
+    supplied explicitly. Without it Word Bearers is unbound, trust-on-first-use
+    adopts Dark Mechanicum, and there is no mismatch to report at all.
+    """
     fake_guild_service.program("wb-key", GuildServiceResponse(identity=DARK_MECHANICUM))
     fake_guild_service.program("dm-key", GuildServiceResponse(identity=DARK_MECHANICUM))
 
@@ -405,7 +421,6 @@ async def test_a_matching_guild_is_completely_silent(
     assert ping_channel.messages == []
 
 
-@RED
 @pytest.mark.error
 @pytest.mark.parametrize(
     "resolved",
@@ -417,7 +432,7 @@ async def test_a_matching_guild_is_completely_silent(
     ids=["tag-changed", "name-changed", "both-changed"],
 )
 async def test_a_retag_or_rename_is_not_a_mismatch(
-    sqlite_repo, fake_guild_service, update_channel, key_events,
+    bound_guild, fake_guild_service, update_channel, key_events,
     resolved: GuildIdentity,
 ):
     """AC-002.5 — the direct consequence of binding on uuid (D1).
@@ -425,6 +440,10 @@ async def test_a_retag_or_rename_is_not_a_mismatch(
     Guilds retag and rename routinely. If either tripped the lock, Slice 03
     would quarantine healthy guilds on a cosmetic change, and the operator
     would learn to ignore the alert.
+
+    Takes `bound_guild`: a retag is only "not a mismatch" relative to an
+    EXISTING binding. Unbound, trust-on-first-use would adopt the new tag and
+    the absence of a mismatch would prove nothing.
     """
     from bot.guilds import load_guild_binding
 
@@ -518,7 +537,6 @@ async def _run_hourly_cycle(guild_service, channel) -> None:
     red, because no `guild.key.*` record is emitted at all.
     """
     _register_the_guilds_the_scenario_programmed(guild_service)
-    _restore_the_binding_the_environment_declares(guild_service)
     cog = _tasks_cog_posting_to(channel)
     with _tacticus_answered_by(guild_service):
         await cog.auto_update()
@@ -566,43 +584,6 @@ _GUILD_REGISTRY: dict[str, tuple[str, dict]] = {
 # postmortem.
 _CANONICAL_IDENTITY = {"word_bearers": WORD_BEARERS, "dark_mechanicum": DARK_MECHANICUM}
 
-
-def _restore_the_binding_the_environment_declares(guild_service) -> None:
-    """Write the historical half of a `bound-drifted` environment.
-
-    `environments.yaml` defines `bound-drifted` as TWO facts: the guild is
-    bound to Word Bearers, AND its key now resolves to Dark Mechanicum. The
-    `drifted_guild` fixture programs the second. The first is history — the
-    guild was verified for weeks before the key-holder changed guilds — and no
-    fixture writes it. Without it the drift scenarios would quietly become
-    trust-on-first-use scenarios and pass against an implementation that never
-    compares anything, which is the exact failure shape this feature exists to
-    prevent.
-
-    A guild whose key still resolves to its own identity is left UNBOUND, so
-    the production TOFU path (DDD-8) is what writes its binding and never this
-    helper. `_by_key` is read rather than `answer_for` so peeking does not
-    register a call the scenarios count.
-
-    UPSTREAM GAP (reported at DELIVER 03-03): this inference belongs in a
-    fixture that states the Given outright. See the report for step 03-03.
-    """
-    from bot.guilds import load_guild_binding, save_guild_binding
-    from bot.repository import GuildBinding
-
-    for key, (guild_id, _) in _GUILD_REGISTRY.items():
-        answer = guild_service._by_key.get(key)
-        canonical = _CANONICAL_IDENTITY[guild_id]
-        if answer is None or answer.identity is None or answer.identity.uuid == canonical.uuid:
-            continue
-        if not load_guild_binding(PROD_SERVER_ID, guild_id).is_unbound:
-            continue
-        save_guild_binding(PROD_SERVER_ID, guild_id, GuildBinding(
-            tacticus_guild_id=canonical.uuid,
-            tacticus_guild_tag=canonical.tag,
-            tacticus_guild_name=canonical.name,
-            identity_bound_at="2026-07-27T04:00:00.000Z",
-        ))
 
 
 def _tasks_cog_posting_to(channel):

@@ -342,10 +342,24 @@ def matching_guild(fake_guild_service: FakeGuildService):
 
 
 @pytest.fixture
-def drifted_guild(fake_guild_service: FakeGuildService):
+def drifted_guild(bound_guild, fake_guild_service: FakeGuildService):
     """`bound-drifted`: THE INCIDENT. Bound to Word Bearers, resolves to
     Dark Mechanicum. Same key string, different answer — exactly what
-    happened when the guild master changed guilds on 2026-07-28."""
+    happened when the guild master changed guilds on 2026-07-28.
+
+    Depends on `bound_guild` because `environments.yaml` defines this
+    environment as TWO facts, and this fixture used to program only one. The
+    guild is BOUND to Word Bearers — history, from the weeks it was verified
+    before the key-holder moved — AND its key now resolves to Dark Mechanicum.
+
+    Without the stored binding the guild is unbound on a clean database, so
+    the production trust-on-first-use path (DDD-8) adopts Dark Mechanicum and
+    reports no mismatch at all. Every drift scenario would then pass against
+    an implementation that never compares anything — which is precisely the
+    failure this feature exists to prevent, reproduced inside its own test
+    suite. Found during DELIVER step 03-03; see the feature-delta
+    `## Wave: DELIVER / [WHY] Upstream Issues`, UD-7.
+    """
     fake_guild_service.program(
         "wb-key",
         GuildServiceResponse(identity=DARK_MECHANICUM, members=["x1", "x2"]),
@@ -434,6 +448,21 @@ def key_events(caplog):
         @staticmethod
         def named(event: str) -> list:
             return [r for r in caplog.records if getattr(r, "event", None) == event]
+
+        @staticmethod
+        def clear() -> None:
+            """Forget everything captured so far.
+
+            For multi-cycle scenarios that assert about the SECOND cycle
+            only. Without it, a scenario that clears `update_channel.messages`
+            between cycles still sees cycle one's records and asserts against
+            both — which made `test_second_verification_refreshes_the_date_
+            without_announcing` unsatisfiable, since the first cycle must emit
+            exactly one `guild.key.bound` and the second must emit none.
+            Found during DELIVER step 03-03; see the feature-delta
+            `## Wave: DELIVER / [WHY] Upstream Issues`, UD-8.
+            """
+            caplog.clear()
 
         @staticmethod
         def all_events() -> list[str]:
