@@ -138,8 +138,19 @@ def quarantine(
     `battle_hits.completed_on` (String(32), stored verbatim from the Tacticus
     payload). KPI-2 compares them as strings; a shape mismatch returns a
     wrong result set silently rather than erroring.
+
+    NOT a leftover scaffold — a deliberate slice boundary. Slice 01 reports
+    and blocks nothing (ADR-008 D3): enforcement cannot ship before
+    `/update_guild_key` (Slice 02) provides the only exit, or the first
+    quarantine strands the operator in an SSH session with updates also
+    stopped. Nothing in Slice 01 calls this, and `verify_and_resolve` refuses
+    `enforce=True` for the same reason.
     """
-    raise AssertionError("Not yet implemented — RED scaffold")
+    raise NotImplementedError(
+        "quarantine() lands in Slice 03. Slice 01 reports identity drift "
+        "without blocking (ADR-008 D3) because /update_guild_key — the only "
+        "way out of quarantine — ships in Slice 02."
+    )
 
 
 def release(discord_server_id: int, guild_id: str) -> None:
@@ -148,8 +159,15 @@ def release(discord_server_id: int, guild_id: str) -> None:
     Quarantine must never be a trap (DISCUSS D3): this ships in Slice 02, one
     slice before anything can enter quarantine, so the exit provably exists
     before the entrance opens.
+
+    NOT a leftover scaffold — a deliberate slice boundary. Unreachable in
+    Slice 01, where nothing can enter quarantine in the first place.
     """
-    raise AssertionError("Not yet implemented — RED scaffold")
+    raise NotImplementedError(
+        "release() lands in Slice 02 with /update_guild_key, which is the "
+        "only way out of quarantine. Nothing can enter quarantine until "
+        "Slice 03, so this is unreachable in Slice 01."
+    )
 
 
 def key_ref(api_key_hmac: str | None) -> str:

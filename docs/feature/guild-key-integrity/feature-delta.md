@@ -1788,3 +1788,122 @@ inventing a classification — the right call.
 Treatment carried into step 03-02: a snapshot with no usable member list must
 not be allowed to drive a roster write. Recorded for `nw-acceptance-designer` as
 a scenario the contract suite should carry.
+
+### UD-7 — `drifted_guild` programmed only half its environment
+
+**Found:** step 03-03. **Artifact:** `conftest.py`.
+
+`environments.yaml` defines `bound-drifted` as TWO facts: the guild is bound to
+Word Bearers, AND its key now resolves to Dark Mechanicum. The fixture
+programmed only the second. On a clean database the guild is unbound, so
+trust-on-first-use adopted Dark Mechanicum and there was no mismatch at all —
+five scenarios quietly became TOFU scenarios and passed against an
+implementation that never compares anything.
+
+**The suite had reproduced the feature's own failure mode inside itself.**
+
+**Resolved:** `drifted_guild` now depends on `bound_guild`; the three scenarios
+that program their own service take `bound_guild` explicitly. Verified by
+neutering the identity comparison in `bot/guild_keys.py`: four scenarios now
+fail that previously passed.
+
+A helper written during 03-03 to work around the gap — seeding a binding by
+inspecting the programmed response — was removed. Keying the arrangement off
+the expected outcome is not a precondition, it is a prediction.
+
+### UD-8 — a two-cycle scenario cleared the channel but not the log
+
+**Found:** step 03-03. **Artifact:** `test_second_verification_refreshes_the_date_without_announcing`.
+
+The scenario runs two cycles and asserts the second announces nothing. It
+cleared `update_channel.messages` between them but not the captured log, so
+cycle one's mandatory adoption record was still visible to a
+`key_events.named("guild.key.bound") == []` assertion about cycle two —
+**unsatisfiable by any implementation**, since trust-on-first-use requires
+exactly one adoption on cycle one.
+
+**Resolved:** added `key_events.clear()` — the capability the author's own
+`messages.clear()` implies — and unskipped the scenario.
+
+### UD-9 — the KPI-4 scenario was vacuous
+
+**Found:** step 03-05, while proving non-vacuity across the environment matrix.
+**Artifact:** `test_a_matching_guild_is_completely_silent`.
+
+The most load-bearing scenario in the slice, by its own docstring: *"A suite
+that only covers drift passes against an implementation that alerts on every
+cycle. This is the scenario that fails it, and it is the empirical basis for
+KPI-4's zero-false-positive target."*
+
+It was asserting nothing. With only `sqlite_repo` the guild was unbound, so the
+cycle took the trust-on-first-use path and never compared. The silence it
+asserted was the silence of a check that never ran.
+
+| `GuildIdentity.matches` hard-wired to `False` | Result |
+|---|---|
+| as authored | **PASSED** |
+| taking `bound_guild` | **FAILED** |
+
+**Resolved:** takes `bound_guild`.
+
+### UD-10 — the two acceptance suites share a `conftest` module name
+
+**Found:** step 03-05. **Open — recorded, not fixed.**
+
+`tests/acceptance/sqlite-backend/conftest.py` declares `SEASON = 94`;
+`tests/acceptance/guild-key-integrity/conftest.py` declares `SEASON = 106`.
+Neither directory has an `__init__.py`, so both import as top-level module
+`conftest`. A *lazy* `from conftest import SEASON` inside a helper therefore
+resolves through `sys.modules["conftest"]` — whichever suite got there first.
+
+In the combined `pytest tests/unit tests/acceptance` run that is the
+sqlite-backend one, so a slice-01 helper answers the raid URL for season 94
+while believing it is 106. It stays green only because the counting helper
+resolves the same wrong constant, so both ends agree by accident. Hoisting the
+import to module scope desynchronises them and fails two scenarios **only in
+the combined run**.
+
+Latent, currently harmless, and a genuine cross-suite contamination hazard: any
+future constant sharing a name across the two conftests silently takes the
+other suite's value. Worth a dedicated fix (unique module names, or a shared
+`tests/support/` package) rather than a per-helper workaround.
+
+Note this became reachable only once UD-5 made the combined invocation work at
+all. It was always latent; the gate that would have surfaced it had never run.
+
+## Wave: DELIVER / [REF] The pattern behind six of the ten findings
+
+Six of the ten items above (UD-1, UD-2, UD-3, UD-4, UD-7, UD-8, UD-9) are
+defects in the acceptance suite, and five of those are one pattern:
+
+> **a scenario declares a precondition about stored state in Gherkin, and no
+> fixture supplies it.**
+
+The failure is asymmetric and that is what makes it dangerous. A missing
+precondition that raises `KeyError` gets noticed immediately. One that merely
+leaves the system in its *default* state does not — the scenario runs, takes a
+different code path than intended, and passes. Every instance here degraded a
+comparison test into a trust-on-first-use test, which is silent by design.
+
+The DISTILL RED gate classified all 93 scenarios by **exception type** —
+`AssertionError` = RED, `ImportError` = BROKEN — and reported 172 / 0 / 0. That
+check is necessary and it is not sufficient. It cannot distinguish a test that
+fails because the implementation is missing from one that fails for a
+correct-looking reason while asserting nothing, and it says nothing at all
+about tests that PASS vacuously.
+
+Two additional gates would have caught all five:
+
+1. **Satisfiability** — for each scenario, is it reachable inside the slice's
+   declared scope? UD-1 (a rule requiring out-of-scope modules to change) and
+   UD-8 (an assertion no implementation can satisfy) are both scope/logic
+   errors visible by inspection, before any code exists.
+2. **Non-vacuity, by mutation** — for each scenario, break the behaviour it
+   claims to assert and confirm it fails. The 03-05 crafter ran exactly this
+   over ten mutations and it is what surfaced UD-9. It is cheap, it is
+   mechanical, and it is the only check that catches a green test asserting
+   nothing.
+
+Recommendation for the next DISTILL wave: run mutation-based non-vacuity on
+every scenario whose Gherkin contains a `Given` about stored state, before
+handing off. The tooling exists — it is `git checkout --` and a loop.
