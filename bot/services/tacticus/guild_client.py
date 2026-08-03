@@ -171,14 +171,24 @@ class GuildSnapshot:
     raw: dict | None = None
 
 
-def parse_guild_snapshot(payload: dict) -> GuildSnapshot:
-    """Classify a 200-OK `/api/v1/guild` body into a snapshot.
+def parse_guild_snapshot(payload: object) -> GuildSnapshot:
+    """Classify a decoded 200-OK `/api/v1/guild` body into a snapshot.
 
-    Returns UNVERIFIABLE when `guildId` is absent OR carries a value no
-    identity can be built from — a number, a bool, whitespace, or text that is
-    not a uuid. There is NO fallback to comparing `guildTag` — a quiet
-    downgrade to a weaker check is the same failure shape as the incident this
-    feature exists to prevent (DDD-10).
+    TOTAL over every value a JSON decoder can produce, by construction: the
+    parameter is `object`, not `dict`, because a 200 is a statement about the
+    KEY and says nothing whatsoever about the shape of what follows it. The
+    vendor's `guildId` is undocumented and the payload is unversioned, so
+    "well-formed object" is an assumption; every step below therefore checks
+    the shape it is about to walk instead of asserting it. A step that raised
+    would leave `discord.ext.tasks.Loop` stopped and hourly ingestion dead for
+    every server on the bot until someone restarted the process (AC-007.5).
+
+    Every refusal is UNVERIFIABLE and never UNREACHABLE: the key WORKED — the
+    vendor answered 200 — and only the check did not, so DDD-6 requires the
+    binding left byte-identical and the next cycle to retry. There is NO
+    fallback to comparing `guildTag` when the identifier cannot be read: a
+    quiet downgrade to a weaker check is the same failure shape as the
+    incident this feature exists to prevent (DDD-10).
 
     A `GuildIdentity` is constructed ONLY from a value that canonicalised, so
     every identity in the system holds a validated canonical uuid: `matches`
@@ -190,7 +200,22 @@ def parse_guild_snapshot(payload: dict) -> GuildSnapshot:
     MATCH vs MISMATCH is the policy layer's call, and it is the only caller
     that holds the expected identity.
     """
+    if not isinstance(payload, dict):
+        # A bare list, string, bool or `null` is valid JSON and not a guild.
+        # `raw` stays None rather than carrying the value: the field exists so
+        # the contract test can diff a body against the recorded fixture, and
+        # a non-object has nothing to diff.
+        return _unverifiable_body(_not_a_guild_object("the response body", payload))
+
     guild = payload.get("guild") or {}
+    if not isinstance(guild, dict):
+        # A TRUTHY non-dict — `{"guild": "unavailable"}`. The falsy cases
+        # (`null`, `{}`, `[]`, `""`) are already absorbed by the `or {}` above
+        # and reported as an absent identifier, which is what they are.
+        return _unverifiable_body(
+            _not_a_guild_object("the response's guild field", guild), raw=payload,
+        )
+
     raw_uuid = guild.get("guildId")
     uuid = canonical_guild_id(raw_uuid)
 
@@ -198,12 +223,7 @@ def parse_guild_snapshot(payload: dict) -> GuildSnapshot:
         # The members are deliberately dropped as well: a roster whose owner
         # cannot be established is one nobody may write, and handing it back
         # anyway is the invitation to write it.
-        return GuildSnapshot(
-            outcome=ProbeOutcome.UNVERIFIABLE,
-            status=200,
-            error=_no_usable_guild_id(raw_uuid),
-            raw=payload,
-        )
+        return _unverifiable_body(_no_usable_guild_id(raw_uuid), raw=payload)
 
     return GuildSnapshot(
         outcome=ProbeOutcome.MATCH,
@@ -212,10 +232,78 @@ def parse_guild_snapshot(payload: dict) -> GuildSnapshot:
             tag=guild.get("guildTag"),
             name=guild.get("name"),
         ),
-        members=frozenset(m["userId"] for m in guild.get("members") or []),
+        members=_member_ids(guild.get("members")),
         status=200,
         raw=payload,
     )
+
+
+def _unverifiable_body(reason: str, *, raw: dict | None = None) -> GuildSnapshot:
+    """A 200 whose body could not be read — the key worked, the check did not.
+
+    One constructor for every body-shape refusal so the three call sites
+    cannot drift into three different outcomes. `status` is 200 because that
+    is what the vendor said, and it is the field that distinguishes this from
+    UNREACHABLE for whoever reads the record afterwards.
+    """
+    return GuildSnapshot(
+        outcome=ProbeOutcome.UNVERIFIABLE,
+        status=200,
+        error=reason,
+        raw=raw,
+    )
+
+
+def _not_a_guild_object(what: str, value: object) -> str:
+    """Why the body could not be walked, naming the TYPE and never the value.
+
+    Same rule as `_no_usable_guild_id`, for the same reason and one level up:
+    the body is unvalidated vendor output on the same connection the key was
+    sent over, and an error string is copied into logs, alerts and pastebins
+    by people trying to help. Only the type name crosses that boundary
+    (KPI-6).
+    """
+    return f"{what} is not a guild object ({type(value).__name__})"
+
+
+def _member_ids(members: object) -> frozenset[str]:
+    """The member ids that actually arrived — and only those (AC-007.7).
+
+    A roster DEGRADES where an identity cannot. One entry the vendor sent
+    without a usable `userId` is dropped and the entries that did arrive stay
+    usable, because a partially-serialised roster is a roster-QUALITY problem
+    and treating it as an identity problem would let a vendor hiccup
+    quarantine a healthy guild. The downstream guard that refuses to write an
+    EMPTY member set (`player_service._roster_write_refusal`) is what stops
+    the degradation going too far.
+
+    Non-list `members` yields nothing rather than raising: iterating a string
+    would silently produce characters, which is worse than reporting none.
+    """
+    if not isinstance(members, (list, tuple)):
+        return frozenset()
+    arrived = (_user_id_of(entry) for entry in members)
+    return frozenset(user_id for user_id in arrived if user_id)
+
+
+def _user_id_of(entry: object) -> str:
+    """The member id this entry carries, or `""` when it carries none.
+
+    The ONE place that knows the field is spelled `userId`, so a vendor rename
+    is one edit rather than a predicate and an extractor that can disagree.
+
+    `str` and non-empty, not merely present: `members` is declared
+    `frozenset[str]` and every reader downstream treats its contents as player
+    identifiers, so a number or a blank admitted here would surface as a
+    corrupt row rather than as a dropped one. `""` carries both "no field" and
+    "unusable field" because the caller's answer to them is the same — drop
+    this entry, keep the rest — and it keeps the collected set `frozenset[str]`
+    as declared rather than one holding a sentinel.
+    """
+    if not isinstance(entry, dict):
+        return ""
+    user_id = entry.get("userId")
+    return user_id if isinstance(user_id, str) else ""
 
 
 def _no_usable_guild_id(raw_uuid: object) -> str:
@@ -238,9 +326,20 @@ def _no_usable_guild_id(raw_uuid: object) -> str:
 async def fetch_guild_snapshot(api_key: str) -> GuildSnapshot:
     """Read `/api/v1/guild` with `api_key` and classify the result.
 
-    Never raises for an expected failure — transport errors, 5xx and dead-key
-    statuses all come back as a classified snapshot, because the caller's job
-    is to distinguish them and an exception erases the distinction.
+    Never raises for an expected failure — transport errors, 5xx, dead-key
+    statuses AND a 200 whose body will not decode or will not walk all come
+    back as a classified snapshot, because the caller's job is to distinguish
+    them and an exception erases the distinction. The caller here is the
+    hourly `discord.ext.tasks.Loop`, which STOPS on an unhandled exception:
+    anything escaping this function ends ingestion for every server on the bot
+    until the process is restarted, and announces nothing while it does.
+
+    THREE guards, kept separate on purpose. The REQUEST is guarded for
+    transport failure (UNREACHABLE), the DECODE and the WALK for body failure
+    (UNVERIFIABLE). Widening the transport `except` to cover the body would
+    make a Tacticus OUTAGE and a Tacticus SCHEMA CHANGE indistinguishable to
+    whoever is paged — one is waited out and the other is worked on — and
+    DDD-6 lists that collapse as a documented failure mode.
     """
     # Imported here, not at module scope, so importing this module costs
     # `dataclasses` and `enum` only. `domain_types.py` and the policy layer
@@ -282,4 +381,18 @@ async def fetch_guild_snapshot(api_key: str) -> GuildSnapshot:
             error=f"the guild service answered HTTP {response.status_code}",
         )
 
-    return parse_guild_snapshot(response.json())
+    try:
+        payload = response.json()
+    except ValueError as decode_error:
+        # An nginx/CDN error page served as 200, a zero-length body, a body
+        # cut mid-serialise, or bytes that are not the encoding they claim.
+        # `json.JSONDecodeError` and `UnicodeDecodeError` are both `ValueError`
+        # subclasses, so the taxonomy is named without importing `json` and
+        # this module stays import-light. Neither the exception's message nor
+        # the body is echoed — only the type name (KPI-6): the body is
+        # unvalidated bytes from the connection the key was sent over.
+        return _unverifiable_body(
+            f"the response body is not JSON ({type(decode_error).__name__})"
+        )
+
+    return parse_guild_snapshot(payload)
