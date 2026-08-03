@@ -9,12 +9,12 @@ the build when a new one does not.
 
 Two entry points, deliberately different in kind:
 
-  `verify_and_resolve` — async. Probes Tacticus, compares the resolved
-      identity against the stored binding, reports the result, and returns a
-      snapshot the caller can ingest from. This is what an ingestion path
-      calls. Slice 01 reports and does not block: `enforce` is False and
-      quarantine arrives in Slice 03, one slice AFTER `/update_guild_key`
-      ships the recovery path, so the first quarantine is never a trap.
+  `verify_and_resolve` — async. Refuses an already-quarantined guild before
+      it asks anything, then probes Tacticus, compares the resolved identity
+      against the stored binding, reports the result, and returns a snapshot
+      the caller can ingest from. This is what an ingestion path calls, so the
+      refusal is INSIDE it: a gate the caller has to remember to ask for is
+      the defect this module exists to close, not a fix for it.
 
   `active_key` — sync, storage-only, no network. Returns the key ONLY if the
       guild is not quarantined. This is what season discovery calls, and the
@@ -108,7 +108,18 @@ async def verify_and_resolve(
     `key_status` untouched (DDD-6) — an outage must not quarantine a trusted
     key, and an unverifiable one is still trusted (only the check is offline),
     so those paths still return a snapshot and the caller still ingests.
+
+    An ALREADY quarantined guild is refused on the first line, whatever
+    `enforce` says (AC-008.3). `enforce` governs whether a NEWLY OBSERVED
+    mismatch quarantines; it has never governed whether a guild the cluster
+    already stopped trusting may be probed again, and reading a flag the
+    caller passed to decide that is the shape of the original defect. Every
+    caller was safe only because it happened to call `active_key` first and
+    bail — `admin_cog.register_guild` is the one that did not, and it is the
+    one that wrote another guild's roster over 60 `players` rows. The gate
+    lives here so the NEXT caller is safe without knowing any of that.
     """
+    _refuse_a_quarantined_guild(discord_server_id, guild_id)
     api_key = _registered_key(discord_server_id, guild_id)
     context = _KeyContext(discord_server_id, guild_id, _key_ref_for(api_key))
     if not api_key:
@@ -154,7 +165,7 @@ def quarantine(
     `enforce=True` for the same reason.
     """
     binding = load_guild_binding(discord_server_id, guild_id)
-    already_quarantined = binding.key_status == KeyStatus.QUARANTINED.value
+    already_quarantined = _quarantined(binding)
     reason = _quarantine_reason(bound, observed)
     updates: dict = {
         "key_status": KeyStatus.QUARANTINED.value,
@@ -255,7 +266,7 @@ async def install_guild_key(
         replace_guild_key(discord_server_id, guild_id, api_key)
         _rebind(context, binding, observed)
         context.emit_probe_ok(observed)
-        if binding.key_status == KeyStatus.QUARANTINED.value:
+        if _quarantined(binding):
             release(discord_server_id, guild_id)
         _emit_updated(context, observed, elapsed_ms, forced=False, rebound_from=None)
         return InstallResult(outcome=ProbeOutcome.MATCH, identity=observed)
@@ -453,13 +464,17 @@ def _enforce_mismatch(
 
     The bound identity is reconstructed from the binding (uuid + display
     fields) so `GuildQuarantined` can carry both identities to the caller's
-    catch handler without re-reading the binding after the write.
+    catch handler without re-reading the binding after the write. Same
+    reconstruction the already-quarantined gate uses, through the same
+    helper: a display field added to `GuildBinding` and carried in only one
+    of the two makes a first refusal and a repeat refusal say different
+    things about the same guild.
+
+    `_bound_identity` cannot return None here — `_resolve_identity` has
+    already taken the `binding.is_unbound` branch, so this path is reached
+    only on a bound binding.
     """
-    bound = GuildIdentity(
-        uuid=binding.tacticus_guild_id,
-        tag=binding.tacticus_guild_tag,
-        name=binding.tacticus_guild_name,
-    )
+    bound = _bound_identity(binding)
     quarantine(context.server_id, context.guild_id, bound=bound, observed=observed)
     raise GuildQuarantined(context.guild_id, bound=bound, observed=observed)
 
@@ -600,8 +615,73 @@ def _registered_key(discord_server_id: int, guild_id: str) -> str:
 
 
 def _is_quarantined(discord_server_id: int, guild_id: str) -> bool:
-    binding = load_guild_binding(discord_server_id, guild_id)
+    return _quarantined(load_guild_binding(discord_server_id, guild_id))
+
+
+def _quarantined(binding) -> bool:
+    """The one comparison that decides whether a stored key may still be used.
+
+    One predicate rather than the four hand-written `== QUARANTINED.value`
+    comparisons this module used to carry: the whole point of DDD-3 is that
+    there is a single place to change, and a status the storage layer starts
+    spelling differently must not leave three of four sites still trusting a
+    quarantined key.
+    """
     return binding.key_status == KeyStatus.QUARANTINED.value
+
+
+def _refuse_a_quarantined_guild(discord_server_id: int, guild_id: str) -> None:
+    """Raise `GuildQuarantined` for an already-quarantined guild. No request.
+
+    Reading the quarantine is a storage read, so refusing costs nothing and
+    happens BEFORE the probe: fetching the drifted guild's data and then
+    discarding it still pulls that roster into memory and possibly into a
+    traceback, which is the damage the refusal exists to prevent.
+
+    QUARANTINED, not "unverified" (DDD-8). An UNBOUND guild has no stored
+    identity to be wrong about, and trust-on-first-use is the entire reason
+    the probe sits inside `/register_guild` — a gate that refused every guild
+    without a binding would close the write hole by making the command
+    useless. `key_status` is the whole discrimination.
+
+    Both identities come from the stored binding and its `quarantine_reason`,
+    never from a second probe: `GuildQuarantined` is what the caller renders
+    its refusal from, and re-asking the drifted key who it belongs to in order
+    to say "we refuse to ask the drifted key" is the request being refused.
+    """
+    binding = load_guild_binding(discord_server_id, guild_id)
+    if not _quarantined(binding):
+        return
+    raise GuildQuarantined(
+        guild_id,
+        bound=_bound_identity(binding),
+        observed=_observed_identity(binding),
+    )
+
+
+def _bound_identity(binding) -> GuildIdentity | None:
+    """The identity the binding locks onto, or None when it locks onto none."""
+    if not binding.tacticus_guild_id:
+        return None
+    return GuildIdentity(
+        uuid=binding.tacticus_guild_id,
+        tag=binding.tacticus_guild_tag,
+        name=binding.tacticus_guild_name,
+    )
+
+
+def _observed_identity(binding) -> GuildIdentity | None:
+    """The drifted identity, recovered from `quarantine_reason`.
+
+    Only the uuid survives the round trip — `_quarantine_reason` embeds it
+    after a parseable marker precisely so a persisting quarantine can name the
+    drift without a second probe. The tag and the name are display-only and
+    are deliberately not reconstructed from the prose around them.
+    """
+    observed_uuid = _observed_uuid_from_reason(binding.quarantine_reason or "")
+    if not observed_uuid:
+        return None
+    return GuildIdentity(uuid=observed_uuid)
 
 
 def _key_ref_for(api_key: str) -> str:
