@@ -34,6 +34,14 @@ IDENTIFIER_PREFIX_LENGTH = 8
 # already carries a name, a tag and an identifier.
 ISO_DATE_LENGTH = 10
 
+# What `/register_guild` says when the id is taken for any reason OTHER than
+# quarantine. Unchanged wording, moved to a constant so the quarantine refusal
+# sits beside it rather than inside the command body.
+_ALREADY_REGISTERED = (
+    "❌ A guild with ID `{guild_id}` is already registered. "
+    "Choose a different ID or contact an admin to remove the existing entry."
+)
+
 CONFIG_OPTIONS = [
     app_commands.Choice(name="guilds",        value="guilds"),
     app_commands.Choice(name="roles",         value="roles"),
@@ -81,9 +89,21 @@ class AdminCog(commands.Cog):
         guilds    = load_guilds(server_id)
 
         if guild_id in guilds:
+            # AC-008.1: an already-registered id is refused here, before any
+            # probe, so no roster was ever at risk on this branch. What WAS at
+            # risk is the officer: "remove the existing entry" is
+            # `/deregister_guild`, which destroys the guild's entire raid
+            # history (AC-009.4) and launders the quarantine on
+            # re-registration (AC-009.5). An officer one command away from
+            # `/update_guild_key` must not be routed through the two most
+            # destructive commands in this cog, so when the id is taken
+            # BECAUSE the guild is quarantined, the reply says so and names
+            # the exit instead.
+            quarantined = _quarantine_refusal(
+                load_guild_binding(server_id, guild_id), guild_id
+            )
             await interaction.followup.send(
-                f"❌ A guild with ID `{guild_id}` is already registered. "
-                f"Choose a different ID or contact an admin to remove the existing entry.",
+                quarantined or _ALREADY_REGISTERED.format(guild_id=guild_id),
                 ephemeral=True,
             )
             return
@@ -127,6 +147,25 @@ class AdminCog(commands.Cog):
                 f"• ID: `{guild_id}`\n"
                 f"• Leader role: {role.mention}\n"
                 f"• Bound to: {_registration_binding_line(snapshot)}",
+                ephemeral=True,
+            )
+        except guild_keys.GuildQuarantined:
+            # AC-008.1c — NARROW THE SWALLOW. Step 07-01 moved the quarantine
+            # gate inside `verify_and_resolve`, so a slug still carrying a
+            # quarantined binding (rollback residue: the binding outlived the
+            # guild row) refuses here before any request. The broad handler
+            # below caught that refusal and rendered it as "player list could
+            # not be fetched" — which reads as a transient outage, is false,
+            # and leaves the operator nothing to act on. A refusal must reach
+            # them AS a refusal, naming the only exit.
+            #
+            # This branch is keyed on quarantine and nothing else: an UNBOUND
+            # guild never raises, so trust-on-first-use (DDD-8) still adopts
+            # on the line above. That distinction is the point of the command.
+            await interaction.followup.send(
+                _quarantine_refusal_text(
+                    load_guild_binding(server_id, guild_id), guild_id
+                ),
                 ephemeral=True,
             )
         except Exception as e:
@@ -751,6 +790,62 @@ def _strip_uuids(text: str) -> str:
     import re
 
     return re.sub(_UUID_PATTERN, "", text).strip()
+
+
+# ==========================================
+# Quarantine refusal (AC-008.1 / AC-008.1c)
+# ==========================================
+
+def _quarantine_refusal(binding, guild_id: str) -> str | None:
+    """The refusal a quarantined guild's officer needs, or None (AC-008.1).
+
+    KEYED ON `key_status` AND NOTHING ELSE, which is the whole discrimination
+    this step exists to make. `/register_guild` carries its probe so the
+    operator learns at registration time what a brand-new key resolves to
+    instead of waiting up to an hour for the next cycle (DDD-8,
+    trust-on-first-use). A gate that refused every guild without a verified
+    binding would close the write hole and take that with it — an UNBOUND
+    guild has no stored identity to be wrong about, and "never checked" is not
+    "known bad". So this returns None for every state except quarantine,
+    including states no migration ever wrote.
+
+    `/register_guild` calls it on BOTH refusal paths: the already-registered
+    branch reads the binding directly, and the post-probe branch arrives via
+    `GuildQuarantined` from the chokepoint.
+    """
+    if binding.key_status != KeyStatus.QUARANTINED.value:
+        return None
+    return _quarantine_refusal_text(binding, guild_id)
+
+
+def _quarantine_refusal_text(binding, guild_id: str) -> str:
+    """Name the problem, then name the one command that ends it.
+
+    THE ROUTING IS THE POINT. The two replies this text replaces sent an
+    officer somewhere harmful: "contact an admin to remove the existing entry"
+    is `/deregister_guild`, which destroys the guild's whole raid history
+    (AC-009.4) and launders the quarantine when the guild is registered again
+    (AC-009.5); "player list could not be fetched" reads as an outage and
+    invites a retry that will refuse identically forever. `/update_guild_key`
+    is the only exit — it probes the SUBMITTED key before storing anything
+    (AC-003.6) and releases the quarantine when the key agrees — so it is
+    named explicitly, and the destructive route is named as one to avoid
+    rather than left for the officer to rediscover.
+
+    Renders through `_quarantine_line`, the same renderer `/view_config` uses,
+    so both surfaces describe a quarantine identically and neither can leak a
+    full identifier (KPI-6: `quarantine_reason` carries the observed uuid by
+    design, and that renderer is where it is stripped).
+    """
+    return (
+        f"⛔ Guild `{guild_id}` is quarantined, so no roster was fetched and "
+        f"nothing was written.\n"
+        f"• {_quarantine_line(binding)}\n"
+        f"Run `/update_guild_key guild_id:{guild_id}` with the guild's real "
+        f"key — that is the only exit from quarantine. Do NOT deregister and "
+        f"re-register: that erases the guild's raid history and clears the "
+        f"quarantine without ever fixing the key."
+    )
 
 
 def _registration_binding_line(snapshot: GuildSnapshot) -> str:
