@@ -301,11 +301,53 @@ class ClusterRepository(ABC):
         transaction: a write that updates one without the other leaves a row
         whose uniqueness check no longer matches its key.
 
-        Raises `KeyError` when the guild row is absent: installing a key for an
-        unregistered guild is a caller-side refusal (04-02), never a silent
-        no-op here. Raw-SQL key edits are forbidden — this is the only
-        sanctioned write path for a key replacement.
+        THREE REFUSALS, and every adapter owes all three (08-01):
+
+        - `KeyError` when the guild row is absent: installing a key for an
+          unregistered guild is a caller-side refusal (04-02), never a silent
+          no-op here.
+        - `ValueError` when `api_key` is empty or whitespace-only. Blanking is
+          not a key write. `encrypt_api_key("")` returns `""` and
+          `api_key_hmac("")` returns `None` — both correct in isolation, and
+          both the reason several keyless guilds coexist under a NULLABLE
+          UNIQUE constraint — but composed they turn the one method allowed to
+          write a key into one that silently erases it. A whitespace-only key
+          is the same erasure wearing a disguise: nothing can authenticate
+          with it, so the guild's real key is gone either way. Use `save` to
+          register a guild with no key; this method only ever replaces one.
+          Refused BEFORE anything is written, so a refusal leaves every column
+          byte-identical (`AC-009.7`).
+        - `GuildKeyAlreadyRegisteredError` when another guild already holds
+          this key, on backends that enforce key uniqueness. `guilds.api_key_
+          hmac` is UNIQUE, and an untranslated violation surfaces as a raw
+          `IntegrityError` carrying the Fernet ciphertext and the full 64-hex
+          hmac in its inlined bound parameters — which `main.py`'s generic
+          handler prints and sends to Discord (KPI-6). The typed refusal names
+          the holding guild and carries no key material. Same pattern, same
+          reason, as `DuplicateReplayUrlError` on the replay-URL constraint
+          (ADR-007). The JSON rollback backend has no `api_key_hmac` column
+          and therefore no uniqueness to violate; per ADR-006 D9 it degrades —
+          it honours the blank refusal identically and cannot raise this one.
+
+        Raw-SQL key edits are forbidden — this is the only sanctioned write
+        path for a key replacement.
         """
+
+    @staticmethod
+    def _refuse_blank_guild_key(api_key: str) -> None:
+        """Guard shared by every adapter, so the refusal cannot drift apart.
+
+        Declared on the ABC rather than duplicated per adapter: this is the
+        `ValueError` clause of `replace_guild_key`'s contract, and a second
+        copy of it is exactly the divergence between the live and the rollback
+        path that ADR-006 D9 exists to keep narrow.
+        """
+        if api_key.strip():
+            return
+        raise ValueError(
+            "replace_guild_key refuses a blank api_key: it would erase the "
+            "guild's key rather than replace it"
+        )
 
 
 class DuplicateReplayUrlError(Exception):
@@ -317,6 +359,29 @@ class DuplicateReplayUrlError(Exception):
         self.map_name = map_name
         self.url = url
         super().__init__(f"Duplicate replay URL for {boss!r}/{map_name!r}: {url!r}")
+
+
+class GuildKeyAlreadyRegisteredError(Exception):
+    """Raised by `replace_guild_key` when another guild already holds the key.
+
+    The `guilds.api_key_hmac` UNIQUE constraint is what refuses the write; this
+    is that refusal translated at the repository boundary, so a raw
+    `IntegrityError` never leaves the adapter. Same move, same reason, as
+    `DuplicateReplayUrlError`.
+
+    CARRIES `guild_id` — the guild that ALREADY holds the key — and nothing
+    else. That one field is the difference between a refusal an admin can act
+    on and a dead end. What it deliberately does NOT carry is any key
+    material: no plaintext, no Fernet ciphertext, no hmac, no SQL fragment and
+    no bound parameters. `main.py`'s handler interpolates `{error}` into both
+    a log line and a Discord message, so whatever this renders IS what is
+    disclosed (KPI-6) — which is why the message is built from the guild id
+    alone and the originating `IntegrityError` is suppressed at the raise
+    (`from None`) rather than chained into a traceback that carries it.
+    """
+    def __init__(self, guild_id: str):
+        self.guild_id = guild_id
+        super().__init__(f"That API key is already registered to guild {guild_id!r}")
 
 
 class JsonClusterRepository(ClusterRepository):
@@ -627,7 +692,14 @@ class JsonClusterRepository(ClusterRepository):
         JSON path, so only `api_key` is updated. Edits the one guild's entry
         in `guilds.json` directly — no deletion, no rewrite of siblings — so
         the rollback path mirrors the SQLite impl's "touch only the key
-        column" guarantee as closely as a flat file allows."""
+        column" guarantee as closely as a flat file allows.
+
+        The blank refusal is honoured identically and BEFORE the file is read,
+        so a refused call leaves `guilds.json` untouched on disk. The
+        collision refusal is not raisable here: there is no `api_key_hmac`
+        column and so no uniqueness for a write to violate — the documented
+        ADR-006 D9 degradation, same class as the binding methods above."""
+        self._refuse_blank_guild_key(api_key)
         guilds_file = self._server_path(discord_server_id) / "guilds.json"
         data = self._read_json(guilds_file)
         guilds = data.get("guilds", {})

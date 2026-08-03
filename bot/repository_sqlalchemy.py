@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, or_, select, text
 from sqlalchemy.exc import IntegrityError
 
 from bot.db import models
@@ -47,10 +47,40 @@ from bot.repository import (
     ClusterRepository,
     DuplicateReplayUrlError,
     GuildBinding,
+    GuildKeyAlreadyRegisteredError,
     ReplayEntry,
     ReplayThreadInfo,
 )
 from bot.tracker import TOP_N
+
+# How SQLite names the `uq_guilds_api_key_hmac` violation, and how SQLAlchemy
+# would name it if the backend ever reported the constraint instead of the
+# column. Matched against the DRIVER's message (`exc.orig`) and never against
+# `str(exc)`, which is the string that carries the inlined bound parameters —
+# the Fernet ciphertext and the hmac — this whole translation exists to keep
+# out of the logs (KPI-6).
+_GUILD_KEY_UNIQUENESS_MARKERS = ("guilds.api_key_hmac", "uq_guilds_api_key_hmac")
+
+# The holder named by a refusal raised after the constraint fired but before
+# the holder could be re-read — the row that caused it was rolled back or
+# removed in between. Vanishingly unlikely in a single-process bot, and still
+# a refusal rather than an escaping `IntegrityError`: an admin told "that key
+# is taken" without a name can retry, an admin sent the ciphertext cannot
+# un-disclose it.
+_HOLDER_VANISHED = ""
+
+
+def _violates_guild_key_uniqueness(violation: IntegrityError) -> bool:
+    """True only for a UNIQUE violation on the guild key fingerprint.
+
+    Scoped deliberately: a blanket `except IntegrityError` on the key-write
+    path would catch a genuinely different constraint failure — a foreign key,
+    a NOT NULL — and report it to the admin as "that key is already
+    registered", which is a wrong answer delivered confidently. Anything that
+    is not this constraint is re-raised untouched.
+    """
+    driver_message = str(getattr(violation, "orig", "") or "")
+    return any(marker in driver_message for marker in _GUILD_KEY_UNIQUENESS_MARKERS)
 
 
 class SqlAlchemyClusterRepository(ClusterRepository):
@@ -739,13 +769,71 @@ class SqlAlchemyClusterRepository(ClusterRepository):
         role_id, notification_channel_id and would let a stale dict clobber
         state. Touching only these two columns makes CASCADE impossible by
         construction: nothing here can delete the row or its dependents.
+
+        Both refusals fire before the row is dirtied (08-01): the blank guard
+        first, then the holder lookup. The `session.flush()` afterwards is the
+        real guard for both — the fast-path SELECT is what lets the refusal
+        NAME the holder, exactly as `upsert_replay_entry`'s SELECT-then-INSERT
+        does for the replay-URL constraint.
         """
+        self._refuse_blank_guild_key(api_key)
         with self._db.session_scope() as session:
             row = session.get(GuildRow, (discord_server_id, guild_id))
             if row is None:
                 raise KeyError(guild_id)
+            new_hmac = api_key_hmac(api_key, self._fernet_key)
+            holder = self._guild_id_holding_key(session, new_hmac, row)
+            if holder is not None:
+                raise GuildKeyAlreadyRegisteredError(holder)
             row.api_key = encrypt_api_key(api_key, self._fernet_key)
-            row.api_key_hmac = api_key_hmac(api_key, self._fernet_key)
+            row.api_key_hmac = new_hmac
+            try:
+                session.flush()
+            except IntegrityError as violation:
+                if not _violates_guild_key_uniqueness(violation):
+                    raise
+                # A holder appeared between the SELECT and the flush. Roll the
+                # failed write back before re-reading, and raise `from None`
+                # so the IntegrityError — which carries the ciphertext and the
+                # hmac in its inlined parameters — is not chained into a
+                # traceback that would disclose them (KPI-6).
+                session.rollback()
+                raise GuildKeyAlreadyRegisteredError(
+                    self._guild_id_holding_key(session, new_hmac, row)
+                    or _HOLDER_VANISHED
+                ) from None
+
+    def _guild_id_holding_key(self, session, key_hmac: str | None,
+                              written_row: GuildRow) -> str | None:
+        """The guild whose stored fingerprint is `key_hmac`, if any other holds it.
+
+        Searched table-global rather than per server because the constraint IS
+        table-global (`uq_guilds_api_key_hmac`): a lookup scoped to one
+        Discord server would report "no holder" and then be contradicted by
+        the flush. That the constraint spans tenants is a real cross-tenant
+        coupling, out of scope here and recorded for its own ADR.
+
+        `written_row` — the row the caller is about to update — is excluded on
+        its FULL primary key, not on the slug alone: guild ids are slugs and
+        repeat across Discord servers, so `guild_id != ...` would silently
+        skip a genuine holder that happens to share the slug, which is the one
+        collision the fast path must not miss.
+
+        A NULL `key_hmac` cannot collide (that is what makes the column
+        NULLABLE UNIQUE), and never reaches here anyway: only a blank key
+        produces one, and blank keys are refused before this is called.
+        """
+        if key_hmac is None:
+            return None
+        return session.execute(
+            select(GuildRow.guild_id).where(
+                GuildRow.api_key_hmac == key_hmac,
+                or_(
+                    GuildRow.discord_server_id != written_row.discord_server_id,
+                    GuildRow.guild_id != written_row.guild_id,
+                ),
+            )
+        ).scalars().first()
 
     def _binding_from_row(self, row) -> GuildBinding:
         return GuildBinding(
