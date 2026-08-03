@@ -1,6 +1,5 @@
 import logging
 import os
-import re
 from pathlib import Path
 
 from bot.repository import (
@@ -60,10 +59,13 @@ def build_repo() -> ClusterRepository:
 
 repo: SupportsProbe = build_repo()
 
-UUID_PATTERN = re.compile(
-    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
-    re.IGNORECASE
-)
+# `UUID_PATTERN` used to live here and had no caller left. It moved to
+# `bot/services/tacticus/guild_client.py`, the guild-identity vocabulary's
+# home, where `canonical_guild_id` is its one consumer. It could not be
+# imported back from here: this module must not reach the policy/HTTP side
+# (`test_the_guilds_wrapper_layer_stays_free_of_policy_and_http` /
+# `test_archon_rules_hold`), and `guild_client` imports `httpx` inside
+# `fetch_guild_snapshot`, which archon reads transitively.
 
 
 # ==========================================

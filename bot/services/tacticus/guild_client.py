@@ -13,10 +13,29 @@ per-hour Tacticus call volume does not rise.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 
 TACTICUS_GUILD_URL = "https://api.tacticusgame.com/api/v1/guild"
+
+# MOVED here from `bot/guilds.py` (where it had no remaining caller) rather
+# than copied. `guild_client` is the guild-identity vocabulary's home and is
+# import-light — `re` is stdlib and costs nothing, whereas importing
+# `bot.guilds` from here would drag the composition root (and the repository
+# it builds at import time) into every module that wants the vocabulary, and
+# importing THIS module from `bot/guilds.py` would put `httpx` on the wrapper
+# layer's transitive import graph, which `test_archon_rules_hold` forbids.
+# One definition, in the only place both constraints allow (Mandate-12).
+UUID_PATTERN = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+    re.IGNORECASE
+)
+
+# U+FEFF. A proxy or CDN that re-encodes a JSON body is free to prepend one,
+# and it is NOT whitespace to `str.strip()` (category Cf), so it has to be
+# named explicitly or it survives into the comparison.
+BYTE_ORDER_MARK = "\ufeff"
 
 # Reused verbatim from `PlayerService._fetch_roster`, the call this module
 # replaces. The endpoint, the header shape and this timeout are the same read
@@ -54,6 +73,49 @@ class KeyStatus(Enum):
     QUARANTINED = "quarantined"
 
 
+def canonical_guild_id(value: object) -> str | None:
+    """The one canonical form of a `guildId`, or None when there isn't one.
+
+    EXACTLY four operations, in this order, and nothing more:
+
+      1. reject anything that is not a `str` — an int, a bool or None is not
+         an identifier, it is the absence of one;
+      2. strip surrounding whitespace and the BOM (either order, either end);
+      3. validate what is left against `UUID_PATTERN`;
+      4. casefold.
+
+    The order is the safety property. Casefolding BEFORE validating would
+    admit strings that are only uuid-shaped once folded, and two different
+    guilds that both fold onto the same shape is the 2026-07-28 incident
+    restored by the fix meant to prevent it. Hyphens are NOT stripped and
+    unicode is NOT normalised for the same reason: every operation here has
+    to be one that cannot merge two distinct identifiers.
+
+    Returning None rather than raising is deliberate — an identifier no
+    identity can be built from is UNVERIFIABLE (the key worked, only the check
+    did not), and DDD-6 requires that to leave the binding byte-identical.
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = _without_surrounding_noise(value)
+    if not UUID_PATTERN.match(candidate):
+        return None
+    return candidate.casefold()
+
+
+def _without_surrounding_noise(value: str) -> str:
+    """Whitespace and BOM removed from BOTH ends, in either order.
+
+    Three passes rather than one: `str.strip()` does not treat U+FEFF as
+    whitespace, so a space-then-BOM prefix needs the space gone before the
+    BOM sits at an end, and a BOM-then-space prefix needs the BOM gone
+    before the space does. Only the ENDS are touched — a BOM in the MIDDLE
+    of a value stays there, fails `UUID_PATTERN`, and the value is refused,
+    which is the correct answer for a value that arrived corrupted.
+    """
+    return value.strip().strip(BYTE_ORDER_MARK).strip()
+
+
 @dataclass(frozen=True)
 class GuildIdentity:
     """The guild a key resolves to.
@@ -69,7 +131,22 @@ class GuildIdentity:
     name: str | None = None
 
     def matches(self, other: "GuildIdentity") -> bool:
-        return self.uuid == other.uuid
+        """Compare the two identifiers canonically, BOTH sides.
+
+        Both sides, not just the observed one: a binding adopted before this
+        existed holds whatever casing the vendor sent on adoption day
+        (trust-on-first-use writes `observed.uuid` verbatim, DDD-8), and
+        `install_guild_key` compares the operator's correct key against it.
+        Canonicalising only the incoming side would leave that guild
+        quarantined with its only exit refusing the right key — quarantine as
+        a trap, which DISCUSS D3 forbids.
+
+        An identifier with no canonical form matches nothing, INCLUDING
+        another identifier with no canonical form: two values neither of which
+        names a guild do not name the same guild.
+        """
+        mine = canonical_guild_id(self.uuid)
+        return mine is not None and mine == canonical_guild_id(other.uuid)
 
     @property
     def short(self) -> str:
@@ -97,9 +174,16 @@ class GuildSnapshot:
 def parse_guild_snapshot(payload: dict) -> GuildSnapshot:
     """Classify a 200-OK `/api/v1/guild` body into a snapshot.
 
-    Returns UNVERIFIABLE when `guildId` is absent. There is NO fallback to
-    comparing `guildTag` — a quiet downgrade to a weaker check is the same
-    failure shape as the incident this feature exists to prevent (DDD-10).
+    Returns UNVERIFIABLE when `guildId` is absent OR carries a value no
+    identity can be built from — a number, a bool, whitespace, or text that is
+    not a uuid. There is NO fallback to comparing `guildTag` — a quiet
+    downgrade to a weaker check is the same failure shape as the incident this
+    feature exists to prevent (DDD-10).
+
+    A `GuildIdentity` is constructed ONLY from a value that canonicalised, so
+    every identity in the system holds a validated canonical uuid: `matches`
+    cannot be fooled by casing and `short` cannot raise on a value it can no
+    longer be handed.
 
     A resolved identity is reported as MATCH: this function was given no
     binding to compare against, so it reports "a guild resolved". Deciding
@@ -107,16 +191,17 @@ def parse_guild_snapshot(payload: dict) -> GuildSnapshot:
     that holds the expected identity.
     """
     guild = payload.get("guild") or {}
-    uuid = guild.get("guildId")
+    raw_uuid = guild.get("guildId")
+    uuid = canonical_guild_id(raw_uuid)
 
-    if not uuid:
+    if uuid is None:
         # The members are deliberately dropped as well: a roster whose owner
         # cannot be established is one nobody may write, and handing it back
         # anyway is the invitation to write it.
         return GuildSnapshot(
             outcome=ProbeOutcome.UNVERIFIABLE,
             status=200,
-            error="the response carries no guildId",
+            error=_no_usable_guild_id(raw_uuid),
             raw=payload,
         )
 
@@ -130,6 +215,23 @@ def parse_guild_snapshot(payload: dict) -> GuildSnapshot:
         members=frozenset(m["userId"] for m in guild.get("members") or []),
         status=200,
         raw=payload,
+    )
+
+
+def _no_usable_guild_id(raw_uuid: object) -> str:
+    """Why the identifier could not be used, in the words of the operator.
+
+    "absent" and "unusable" are different vendor faults with different fixes,
+    and a single message for both is what makes an operator investigate the
+    wrong one. The VALUE is not echoed — only its type — because the body is
+    unvalidated vendor output and a log line is not the place to find out what
+    it can contain.
+    """
+    if raw_uuid is None:
+        return "the response carries no guildId"
+    return (
+        f"the response carries a guildId that is not a uuid "
+        f"({type(raw_uuid).__name__})"
     )
 
 
