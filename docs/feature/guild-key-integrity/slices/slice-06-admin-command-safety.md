@@ -3,6 +3,36 @@
 **Feature:** `guild-key-integrity` · **Remediates:** KPI-6, AC-003.4, ADR-008 DDD-4
 **Estimate:** ~1 day (≤6 h crafter dispatch) · **Order:** 3rd of the remediation set
 
+> ## ⚠ AC-009.6 is one end of a state slice 05 owns the other end of
+>
+> **AC-009.6 (no orphaned bindings after a parity rollback) and slice 05's
+> AC-008.1 describe one state from two ends.** This slice stops the orphan from
+> being *created*; slice 05 governs what `/register_guild` does when it *meets*
+> one. Neither is complete without the other, and until 2026-08-03 they were
+> coupled through code — slice 05 built its precondition by calling the very
+> `_rollback_data` this AC changes, so satisfying AC-009.6 silently destroyed
+> slice 05's `Given`. Resolved by the DISTILL escalation
+> (`distill/upstream-issues.md` UI-13); the two are now order-independent.
+>
+> **Two things to keep in view while implementing AC-009.6:**
+>
+> * **The fix is forward-only.** Adding `guild_key_bindings` to
+>   `_DATA_TABLES_DELETE_ORDER` stops NEW orphans. It does not remove rows an
+>   earlier rollback already left, and DELIVER has decided against a cleanup
+>   migration (UI-14). So the residue persists by design, and slice 05's
+>   AC-008.1c gate is the only thing that makes it harmless. **Do not read
+>   AC-009.6 as retiring that scenario.**
+> * **Do not "fix" this by making slice 05's scenario constructible again.**
+>   The orphan is a defect; leaving the leak open to preserve a test fixture is
+>   the inversion this escalation exists to prevent. Slice 05 no longer depends
+>   on it.
+>
+> Related: AC-009.5's quarantine history is retained in a tombstone table with
+> no FK to `guilds` (UI-11 resolution), which deliberately *does* survive a
+> rollback. That is not a repeat of this defect — a surviving tombstone is only
+> ever read to warn, an orphaned binding is compared against a fresh key and
+> silently adopted. Fail-safe versus fail-open.
+
 ## Goal
 
 No admin command discloses key material, destroys history while reporting the

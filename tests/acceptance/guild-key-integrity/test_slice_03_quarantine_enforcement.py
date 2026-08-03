@@ -536,18 +536,6 @@ async def _exercise_site(site: KeyConsumptionSite, guild_id: str, *, service) ->
 
     server_id = PROD_SERVER_ID
 
-    # The two `player_service` sites consume a `GuildSnapshot`, never a key
-    # (DDD-2 moved the fetch out). The key-consumption point is the CALLER
-    # that produces the snapshot via `active_key`; for a quarantined guild
-    # that returns None and the caller never assembles a snapshot, so
-    # `refresh_guild`/`validate_if_stale` are never reached.
-    if site in (KeyConsumptionSite.PLAYER_SERVICE_REFRESH,
-                KeyConsumptionSite.PLAYER_SERVICE_STALE):
-        with _tacticus_answered_by(service):
-            if guild_keys.active_key(server_id, guild_id) is None:
-                raise _QuarantinedError()
-        return
-
     if site is KeyConsumptionSite.AUTO_UPDATE_SEASON:
         cog = _tasks_cog_posting_to(FakeChannel(channel_id=1))
         _ensure_guild_registered(server_id, guild_id)
@@ -586,6 +574,218 @@ async def _exercise_site(site: KeyConsumptionSite, guild_id: str, *, service) ->
         if verified is None:
             raise _QuarantinedError()
         return
+
+    # ---- the three sites the previous enum omitted -----------------------
+    # Added 2026-08-02 with the `KeyConsumptionSite` correction. Each drives
+    # the real `app_commands.Command` on `AdminCog` — the same port-to-port
+    # litmus slice 02 applies to `/update_guild_key`: delete the command
+    # method and these branches error rather than silently pass.
+
+    if site is KeyConsumptionSite.REGISTER_GUILD:
+        # NOTE ON STRENGTH — read before trusting this branch.
+        #
+        # Driven against a guild that is registered AND quarantined,
+        # `/register_guild` refuses at its own already-registered guard,
+        # before any probe. That is a genuine production refusal with a
+        # genuine zero fetch count, so this branch is a real regression guard
+        # (remove the guard and the probe fires here). It is NOT, however,
+        # the confirmed defect: the reachable contamination path is a
+        # quarantined binding with NO guild row, which `/register_guild`
+        # walks straight past into `refresh_guild`. That state is not
+        # constructible from this scenario's `Given` — `save_guilds` CASCADEs
+        # the binding away with the row — so it gets its own scenario with
+        # its own `Given` in `test_slice_05_close_the_write_holes.py`
+        # (AC-008.1c, `test_registering_over_an_orphaned_quarantined_binding_
+        # writes_nothing`), where it reds today. This branch is deliberately
+        # the weaker half of the pair and is documented as such rather than
+        # left to look like full coverage.
+        #
+        # What this branch DOES observe got stronger on 2026-08-03: the
+        # refusal it sees is the already-registered message, and AC-008.1
+        # (re-scoped) now requires that message to name the quarantine and
+        # `/update_guild_key`. See upstream-issues UI-13.
+        _ensure_guild_registered(server_id, guild_id)
+        interaction = _admin_interaction()
+        with _tacticus_answered_by(service):
+            await _invoke_admin_command(
+                "register_guild", interaction,
+                name="Word Bearers", guild_id=guild_id,
+                api_key="wb-key", role=_FakeRole(role_id=1),
+            )
+        if _is_refusal(interaction.reply_text):
+            raise _QuarantinedError()
+        return
+
+    if site is KeyConsumptionSite.SET_LIVE_LEADERBOARD:
+        _ensure_guild_registered(server_id, guild_id)
+        interaction = _admin_interaction()
+        with _tacticus_answered_by(service):
+            await _invoke_admin_command(
+                "set_live_leaderboard", interaction,
+                guild_id=guild_id, channel=FakeChannel(channel_id=7),
+            )
+        if _is_refusal(interaction.reply_text):
+            raise _QuarantinedError()
+        return
+
+    if site is KeyConsumptionSite.SET_LIVE_CLUSTER_LEADERBOARD:
+        _ensure_guild_registered(server_id, guild_id)
+        interaction = _admin_interaction()
+        with _tacticus_answered_by(service):
+            await _invoke_admin_command(
+                "set_live_cluster_leaderboard", interaction,
+                channel=FakeChannel(channel_id=7),
+            )
+        if _is_refusal(interaction.reply_text):
+            raise _QuarantinedError()
+        return
+
+    raise AssertionError(
+        f"{site.name} has no branch in _exercise_site — a site was added to "
+        "KeyConsumptionSite without a way to drive its production entry "
+        "point, which is the vacuity this helper exists to prevent"
+    )
+
+
+def _is_refusal(reply: str) -> bool:
+    """True when the command replied with a refusal rather than a success.
+
+    The commands under test render refusals with a leading ❌; the success
+    replies lead with ✅. Reading the marker rather than matching prose keeps
+    the branch from re-passing when someone rewords a message — and keeps it
+    FAILING if a command starts replying with nothing at all, which is the
+    silent-success shape this assertion is guarding against.
+    """
+    return reply.startswith("❌") or reply.startswith("⛔")
+
+
+# ---------------------------------------------------------------------------
+# Driving the real AdminCog slash commands.
+#
+# Replicated rather than imported from `test_slice_02_update_guild_key.py`
+# (UD-10: cross-importing test modules collides same-name `conftest`
+# constants). The shape is deliberately identical to slice 02's, so the two
+# read as one convention.
+# ---------------------------------------------------------------------------
+
+async def _invoke_admin_command(command_name: str, interaction, **kwargs) -> None:
+    """Drive a real `app_commands.Command` on `AdminCog` through its checks.
+
+    Port-to-port: the checks are run first, exactly as
+    `main.py::on_app_command_error` would have them behave, so a scenario
+    cannot accidentally reach a callback the permission gate would have
+    stopped.
+    """
+    from bot.cogs.admin_cog import AdminCog
+    from bot.services.chronicl3r.player_service import PlayerService
+
+    cmd = _find_admin_command(command_name)
+    for chk in cmd.checks:
+        predicate = chk.predicate if hasattr(chk, "predicate") else chk
+        if not await predicate(interaction):
+            await interaction.response.send_message(
+                "❌ You don't have permission to use this command.", ephemeral=True
+            )
+            return
+    cog = AdminCog.__new__(AdminCog)
+    cog.player_service = PlayerService(_FakeChroniclerClient())
+    await cmd.callback(cog, interaction, **kwargs)
+
+
+def _find_admin_command(name: str):
+    from bot.cogs.admin_cog import AdminCog
+
+    for cmd in AdminCog.__cog_app_commands__:
+        if cmd.name == name:
+            return cmd
+    raise AssertionError(
+        f"no `{name}` command is registered on AdminCog — delete the command "
+        "method and this helper errors, which is the port-to-port litmus test"
+    )
+
+
+class _FakeRole:
+    """`discord.Role` — only `id` and `mention` are read by the commands."""
+
+    def __init__(self, role_id: int) -> None:
+        self.id = role_id
+        self.mention = f"<@&{role_id}>"
+
+
+class _FakeResponse:
+    def __init__(self, interaction) -> None:
+        self._interaction = interaction
+
+    async def send_message(self, content="", *, embed=None, ephemeral=False, **kwargs):
+        self._interaction._record(content or (getattr(embed, "description", "") or ""))
+        self._interaction.was_ephemeral = ephemeral
+        self._interaction._replied = True
+
+    async def defer(self, *, ephemeral=False, **kwargs):
+        self._interaction.was_ephemeral = ephemeral
+
+    def is_done(self):
+        return self._interaction._replied
+
+
+class _FakeFollowup:
+    def __init__(self, interaction) -> None:
+        self._interaction = interaction
+
+    async def send(self, content="", *, embed=None, ephemeral=False, **kwargs):
+        self._interaction._record(content or (getattr(embed, "description", "") or ""))
+        self._interaction.was_ephemeral = ephemeral
+
+
+class _FakeInteraction:
+    """A Discord interaction double capturing EVERY reply, not just the last.
+
+    Slice 02's double keeps only the most recent `reply_text` because
+    `/update_guild_key` replies exactly once. `/register_guild` replies up to
+    three times ("registered", then either the roster result or the failure),
+    so a last-wins double would let a refusal be overwritten by a later
+    success line — or vice versa — and the assertion would read whichever
+    happened to land last. `replies` is the list; `reply_text` is the FIRST
+    one, which is the decision the command reached.
+    """
+
+    def __init__(self, *, guild_id: int = PROD_SERVER_ID, administrator: bool = True,
+                 roles=None) -> None:
+        self.guild_id = guild_id
+        self.replies: list[str] = []
+        self.was_ephemeral = False
+        self._replied = False
+        self.user = _FakeUser(administrator=administrator, roles=roles)
+        self.response = _FakeResponse(self)
+        self.followup = _FakeFollowup(self)
+
+    def _record(self, content: str) -> None:
+        self.replies.append(content)
+
+    @property
+    def reply_text(self) -> str:
+        return self.replies[0] if self.replies else ""
+
+    @property
+    def all_replies(self) -> str:
+        return "\n".join(self.replies)
+
+
+class _FakePermissions:
+    def __init__(self, *, administrator: bool) -> None:
+        self.administrator = administrator
+
+
+class _FakeUser:
+    def __init__(self, *, administrator: bool, roles=None) -> None:
+        self.guild_permissions = _FakePermissions(administrator=administrator)
+        self.roles = roles or []
+
+
+def _admin_interaction():
+    """Passes every tier check via the Discord administrator bypass, so the
+    gate under test is the QUARANTINE gate and not the permission one."""
+    return _FakeInteraction(administrator=True)
 
 
 def _ensure_guild_registered(server_id: int, guild_id: str) -> None:

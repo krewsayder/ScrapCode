@@ -3,6 +3,40 @@
 **Feature:** `guild-key-integrity` · **Remediates:** US-003, KPI-2, KPI-5, DDD-3
 **Estimate:** ~1 day (≤6 h crafter dispatch) · **Order:** 2nd of the remediation set
 
+> ## ⚠ Read before sequencing against slice 06
+>
+> **AC-008.1 here and AC-009.6 in slice 06 are one state seen from two ends.**
+> Slice 06 stops a parity rollback from leaving orphaned `guild_key_bindings`
+> behind; this slice governs what `/register_guild` does when it meets one.
+>
+> They used to be coupled through code: AC-008.1's `Given` was built by calling
+> the very `_rollback_data` that AC-009.6 changes. Landing 06 first therefore
+> turned AC-008.1's precondition into a *different* precondition — an UNBOUND
+> guild, which registration correctly adopts — and the scenario went red for a
+> reason that had nothing to do with slice 05. **A reader who sequenced 06
+> before 05 would have read that as a slice-05 defect. It is not.**
+>
+> Resolved 2026-08-03 by the DISTILL escalation
+> (`distill/upstream-issues.md` UI-13). AC-008.1 was split so that neither half
+> depends on `_rollback_data`, and the two slices are now order-independent:
+>
+> | AC | State it governs | Scenario |
+> |---|---|---|
+> | **AC-008.1** | REGISTERED + quarantined — the state every drifted guild is actually in | `test_registering_over_a_quarantined_guild_names_the_way_out` |
+> | **AC-008.1c** | orphaned quarantined binding — the residue a pre-AC-009.6 rollback left | `test_registering_over_an_orphaned_quarantined_binding_writes_nothing` |
+>
+> Two corrections to this brief's ACs follow from that split, both already
+> reflected in the suite:
+>
+> * **AC-008.1's zero-rows clause is now a guard, not the reproduction.** In
+>   the registered state the command already writes nothing (it refuses at
+>   `admin_cog.py:83`). The live defect is the *routing*: the refusal sends the
+>   officer to `/deregister_guild`, which slice 06 shows destroys the guild's
+>   entire history and launders the quarantine on re-registration.
+> * **The `is_former` clause never belonged on either.** `players` CASCADEs
+>   from `guilds`, so no route to "no guild row" leaves a roster to flip. It is
+>   asserted in AC-008.1b via the registration *sequence*. See UI-10.
+
 ## Goal
 
 A quarantined guild writes **zero rows at every site**, including the three
