@@ -50,8 +50,44 @@ ALERT_SENT_EVENT = "guild.key.alert.sent"
 # site that quietly re-enables ingestion reads as silent success.
 INGEST_BLOCKED_EVENT = "guild.key.ingest.blocked"
 
+# One server's pass ended in an exception nobody predicted. Before the guard
+# that emits this existed, that exception ended `discord.ext.tasks.Loop` — and
+# therefore hourly ingestion for EVERY server on the bot — and announced
+# nothing. This record is what makes the containment visible rather than
+# merely claimed: KPI-5 cannot distinguish "the sibling was processed" from
+# "the sibling was skipped quietly" without it.
+SERVER_FAILED_EVENT = "auto_update.server.failed"
+
+# The loop itself is about to stop. Emitted from the `@auto_update.error`
+# handler, which discord.py calls immediately before `Loop` gives up.
+LOOP_FAILED_EVENT = "auto_update.loop.failed"
+
+# The restart budget is spent and hourly ingestion is over until a human acts.
+# Giving up is allowed; giving up SILENTLY is the failure this feature exists
+# to remove, so the terminal state gets a record of its own.
+LOOP_ABANDONED_EVENT = "auto_update.loop.abandoned"
+
+# The wait before each restart the loop is granted. `before_loop` only awaits
+# `wait_until_ready` and a relative-interval loop runs its body at once, so an
+# unwaited restart re-hits the failing dependency within milliseconds — its
+# own outage. A wait longer than the hour the loop already sleeps would be a
+# stall wearing a retry's clothes, so the ceiling stays well inside the cycle.
+_RESTART_BACKOFF_SECONDS = (60.0, 300.0, 900.0)
+
+# How many consecutive loop-level failures are worth restarting through —
+# derived, so the budget and the schedule can never disagree about how many
+# restarts exist. Enough for a dependency that is coming back, few enough that
+# one that is not coming back is not hammered for the rest of the day.
+_MAX_LOOP_RESTARTS = len(_RESTART_BACKOFF_SECONDS)
+
 
 class TasksCog(commands.Cog):
+    # Consecutive `auto_update` loop-level failures. Declared on the class so
+    # the counter exists before `__init__` runs and on cogs built without it,
+    # and so the restart budget can never be defeated by an AttributeError on
+    # the one path that only executes when something is already broken.
+    _loop_failures = 0
+
     def __init__(self, bot: commands.Bot, player_service: PlayerService):
         self.bot            = bot
         self.player_service = player_service
@@ -197,7 +233,38 @@ class TasksCog(commands.Cog):
             return
 
         for server_id in repo.list_server_ids():
+            await self._contained_pass(server_id, channel)
+
+        # A cycle that reached the end is the evidence the loop is healthy, so
+        # the restart budget is only ever spent on CONSECUTIVE failures.
+        self._loop_failures = 0
+
+    async def _contained_pass(self, server_id: int, channel) -> None:
+        """One server's pass, walled off from its siblings.
+
+        `discord.ext.tasks.Loop` stops on an unhandled exception and announces
+        nothing, so before this guard any defect on any ONE server ended
+        hourly ingestion for every server on the bot, invisibly, until someone
+        restarted the process. 06-02 closed the one exception source the
+        re-review found; a guarantee that depends on having enumerated every
+        source is a convention, not a guarantee, and this is what makes the
+        next one non-fatal.
+
+        The guard REPORTS. A `try` that logs nothing turns "the loop died"
+        into "the loop is quietly doing nothing", which looks healthy and is
+        strictly worse than the crash it replaced — it is the same
+        reassuring-but-false signal that let the 2026-07-28 incident run for
+        three days.
+
+        `except Exception` and not `except BaseException`: `CancelledError`
+        derives from `BaseException`, so a shutdown or a `Loop.cancel()` still
+        ends the cycle immediately instead of being logged as a server fault.
+        """
+        try:
             await self._update_one_server(server_id, channel)
+        except Exception as e:
+            _emit_server_failed(server_id, e)
+            print(f"[auto_update] Server {server_id} failed its pass: {e}")
 
     async def _update_channel(self):
         channel = self.bot.get_channel(UPDATE_CHANNEL_ID)
@@ -648,6 +715,45 @@ class TasksCog(commands.Cog):
     async def before_auto_update(self):
         await self.bot.wait_until_ready()
 
+    @auto_update.error
+    async def on_auto_update_error(self, e: BaseException) -> None:
+        """The last net: `Loop` is one statement from stopping, and stopping
+        is silent.
+
+        Only reached by an exception raised OUTSIDE `_contained_pass` —
+        `repo.list_server_ids()` against a database that is down is the live
+        example, and it is exactly the kind of failure that comes back on its
+        own. That is why the handler restarts. It is also a dependency a
+        restart re-hits within milliseconds, which is why the restart waits
+        first and why there are only three of them.
+
+        Abandoning the loop after those three is deliberate: a dependency that
+        has refused four times in twenty minutes is not coming back this hour,
+        and continuing to restart into it is an outage the bot inflicts on
+        itself. Abandoning is NOT the old failure returning, because the old
+        failure was the silence — `LOOP_ABANDONED_EVENT` says out loud that
+        hourly ingestion has ended and needs a human.
+
+        discord.py calls this with the cog injected as `self` (see
+        `Loop._call_loop_function`), so the signature is the cog method's.
+        """
+        failures = self._loop_failures + 1
+        self._loop_failures = failures
+        restarting = failures <= _MAX_LOOP_RESTARTS
+
+        # Emitted BEFORE the wait: a process that dies during the backoff has
+        # still told the operator why its loop stopped.
+        _emit_loop_stopping(e, failures, restarting=restarting)
+        print(
+            f"[auto_update] Loop failed ({failures} in a row): {e} — "
+            f"{'restarting' if restarting else 'ABANDONED, hourly ingestion has stopped'}"
+        )
+        if not restarting:
+            return
+
+        await asyncio.sleep(_restart_delay_seconds(failures))
+        self.auto_update.restart()
+
 
 # ==========================================
 # Cycle bookkeeping + rendering
@@ -696,6 +802,54 @@ def _unusable_key_reason(server_id: int, guild_id: str) -> str:
     if binding.key_status == KeyStatus.QUARANTINED.value:
         return "quarantined"
     return "no_key_registered"
+
+
+def _emit_server_failed(server_id: int, failure: BaseException) -> None:
+    """Record that one server's pass ended in an unexpected exception.
+
+    `error_type` and never `str(failure)`: an exception raised anywhere below
+    `_update_one_server` may have been built from a request, a stored row or a
+    header holding an `api_key`, and KPI-6's guarantee is that no record ever
+    carries key material. The class name cannot. The message still reaches the
+    console line beside this call, which is not a KPI-queried record.
+    """
+    emit_structured(
+        logger, logging.ERROR, SERVER_FAILED_EVENT,
+        ts=_now(),
+        server_id=server_id,
+        error_type=type(failure).__name__,
+    )
+
+
+def _emit_loop_stopping(
+    failure: BaseException, consecutive_failures: int, *, restarting: bool
+) -> None:
+    """Record that the hourly loop is stopping, and whether it will come back.
+
+    One record per handler invocation, named for what happens NEXT — an
+    operator greps for the terminal state rather than reconstructing it by
+    counting. `error_type` only, for the reason `_emit_server_failed` gives.
+    """
+    emit_structured(
+        logger, logging.ERROR,
+        LOOP_FAILED_EVENT if restarting else LOOP_ABANDONED_EVENT,
+        ts=_now(),
+        error_type=type(failure).__name__,
+        consecutive_failures=consecutive_failures,
+        restarting=restarting,
+    )
+
+
+def _restart_delay_seconds(consecutive_failures: int) -> float:
+    """How long to wait before handing the loop back its schedule.
+
+    Grows with consecutive failures and then stops growing: a restart with no
+    wait hammers a dependency that is already refusing, and a wait longer than
+    the hour the loop sleeps anyway would be a stall wearing a retry's
+    clothes.
+    """
+    step = min(max(consecutive_failures, 1), len(_RESTART_BACKOFF_SECONDS))
+    return _RESTART_BACKOFF_SECONDS[step - 1]
 
 
 def _emit_ingest_blocked(server_id: int, guild_id: str, key_ref: str) -> None:
