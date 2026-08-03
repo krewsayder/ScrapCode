@@ -42,6 +42,34 @@ _ALREADY_REGISTERED = (
     "Choose a different ID or contact an admin to remove the existing entry."
 )
 
+# What a guild with no registered key is told. Unchanged wording, and
+# deliberately NOT what a quarantined guild is told: a quarantined guild has a
+# key, and sending its officer here sends them to `/register_guild`.
+_NO_API_KEY = "❌ Guild `{guild_id}` has no API key set."
+
+# The way out of quarantine, written once. Every surface that refuses a
+# quarantined guild ends on this text, so the destructive route can never be
+# named on one surface and the recovery on another. `/deregister_guild` erases
+# the guild's whole raid history (AC-009.4) and launders the quarantine on
+# re-registration (AC-009.5); `/update_guild_key` probes the SUBMITTED key
+# before storing anything (AC-003.6) and is the only exit.
+_QUARANTINE_EXIT = (
+    "Run `/update_guild_key guild_id:{guild_id}` with the guild's real key — "
+    "that is the only exit from quarantine. Do NOT deregister and re-register: "
+    "that erases the guild's raid history and clears the quarantine without "
+    "ever fixing the key."
+)
+
+# `guild_keys.unusable_key_reason`'s vocabulary in the words an officer acts
+# on. A rendering table, not a second definition — the discrimination itself
+# is made once, in the chokepoint. `.get(reason, reason)` rather than `[]`: a
+# reason this table has not learned yet must degrade to the log vocabulary
+# inside a Discord reply, never to a KeyError inside a refusal.
+_UNUSABLE_KEY_WORDS = {
+    guild_keys.QUARANTINED: "quarantined — its stored key resolves to another guild",
+    guild_keys.NO_KEY_REGISTERED: "no API key registered",
+}
+
 CONFIG_OPTIONS = [
     app_commands.Choice(name="guilds",        value="guilds"),
     app_commands.Choice(name="roles",         value="roles"),
@@ -442,7 +470,17 @@ class AdminCog(commands.Cog):
         # never reads.
         credential = guild_keys.active_key(server_id, guild_id)
         if credential is None:
-            await interaction.followup.send(f"❌ Guild `{guild_id}` has no API key set.", ephemeral=True)
+            # AC-008.5b — the refusal has to say WHICH of the two it is. A
+            # quarantined guild HAS a key; "has no API key set" sends the
+            # officer to `/register_guild`, the one command that overwrites
+            # the roster (AC-008.1). The guild NAMED in the command is the one
+            # resolved here and there is no fall-through to apply (AC-008.5):
+            # a sibling's key would build this guild's board over data the bot
+            # has stopped updating, which is a product decision nobody has
+            # made (UI-9).
+            await interaction.followup.send(
+                _unusable_key_refusal(server_id, guild_id), ephemeral=True
+            )
             return
 
         try:
@@ -521,13 +559,30 @@ class AdminCog(commands.Cog):
         # an unregistered key produces a 401 the officer then has to interpret,
         # and the answer to "why did this fail" would be a Tacticus error
         # message about a request this command should never have made.
-        first_guild_id = next(iter(guilds))
-        credential     = guild_keys.active_key(server_id, first_guild_id)
+        #
+        # AC-008.4 / KPI-5 — this used to read `next(iter(guilds))`: an
+        # arbitrary guild, unrelated to anything the officer asked for, whose
+        # single unusable key disabled the cluster-wide board for every healthy
+        # sibling. The season is a CLUSTER fact and any healthy key can answer
+        # it, so the fall-through `_current_season` already carries (DDD-7 /
+        # AC-004.7) applies here unchanged.
+        # The loop is INLINE and not a helper on purpose. `KeyConsumptionSite`
+        # declares WHICH production function consumes a key, AC-004.6 is
+        # parametrized over that inventory, and the enclosing function is the
+        # coordinate — so extracting these three lines moves this command out
+        # of the set of sites proven to refuse a quarantined guild and moves a
+        # private helper into it. `test_the_key_consumption_inventory_matches_
+        # production` fails on exactly that, which is the AST chokepoint doing
+        # its job rather than an inconvenience to route around.
+        credential = None
+        for candidate_id in guilds:
+            credential = guild_keys.active_key(server_id, candidate_id)
+            if credential is not None:
+                break
+
         if credential is None:
             await interaction.followup.send(
-                f"❌ `{first_guild_id}` has no usable key, so the current season "
-                f"could not be determined.",
-                ephemeral=True,
+                _cluster_season_refusal(server_id, guilds), ephemeral=True
             )
             return
 
@@ -838,14 +893,56 @@ def _quarantine_refusal_text(binding, guild_id: str) -> str:
     design, and that renderer is where it is stripped).
     """
     return (
-        f"⛔ Guild `{guild_id}` is quarantined, so no roster was fetched and "
+        f"⛔ Guild `{guild_id}` is quarantined, so nothing was fetched and "
         f"nothing was written.\n"
         f"• {_quarantine_line(binding)}\n"
-        f"Run `/update_guild_key guild_id:{guild_id}` with the guild's real "
-        f"key — that is the only exit from quarantine. Do NOT deregister and "
-        f"re-register: that erases the guild's raid history and clears the "
-        f"quarantine without ever fixing the key."
+        + _QUARANTINE_EXIT.format(guild_id=guild_id)
     )
+
+
+def _unusable_key_refusal(server_id: int, guild_id: str) -> str:
+    """The ONE rendering of "this guild's key cannot be used" (AC-008.5b).
+
+    Both leaderboard commands refuse through this, and which of the two
+    refusals it is comes from `guild_keys.unusable_key_reason` — the single
+    definition, shared with the hourly cycle. The cog does not compare
+    `key_status` itself: a second comparison here is the drift that produced
+    the defect being fixed, where one surface called a quarantine a missing
+    key and routed the officer into `/register_guild`.
+    """
+    if guild_keys.unusable_key_reason(server_id, guild_id) == guild_keys.QUARANTINED:
+        return _quarantine_refusal_text(
+            load_guild_binding(server_id, guild_id), guild_id
+        )
+    return _NO_API_KEY.format(guild_id=guild_id)
+
+
+def _cluster_season_refusal(server_id: int, guild_ids) -> str:
+    """No key in the cluster can answer the season — say so, per guild.
+
+    The fall-through has to end in an explained refusal rather than a silent
+    skip or an empty board (AC-008.6). It names each guild's reason from the
+    same `guild_keys.unusable_key_reason` the fall-through itself skipped on,
+    so the reply cannot describe a cluster the command did not walk, and it
+    names `/update_guild_key` when any guild is quarantined — reporting a
+    quarantine as a missing key is what routes an officer into
+    `/register_guild` and the roster overwrite (AC-008.1).
+    """
+    reasons = [
+        (guild_id, guild_keys.unusable_key_reason(server_id, guild_id))
+        for guild_id in guild_ids
+    ]
+    lines = "\n".join(
+        f"• `{guild_id}` — {_UNUSABLE_KEY_WORDS.get(reason, reason)}"
+        for guild_id, reason in reasons
+    )
+    refusal = (
+        "❌ No registered guild has a usable key, so the current season could "
+        f"not be determined.\n{lines}"
+    )
+    if any(reason == guild_keys.QUARANTINED for _, reason in reasons):
+        return f"{refusal}\n{_QUARANTINE_EXIT.format(guild_id='<guild_id>')}"
+    return refusal
 
 
 def _registration_binding_line(snapshot: GuildSnapshot) -> str:

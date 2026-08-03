@@ -62,6 +62,16 @@ ALERT_SUPPRESSION_HOURS = 24
 # uncorrelatable record it is.
 UNKNOWN_KEY_REF = "--------"
 
+# The two reasons `active_key` can return None, as the ONE vocabulary every
+# caller renders from (DDD-3). They are not interchangeable and the difference
+# is the whole point: QUARANTINED is the feature working and its exit is
+# `/update_guild_key`; NO_KEY_REGISTERED is a guild nobody finished
+# registering. Telling an officer the first is the second routes them to
+# `/register_guild` — the command that overwrites the roster (AC-008.1) — so
+# "which of the two is it" is a policy answer, computed here and nowhere else.
+QUARANTINED = "quarantined"
+NO_KEY_REGISTERED = "no_key_registered"
+
 
 class GuildQuarantined(Exception):
     """Raised when a caller asks for the key of a quarantined guild.
@@ -141,6 +151,25 @@ def active_key(discord_server_id: int, guild_id: str) -> str | None:
     if _is_quarantined(discord_server_id, guild_id):
         return None
     return _registered_key(discord_server_id, guild_id) or None
+
+
+def unusable_key_reason(discord_server_id: int, guild_id: str) -> str:
+    """Why `active_key` said no: `QUARANTINED` or `NO_KEY_REGISTERED`.
+
+    The companion of `active_key`, and deliberately in the same module: a
+    caller that has to render the refusal needs both the answer and the reason
+    for it, and a reason computed at the call site is a second copy of the
+    quarantine predicate that drifts the day the status is spelled
+    differently. The hourly cycle (`tasks_cog`) and the leaderboard commands
+    (`admin_cog`) both read this one; cogs never compare `key_status`
+    themselves and never import each other.
+
+    Storage-only, like `active_key`: no probe, so a caller may ask about every
+    guild in a cluster before deciding anything.
+    """
+    if _is_quarantined(discord_server_id, guild_id):
+        return QUARANTINED
+    return NO_KEY_REGISTERED
 
 
 def quarantine(

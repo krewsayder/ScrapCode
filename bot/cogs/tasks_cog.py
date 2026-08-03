@@ -23,7 +23,7 @@ from bot.tracker import process_api_response
 from bot.guilds import load_player_list
 from bot.embeds import encounter_limit
 from bot.services.chronicl3r.player_service import PlayerService
-from bot.services.tacticus.guild_client import GuildSnapshot, KeyStatus, ProbeOutcome
+from bot.services.tacticus.guild_client import GuildSnapshot, ProbeOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -287,8 +287,8 @@ class TasksCog(commands.Cog):
 
         if season is None:
             for guild_id in guilds:
-                reason = _unusable_key_reason(server_id, guild_id)
-                if reason == "quarantined":
+                reason = guild_keys.unusable_key_reason(server_id, guild_id)
+                if reason == guild_keys.QUARANTINED:
                     # A persisting quarantine re-reports the drift and
                     # rate-limits the alert even when the season cannot be
                     # determined (e.g. the only guild is quarantined). The
@@ -361,8 +361,8 @@ class TasksCog(commands.Cog):
 
         credential = guild_keys.active_key(server_id, guild_id)
         if credential is None:
-            reason = _unusable_key_reason(server_id, guild_id)
-            if reason == "quarantined":
+            reason = guild_keys.unusable_key_reason(server_id, guild_id)
+            if reason == guild_keys.QUARANTINED:
                 # A persisting quarantine: the alert decision is rate-limited
                 # here (not in verify_and_resolve, which is not called on the
                 # skip path). The mismatch RECORD is re-emitted so a repeat
@@ -792,16 +792,6 @@ class _CycleReport:
             guilds_skipped=len(self._skipped),
             skip_reasons=list(self._skipped),
         )
-
-
-def _unusable_key_reason(server_id: int, guild_id: str) -> str:
-    """Why `active_key` said no. Quarantine and absence need different words:
-    one is the feature working, the other is a guild nobody finished
-    registering, and an operator acts differently on each."""
-    binding = load_guild_binding(server_id, guild_id)
-    if binding.key_status == KeyStatus.QUARANTINED.value:
-        return "quarantined"
-    return "no_key_registered"
 
 
 def _emit_server_failed(server_id: int, failure: BaseException) -> None:
