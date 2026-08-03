@@ -39,6 +39,11 @@ from bot.guilds import (
     save_guild_binding,
 )
 from bot.obs import emit_structured
+# Re-exported deliberately: `/update_guild_key` renders this refusal, and a cog
+# that imported it from `bot.repository` would reach past the policy layer for
+# key vocabulary (ADR-008 D3). Same shape as `GuildQuarantined` below, which
+# `/register_guild` already catches as `guild_keys.GuildQuarantined`.
+from bot.repository import GuildKeyAlreadyRegisteredError
 from bot.services.tacticus import guild_client
 from bot.services.tacticus.guild_client import (
     GuildIdentity,
@@ -281,7 +286,7 @@ async def install_guild_key(
     binding = load_guild_binding(discord_server_id, guild_id)
 
     if binding.is_unbound:
-        replace_guild_key(discord_server_id, guild_id, api_key)
+        _install_the_submitted_key(context, api_key)
         _commit_install(
             context, binding, observed, elapsed_ms,
             set_identity=True, clear_quarantine=False,
@@ -292,7 +297,7 @@ async def install_guild_key(
 
     bound = GuildIdentity(uuid=binding.tacticus_guild_id)
     if bound.matches(observed):
-        replace_guild_key(discord_server_id, guild_id, api_key)
+        _install_the_submitted_key(context, api_key)
         _rebind(context, binding, observed)
         context.emit_probe_ok(observed)
         if _quarantined(binding):
@@ -302,7 +307,7 @@ async def install_guild_key(
 
     if force:
         rebound_from = binding.tacticus_guild_id
-        replace_guild_key(discord_server_id, guild_id, api_key)
+        _install_the_submitted_key(context, api_key)
         _commit_install(
             context, binding, observed, elapsed_ms,
             set_identity=True, clear_quarantine=True,
@@ -341,6 +346,45 @@ class InstallResult:
     forced: bool = False
     rebound_from: str | None = None
     bound_name: str | None = None
+
+
+def _install_the_submitted_key(context: _KeyContext, api_key: str) -> None:
+    """The ONE key write, reached identically by all three install paths.
+
+    Adoption, refresh and force-rebind write the same two columns with the
+    same arguments; only the binding fields they commit afterwards differ.
+    Routing all three through one call is what makes the collision refusal a
+    single guard rather than three — `force` is consulted to decide WHICH
+    branch commits, never whether the write is checked, so the refusal cannot
+    be routed around by adding one argument to the command.
+
+    The refusal is raised by the repository before the row is dirtied and
+    BEFORE any caller here has committed a binding update, so a refused
+    install leaves every column byte-identical (AC-003.2).
+
+    `GuildKeyAlreadyRegisteredError` is deliberately NOT translated into an
+    `InstallResult`: it carries the holder's guild id and no key material —
+    no plaintext, no Fernet ciphertext, no hmac, no bound parameters — and
+    `/update_guild_key` catches it BY NAME to render its own refusal. A fourth
+    `InstallResult` outcome would be one a renderer could forget, and a
+    forgotten refusal on this path falls through to `main.py`'s generic
+    handler, which is the disclosure (KPI-6).
+
+    The record is emitted here and nowhere else, because this is the only
+    scope holding a `_KeyContext` built from the SUBMITTED key: `key_ref` is
+    the first 8 hex of its hmac — a prefix, not the material — and it is what
+    lets an operator correlate the refusal with the install that caused it.
+    Without it a refused install leaves no trace at all, since by definition
+    nothing was written for the binding to remember.
+    """
+    try:
+        replace_guild_key(context.server_id, context.guild_id, api_key)
+    except GuildKeyAlreadyRegisteredError as collision:
+        context.emit(
+            logging.ERROR, "guild.key.collision",
+            holder_guild_id=collision.guild_id,
+        )
+        raise
 
 
 def _commit_install(

@@ -250,9 +250,33 @@ class AdminCog(commands.Cog):
             )
             return
 
-        result = await guild_keys.install_guild_key(
-            server_id, guild_id, api_key, force=force
-        )
+        try:
+            result = await guild_keys.install_guild_key(
+                server_id, guild_id, api_key, force=force
+            )
+        except guild_keys.GuildKeyAlreadyRegisteredError as collision:
+            # AC-009.1 / AC-009.2 / KPI-6 — THE REFUSAL IS RENDERED HERE, and
+            # that is the whole point of catching it. Uncaught, it reaches
+            # `main.py:91-101`, which does BOTH `print(f"Command error:
+            # {error}")` and `followup.send(f"❌ An error occurred: {error}")`.
+            # The exception it interpolated before step 08-01 was a raw
+            # `IntegrityError` with the bound parameters inlined — the Fernet
+            # ciphertext of the key AND the full 64-hex `api_key_hmac` — into
+            # a Discord message, `discord.log` and the systemd journal, three
+            # copies of material KPI-6 records as appearing in zero records.
+            # A refusal that depends on that handler rendering something clean
+            # is one `str()` change away from disclosing them again, so the
+            # exception must never get there.
+            #
+            # Caught in the cog rather than translated in the policy layer
+            # because naming the holder needs `registered`, a read this
+            # command has already done, and because a typed error the renderer
+            # cannot silently forget is what keeps the refusal from falling
+            # back to the generic handler.
+            await interaction.followup.send(
+                _collision_refusal(collision.guild_id, registered), ephemeral=True
+            )
+            return
         # KPI-6: no key value ever reaches the reply. The renderer names the
         # resolved guild and the outcome, never the submitted or stored key.
         await interaction.followup.send(
@@ -714,14 +738,67 @@ class AdminCog(commands.Cog):
 
 
 
+def _collision_refusal(holder_guild_id: str, registered: dict) -> str:
+    """Name the guild that already holds the key — and carry nothing else.
+
+    A Tacticus key identifies exactly one guild, and `guilds.api_key_hmac` is
+    UNIQUE table-global, so installing a key a sibling already holds cannot
+    succeed. The admin's next move depends entirely on WHICH guild that is:
+    told only "no", they retry the same paste forever; told the guild, they
+    either fix the paste or free the key. That one fact is the whole payload —
+    no plaintext, no ciphertext, no hmac, no SQL, no bound parameters.
+
+    Deliberately not a suggestion to deregister anything. `/deregister_guild`
+    destroys the named guild's entire raid history (AC-009.4), which is a
+    catastrophic answer to "you pasted the wrong key".
+    """
+    return (
+        f"❌ That API key is already registered to "
+        f"{_holder_label(holder_guild_id, registered)}. A Tacticus key belongs "
+        f"to one guild, so no key was replaced and nothing was changed.\n"
+        f"Check the key you pasted. If two guilds' keys were swapped, install "
+        f"the other guild's key on it first to free this one."
+    )
+
+
+def _holder_label(holder_guild_id: str, registered: dict) -> str:
+    """The holding guild, by display name and slug (AC-009.1).
+
+    The slug is always shown and the display name only when this cluster knows
+    it: `uq_guilds_api_key_hmac` spans the whole table, so the holder may be a
+    guild registered on a DIFFERENT Discord server, which this command's
+    registry read cannot name. Showing the slug alone there is honest;
+    inventing a name would not be.
+
+    An EMPTY holder id is `repository_sqlalchemy._HOLDER_VANISHED` — the
+    holder row disappeared between the lookup and the flush, so there is
+    genuinely no guild to name. The refusal still has to read as a refusal
+    about a key that is already registered: an admin told "that key is taken"
+    without a name can retry, an admin sent the ciphertext cannot un-disclose
+    it.
+    """
+    if not holder_guild_id:
+        return "another guild"
+    name = (registered.get(holder_guild_id) or {}).get("name")
+    if not name:
+        return f"`{holder_guild_id}`"
+    return f"**{name}** (`{holder_guild_id}`)"
+
+
 def _render_update_result(result) -> str:
     """Render an `InstallResult` to the `/update_guild_key` reply text.
 
     The cog is a thin renderer over `install_guild_key` (step 04-01): every
-    outcome the policy can return has a reply here, and no reply carries the
+    outcome the policy can RETURN has a reply here, and no reply carries the
     submitted or stored key (KPI-6). The reply names the resolved guild for a
     successful install (AC-003.1) and names BOTH guilds on a mismatch refused
     without force (AC-003.3).
+
+    The one refusal that does NOT arrive as an `InstallResult` is the key
+    collision — it is a typed exception caught by name in the command and
+    rendered by `_collision_refusal` (AC-009.1). That asymmetry is deliberate:
+    an outcome a renderer can forget falls through to `main.py`'s generic
+    handler, and on that path the generic handler is the disclosure.
     """
     from bot.services.tacticus.guild_client import ProbeOutcome
 
