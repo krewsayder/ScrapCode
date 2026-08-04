@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, or_, select, text
+from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 
 from bot.db import models
@@ -465,6 +465,35 @@ class SqlAlchemyClusterRepository(ClusterRepository):
                 session.execute(self._bomb_upsert_stmt(), self._bomb_params(
                     discord_server_id, guild_id, season, entry,
                 ))
+
+    def count_guild_destruction_rows(self, discord_server_id: int, guild_id: str) -> dict:
+        """The rows a deregistration will CASCADE-delete, across ALL seasons.
+
+        A pure COUNT read — the CASCADE itself is owned by the schema's
+        `ondelete="CASCADE"` and is unchanged by this call. Stated to the
+        operator BEFORE the deletion (AC-009.4) so the false "left intact"
+        message is replaced with the truth.
+        """
+        with self._db.session_scope() as session:
+            players = session.execute(
+                select(func.count()).select_from(PlayerRow).where(
+                    PlayerRow.discord_server_id == discord_server_id,
+                    PlayerRow.guild_id == guild_id,
+                )
+            ).scalar_one()
+            battle_hits = session.execute(
+                select(func.count()).select_from(BattleHitRow).where(
+                    BattleHitRow.discord_server_id == discord_server_id,
+                    BattleHitRow.guild_id == guild_id,
+                )
+            ).scalar_one()
+            bomb_hits = session.execute(
+                select(func.count()).select_from(BombHitRow).where(
+                    BombHitRow.discord_server_id == discord_server_id,
+                    BombHitRow.guild_id == guild_id,
+                )
+            ).scalar_one()
+        return {"players": players, "battle_hits": battle_hits, "bomb_hits": bomb_hits}
 
     # ------------------------------------------------------------------
     # Read-path shaping: order by damage DESC / completed_on ASC, truncate

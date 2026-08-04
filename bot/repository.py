@@ -255,6 +255,19 @@ class ClusterRepository(ABC):
         crash leaves that guild's pre-cycle state intact. Cross-guild
         isolation is provided by separate transactions per guild_id."""
 
+    @abstractmethod
+    def count_guild_destruction_rows(self, discord_server_id: int, guild_id: str) -> dict:
+        """Count the rows a deregistration will CASCADE-delete for this guild.
+
+        Returns `{"players": N, "battle_hits": N, "bomb_hits": N}` — every row
+        that will be destroyed when the `guilds` row is dropped, across ALL
+        seasons (`ondelete="CASCADE"` is not season-scoped). `/deregister_guild`
+        states these counts to the operator BEFORE the deletion so an admin
+        who has learned the (false) "left intact" message can see what is
+        actually about to happen (AC-009.4). The CASCADE itself is unchanged;
+        this is a read, not a change to the destructive semantics.
+        """
+
     # --- ADR-007-pattern replay methods (added in 04-03; ADR-006 D10/D11) ---
     # The replay cog routes through these instead of replay_index.json +
     # hardcoded FORUM_CHANNELS/MAP_THREADS. Per-tenant URL uniqueness is
@@ -651,6 +664,44 @@ class JsonClusterRepository(ClusterRepository):
         SQLite impl wraps both in one session (ADR-006 D6)."""
         self.upsert_battle_hits(discord_server_id, guild_id, season, battle_entries)
         self.upsert_bomb_hits(discord_server_id, guild_id, season, bomb_entries)
+
+    def count_guild_destruction_rows(self, discord_server_id: int, guild_id: str) -> dict:
+        """JSON rollback impl: count the rows a deregistration would drop.
+
+        The JSON path has no CASCADE; deregistration deletes the guild's
+        directory tree, which holds `player_list.json` and every
+        `highest_(hits|bombs)_season_*.json`. The count mirrors that surface:
+        every player in `player_list.json` and every entry in every season
+        file. Counted (not deleted) here so the operator sees the truth
+        BEFORE the deletion (AC-009.4). Degradation matches ADR-006 D9 — a
+        missing guild dir reads zero rather than raising.
+        """
+        guild_dir = self._base / str(discord_server_id) / guild_id
+        if not guild_dir.exists():
+            return {"players": 0, "battle_hits": 0, "bomb_hits": 0}
+        players = len(self.load_player_list(discord_server_id, guild_id).get("players", {}))
+        data_dir = guild_dir / "data"
+        battle_hits = self._count_season_entries(data_dir, "highest_hits_season_")
+        bomb_hits = self._count_season_entries(data_dir, "highest_bombs_season_")
+        return {"players": players, "battle_hits": battle_hits, "bomb_hits": bomb_hits}
+
+    def _count_season_entries(self, data_dir: Path, prefix: str) -> int:
+        """Count hit entries across every season file of one kind.
+
+        Each season file holds `{"boss_hits": {boss: {enc: {tier: [entries]}}}}`;
+        an entry in the nested list is one row. Globbed rather than scoped to
+        a season because deregistration is not season-scoped either.
+        """
+        if not data_dir.exists():
+            return 0
+        total = 0
+        for path in data_dir.glob(f"{prefix}*.json"):
+            data = self._read_json(path)
+            for encounters in data.get("boss_hits", {}).values():
+                for tiers in encounters.values():
+                    for entries in tiers.values():
+                        total += len(entries)
+        return total
 
     def probe(self) -> None:
         """No-op probe (ADR-006 D8). The probe is the SQLite Earned-Trust

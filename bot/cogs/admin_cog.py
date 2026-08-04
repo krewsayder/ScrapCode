@@ -333,24 +333,24 @@ class AdminCog(commands.Cog):
             return
 
         guild_name = guild_data["name"]
-        # AC-009.5 — WRITTEN BEFORE THE DELETION, AND ON THE PATH THAT
-        # PERFORMS IT. `save_guilds` drops the `guilds` row; `PRAGMA
-        # foreign_keys=ON` plus `ondelete="CASCADE"` then destroys the
-        # binding, which is the only record that this guild was ever
-        # quarantined. Reading it afterwards is not possible and recording it
-        # at quarantine time would miss every binding written before this
-        # shipped, so the tombstone is taken from the binding one line before
-        # it ceases to exist. It sits here rather than at command invocation
-        # so a later confirmation gate (AC-009.4) cannot leave a tombstone
-        # behind for a deletion the admin declined.
-        _record_quarantine_history(server_id, guild_id)
-        del guilds[guild_id]
-        save_guilds(server_id, guilds)
-
+        # AC-009.4 — STATE WHAT THE COMMAND DESTROYS, AND WAIT. `save_guilds`
+        # drops the `guilds` row; `PRAGMA foreign_keys=ON` plus
+        # `ondelete="CASCADE"` then destroys players, battle_hits, bomb_hits
+        # and the binding — the guild's entire raid history across every
+        # season, with no undo and no backup. The old "left intact" reply was
+        # true on JSON and false post-cutover; the defect is the reply, not
+        # the behaviour (operator decision 2026-08-02: destroying is
+        # intended). The counts are read BEFORE the deletion so the operator
+        # sees the truth, and NO row is touched until the confirmation button
+        # is taken — a command this destructive does not fire on one
+        # keystroke.
+        counts = guild_registry.repo.count_guild_destruction_rows(server_id, guild_id)
+        view = _DeregistrationConfirmView(
+            server_id=server_id, guild_id=guild_id, guild_name=guild_name, counts=counts,
+        )
         await interaction.followup.send(
-            f"✅ Guild **{guild_name}** (`{guild_id}`) has been deregistered.\n"
-            f"⚠️ Their data folder has been left intact in case you need it.",
-            ephemeral=True,
+            _deregistration_warning(guild_id, guild_name, counts),
+            view=view, ephemeral=True,
         )
 
     # ==========================================
@@ -794,6 +794,101 @@ def _collision_refusal(holder_guild_id: str, registered: dict) -> str:
         f"to one guild, so no key was replaced and nothing was changed.\n"
         f"Check the key you pasted. If two guilds' keys were swapped, install "
         f"the other guild's key on it first to free this one."
+    )
+
+
+# ==========================================
+# Deregistration confirmation (AC-009.4)
+# ==========================================
+
+class _DeregistrationConfirmView(discord.ui.View):
+    """The confirmation button an admin presses to actually destroy a guild.
+
+    A `discord.ui.View` is the real widget — `discord.Interaction` declares
+    `__slots__` and no `__dict__` (verified against discord.py 2.7.1), so a
+    callback stashed as an interaction attribute would crash on a real click
+    (UI-15). `interaction.extras["pending_confirmation"]` is the other
+    declared seam; a button is what an admin actually clicks, so it is the
+    one offered here. Both are exercised by the acceptance suite's
+    `_confirm_if_awaiting` helper.
+
+    The command offers this view AFTER stating the row counts, and NO row is
+    deleted until the button is taken — so an operator who reads the truth
+    and walks away has destroyed nothing (AC-009.4). The button's callback
+    performs the tombstone write and the deletion together: the tombstone
+    moves with the deletion, so a confirmation that is never taken leaves no
+    tombstone behind for a guild that was not destroyed (step 08-03's
+    invariant, preserved here).
+    """
+
+    def __init__(self, *, server_id: int, guild_id: str, guild_name: str,
+                 counts: dict) -> None:
+        super().__init__()
+        self._server_id  = server_id
+        self._guild_id   = guild_id
+        self._guild_name = guild_name
+        self._counts     = counts
+
+    @discord.ui.button(
+        label="Confirm deregistration", style=discord.ButtonStyle.danger,
+    )
+    async def confirm(self, interaction: discord.Interaction,
+                      button: discord.ui.Button) -> None:
+        server_id = self._server_id
+        guild_id  = self._guild_id
+        guilds    = load_guilds(server_id)
+        if guild_id not in guilds:
+            await interaction.followup.send(
+                f"❌ Guild `{guild_id}` is no longer registered — nothing to "
+                f"deregister. The confirmation may already have been taken.",
+                ephemeral=True,
+            )
+            return
+        # AC-009.5 — WRITTEN BEFORE THE DELETION, AND ON THE PATH THAT
+        # PERFORMS IT. `save_guilds` drops the `guilds` row; `PRAGMA
+        # foreign_keys=ON` plus `ondelete="CASCADE"` then destroys the
+        # binding, which is the only record that this guild was ever
+        # quarantined. Reading it afterwards is not possible and recording it
+        # at quarantine time would miss every binding written before this
+        # shipped, so the tombstone is taken from the binding one line before
+        # it ceases to exist. It sits in the confirmation callback — not at
+        # command invocation — so a confirmation that is never taken leaves
+        # no tombstone behind for a deletion the admin declined.
+        _record_quarantine_history(server_id, guild_id)
+        del guilds[guild_id]
+        save_guilds(server_id, guilds)
+        button.disabled = True
+        counts = self._counts
+        await interaction.followup.send(
+            f"✅ Guild **{self._guild_name}** (`{guild_id}`) has been "
+            f"deregistered.\n"
+            f"Destroyed: {counts['players']} players, "
+            f"{counts['battle_hits']} battle hits, "
+            f"{counts['bomb_hits']} bomb hits.",
+            ephemeral=True,
+        )
+
+
+def _deregistration_warning(guild_id: str, guild_name: str, counts: dict) -> str:
+    """The truth the old "left intact" reply stood in for (AC-009.4).
+
+    Every count is the exact number of rows the CASCADE will destroy, read
+    BEFORE the deletion. The operator decision of 2026-08-02 is that
+    destroying the data is intended, so the message states what is about to
+    happen and waits — it does not soften the behaviour. No "left intact":
+    that was true on JSON and is false post-cutover, and a destructive
+    command fired on the strength of a reassuring lie is the combination this
+    step exists to break.
+    """
+    return (
+        f"⚠️ Deregistering **{guild_name}** (`{guild_id}`) will permanently "
+        f"destroy:\n"
+        f"• {counts['players']} players\n"
+        f"• {counts['battle_hits']} battle hit rows\n"
+        f"• {counts['bomb_hits']} bomb hit rows\n"
+        f"This is the guild's entire raid history across every season — no "
+        f"undo, no backup. Press **Confirm deregistration** to proceed, or "
+        f"dismiss this message to cancel."
     )
 
 

@@ -374,6 +374,7 @@ class _Response:
 
     async def send_message(self, content="", *, embed=None, ephemeral=False, **kwargs):
         self._interaction.replies.append(content)
+        self._interaction._offer(kwargs.get("view"))
 
     async def defer(self, *, ephemeral=False, **kwargs):
         return None
@@ -388,19 +389,61 @@ class _Followup:
 
     async def send(self, content="", *, embed=None, ephemeral=False, **kwargs):
         self._interaction.replies.append(content)
+        self._interaction._offer(kwargs.get("view"))
 
 
 class _Interaction:
+    """Captures replies AND any `view=` offered alongside one.
+
+    Step 08-05 moved `/deregister_guild`'s deletion behind a confirmation
+    button (`discord.ui.View`), so a double that drops `view=` cannot tell
+    "the command paused" from "the command did not pause" — and the
+    properties below would assert the CASCADE on a guild nothing deleted.
+    `_offer` records the view; `_confirm_if_awaiting` presses the button
+    exactly as the acceptance suite's helper does.
+    """
+
     def __init__(self) -> None:
         self.guild_id = SERVER_ID
         self.replies: list[str] = []
+        self.views: list = []
         self.extras: dict = {}
         self.response = _Response(self)
         self.followup = _Followup(self)
 
+    def _offer(self, view) -> None:
+        if view is not None:
+            self.views.append(view)
+
     @property
     def all_replies(self) -> str:
         return "\n".join(self.replies)
+
+
+# Words a confirmation button reads as. Mirrors the acceptance suite's
+# `_CONFIRMATION_WORDS` — the guarantee is pinned, not the widget.
+_CONFIRMATION_WORDS = (
+    "confirm", "yes", "proceed", "delete", "destroy", "deregister",
+)
+
+
+async def _confirm_if_awaiting(interaction: _Interaction) -> None:
+    """Take the confirmation step if `/deregister_guild` offered one.
+
+    The deletion now waits for a button press (AC-009.4); without this, the
+    properties below would assert the CASCADE on a guild nothing touched.
+    Finds the confirm button by label/custom_id and invokes its callback
+    with the original interaction, matching the acceptance suite's helper.
+    """
+    for view in interaction.views:
+        for child in getattr(view, "children", ()):
+            label = " ".join(
+                str(getattr(child, attr, "") or "")
+                for attr in ("label", "custom_id")
+            ).lower()
+            if any(word in label for word in _CONFIRMATION_WORDS):
+                await child.callback(interaction)
+                return
 
 
 class _Role:
@@ -477,7 +520,9 @@ async def test_a_tombstone_is_written_exactly_when_the_binding_was_quarantined(
     _reset(live_repo, binding=binding)
     before = _capture(live_repo.db_path)
 
-    await _invoke("deregister_guild", _Interaction(), guild_id=GUILD_TARGET)
+    interaction = _Interaction()
+    await _invoke("deregister_guild", interaction, guild_id=GUILD_TARGET)
+    await _confirm_if_awaiting(interaction)
 
     expected = dict(_THE_CASCADE)
     if binding.key_status == KeyStatus.QUARANTINED.value:
@@ -512,7 +557,9 @@ async def test_the_tombstone_carries_both_identities_and_no_key_material(
         return
     _reset(live_repo, binding=binding)
 
-    await _invoke("deregister_guild", _Interaction(), guild_id=GUILD_TARGET)
+    interaction = _Interaction()
+    await _invoke("deregister_guild", interaction, guild_id=GUILD_TARGET)
+    await _confirm_if_awaiting(interaction)
 
     rows = _tombstones(live_repo.db_path, GUILD_TARGET)
     assert len(rows) == 1, "the quarantine history did not survive the CASCADE"
@@ -594,7 +641,9 @@ async def test_re_registering_a_slug_with_quarantine_history_says_so_and_is_allo
 
     monkeypatch.setattr(guild_client, "fetch_guild_snapshot", _drifted)
 
-    await _invoke("deregister_guild", _Interaction(), guild_id=GUILD_TARGET)
+    deregistration = _Interaction()
+    await _invoke("deregister_guild", deregistration, guild_id=GUILD_TARGET)
+    await _confirm_if_awaiting(deregistration)
     reregistration = _Interaction()
     await _invoke(
         "register_guild", reregistration,
