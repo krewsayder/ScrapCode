@@ -193,6 +193,41 @@ class ClusterRepository(ABC):
     @abstractmethod
     def save(self, cluster: Cluster) -> None: ...
 
+    # --- Guild-dict projection (slice 07 / step 09-03) ---
+    # `bot.guilds.load_guilds` / `save_guilds` previously projected between
+    # `Guild` objects and the five-key cog-facing dict INSIDE the wrapper
+    # layer. That put a plaintext `api_key` read in `bot/guilds.py`, which the
+    # widened chokepoint scan (AC-010.6) catches. The projection moves HERE
+    # because the adapters are the `SANCTIONED_KEY_READERS` — they already
+    # encrypt and decrypt `api_key`, so the Guild-to-dict and dict-to-Guild
+    # mapping belongs beside the column access it is a projection of.
+    #
+    # The dict shape is `{guild_id: {name, api_key, role_id,
+    # notification_channel_id, member_role_ids}}` — byte-identical to what
+    # `load_guilds` returned before the move, so `admin_cog._config_guilds`'s
+    # presence test (AC-005.3) and every load-mutate-save cog are unchanged.
+
+    @abstractmethod
+    def load_guilds_dict(self, discord_server_id: int) -> dict:
+        """Return ``{guild_id: {name, api_key, role_id,
+        notification_channel_id, member_role_ids}}`` for a server.
+
+        The five-key shape is the cog-facing contract; ``api_key`` is
+        included because cogs read it as a presence test (AC-005.3) and
+        load-mutate-save commands round-trip it. Removing it is a wider
+        refactor (slice 07 OUT-of-scope) and is NOT attempted here.
+        """
+
+    @abstractmethod
+    def save_guilds_dict(self, discord_server_id: int, guilds: dict) -> None:
+        """Persist the five-key guild dict, preserving non-guild cluster state.
+
+        Loads the existing cluster (to keep ``update_channel_id`` /
+        ``role_tiers``), replaces ``guilds`` from the dict, and saves. A
+        load-mutate-save cycle by an unrelated admin command must not blank a
+        sibling guild's key — the round-trip invariant is load-bearing.
+        """
+
     @abstractmethod
     def load_player_registrations(self, discord_server_id: int) -> dict: ...
 
@@ -532,6 +567,43 @@ class JsonClusterRepository(ClusterRepository):
                 for guild_id, g in cluster.guilds.items()
             },
         })
+
+    # --- Guild-dict projection (slice 07 / step 09-03) ---
+    # The projection that lived in `bot/guilds.load_guilds` / `save_guilds`
+    # moves here so the `api_key` read stays inside the sanctioned adapter.
+    # `load` already projects dict-from-file → Guild (with defaults); this
+    # method projects Guild → dict, producing the five-key shape cogs expect.
+    # `save_guilds_dict` projects dict → Guild and delegates to `save`,
+    # which projects Guild → dict-on-disk — a round trip that is
+    # byte-identical by construction (the same projection runs both ways).
+
+    def load_guilds_dict(self, discord_server_id: int) -> dict:
+        cluster = self.load(discord_server_id)
+        return {
+            gid: {
+                "name":                    g.name,
+                "api_key":                 g.api_key,
+                "role_id":                 g.role_id,
+                "notification_channel_id": g.notification_channel_id,
+                "member_role_ids":         g.member_role_ids,
+            }
+            for gid, g in cluster.guilds.items()
+        }
+
+    def save_guilds_dict(self, discord_server_id: int, guilds: dict) -> None:
+        cluster = self.load(discord_server_id)
+        cluster.guilds = {
+            gid: Guild(
+                id=gid,
+                name=data["name"],
+                api_key=data.get("api_key", ""),
+                role_id=data.get("role_id", 0),
+                notification_channel_id=data.get("notification_channel_id"),
+                member_role_ids=data.get("member_role_ids", []),
+            )
+            for gid, data in guilds.items()
+        }
+        self.save(cluster)
 
     def load_player_registrations(self, discord_server_id: int) -> dict:
         path = self._server_path(discord_server_id) / "player_registrations.json"

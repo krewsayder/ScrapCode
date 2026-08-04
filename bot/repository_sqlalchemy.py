@@ -126,6 +126,43 @@ class SqlAlchemyClusterRepository(ClusterRepository):
             self._replace_role_tiers(session, cluster.discord_server_id, cluster.role_tiers)
             self._upsert_guilds(session, cluster.discord_server_id, cluster.guilds)
 
+    # --- Guild-dict projection (slice 07 / step 09-03) ---
+    # Moves from `bot/guilds.load_guilds` / `save_guilds` into the sanctioned
+    # adapter so the `api_key` read stays inside `SANCTIONED_KEY_READERS`.
+    # `load` already projects row → Guild (with Fernet decrypt); this method
+    # projects Guild → dict. `save_guilds_dict` projects dict → Guild and
+    # delegates to `save` → `_upsert_guilds` (which re-encrypts). The round
+    # trip is byte-identical: decrypt → dict → encrypt produces the same
+    # ciphertext because the plaintext passes through unchanged.
+
+    def load_guilds_dict(self, discord_server_id: int) -> dict:
+        cluster = self.load(discord_server_id)
+        return {
+            gid: {
+                "name":                    g.name,
+                "api_key":                 g.api_key,
+                "role_id":                 g.role_id,
+                "notification_channel_id": g.notification_channel_id,
+                "member_role_ids":         g.member_role_ids,
+            }
+            for gid, g in cluster.guilds.items()
+        }
+
+    def save_guilds_dict(self, discord_server_id: int, guilds: dict) -> None:
+        cluster = self.load(discord_server_id)
+        cluster.guilds = {
+            gid: Guild(
+                id=gid,
+                name=data["name"],
+                api_key=data.get("api_key", ""),
+                role_id=data.get("role_id", 0),
+                notification_channel_id=data.get("notification_channel_id"),
+                member_role_ids=data.get("member_role_ids", []),
+            )
+            for gid, data in guilds.items()
+        }
+        self.save(cluster)
+
     def _load_guilds(self, session, discord_server_id: int) -> dict[str, Guild]:
         # `order_by(rowid)` preserves insertion order. Without it SQLite
         # returns rows via the primary-key index (`discord_server_id,

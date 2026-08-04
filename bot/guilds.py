@@ -231,35 +231,26 @@ repo: SupportsProbe = build_repo()
 # ==========================================
 
 def load_guilds(discord_server_id: int) -> dict:
-    """Return {guild_id: {name, api_key, role_id, notification_channel_id, member_role_ids}} for a server."""
-    cluster = repo.load(discord_server_id)
-    return {
-        gid: {
-            "name":                    g.name,
-            "api_key":                 g.api_key,
-            "role_id":                 g.role_id,
-            "notification_channel_id": g.notification_channel_id,
-            "member_role_ids":         g.member_role_ids,
-        }
-        for gid, g in cluster.guilds.items()
-    }
+    """Return {guild_id: {name, api_key, role_id, notification_channel_id, member_role_ids}} for a server.
+
+    Pure delegation to the repository's ``load_guilds_dict`` — the
+    Guild-to-dict projection lives in the sanctioned adapter (slice 07 /
+    step 09-03), not here. This layer stays the cog-facing wrapper ADR-004
+    rule 1 makes it; it delegates, it does not project.
+    """
+    return repo.load_guilds_dict(discord_server_id)
 
 
 def save_guilds(discord_server_id: int, guilds: dict) -> None:
-    from bot.models import Cluster, Guild
-    cluster = repo.load(discord_server_id)
-    cluster.guilds = {
-        gid: Guild(
-            id=gid,
-            name=data["name"],
-            api_key=data.get("api_key", ""),
-            role_id=data.get("role_id", 0),
-            notification_channel_id=data.get("notification_channel_id"),
-            member_role_ids=data.get("member_role_ids", []),
-        )
-        for gid, data in guilds.items()
-    }
-    repo.save(cluster)
+    """Persist the five-key guild dict for a server.
+
+    Delegates to ``repo.save_guilds_dict`` — the dict-to-Guild projection
+    lives in the sanctioned adapter. The adapter loads the existing cluster
+    (preserving ``update_channel_id`` / ``role_tiers``), replaces guilds,
+    and saves. A load-mutate-save cycle by an unrelated admin command must
+    not blank a sibling's key — the round-trip invariant is load-bearing.
+    """
+    repo.save_guilds_dict(discord_server_id, guilds)
 
 
 # ==========================================
