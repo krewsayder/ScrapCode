@@ -42,6 +42,14 @@ import pytest
 def _config_env_precondition():
     os.environ.setdefault("UPDATE_CHANNEL_ID", "0")
     os.environ.setdefault("REPLAY_INDEX_CHANNEL_ID", "0")
+    # Slice 07 (AC-010.1) made `build_repo` REFUSE when backend=sqlite is
+    # requested without a Fernet key. `bot/guilds.py:117` evaluates
+    # `repo = build_repo()` at IMPORT time, so the first `import bot.guilds`
+    # in this suite raises `StartupRefused` unless a safe backend is already
+    # set. `json` is the documented rollback path (ADR-006 D9) and constructs
+    # without a key. Per-test fixtures override this via monkeypatch. Same
+    # precedent as `tests/unit/test_guild_keys_policy.py:66`.
+    os.environ.setdefault("SCRAPCODE_REPO_BACKEND", "json")
     yield
 
 

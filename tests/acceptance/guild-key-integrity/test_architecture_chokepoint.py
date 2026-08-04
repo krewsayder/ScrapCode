@@ -21,17 +21,29 @@ from pathlib import Path
 
 import pytest
 
+from domain_types import RECOVERY_ENTRY_POINTS, KeyConsumptionSite
+
 RED = pytest.mark.skip(reason="RED scaffold — enable one at a time in DELIVER")
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # The ONLY modules permitted to read a guild's `api_key`. Two adapters (they
-# encrypt and decrypt it) and the policy chokepoint (it decides whether the
-# key may be used at all). Everything else goes through the chokepoint.
+# encrypt and decrypt it), the policy chokepoint (it decides whether the key
+# may be used at all), and two one-shot migration modules (the read IS the
+# migration — re-encrypting a guild key into the SQLite row during the JSON
+# cutover, and relocating keys into the per-cluster layout). Everything else
+# goes through the chokepoint.
 SANCTIONED_KEY_READERS = {
     "bot/guild_keys.py",
     "bot/repository.py",
     "bot/repository_sqlalchemy.py",
+    # The two migration modules read `guilds.api_key` to MIGRATE it — the
+    # JSON→SQLite cutover re-encrypts each key into the new row, and the
+    # cluster-layout migration relocates keys into their per-cluster home.
+    # The read IS the migration; refusing it would make the cutover
+    # impossible. Recorded in `distill/upstream-issues.md` UI-12.
+    "bot/db/migrations_json_to_sqlite.py",
+    "bot/migrations/to_cluster_layout.py",
 }
 
 GUARDED_TREES = ("bot/cogs", "bot/services")
@@ -184,6 +196,127 @@ def test_no_cog_or_service_reads_a_guild_api_key_directly():
         "these modules read a guild api_key directly instead of going through "
         f"bot/guild_keys.py: {offenders}"
     )
+
+
+def test_the_key_consumption_inventory_matches_production():
+    """`KeyConsumptionSite` IS the production site list, or this test fails.
+
+    The enum's docstring has always claimed that "adding a site without
+    adding it here is the mistake this type is shaped to make visible". Until
+    2026-08-02 that was prose: nothing compared the enum against production,
+    and the enum named three sites that do not exist while omitting three
+    that do — including every site where a confirmed defect lives. AC-004.6,
+    the one criterion that certifies "all sites are blocked", was
+    parametrized over that set.
+
+    This is the assertion that prose was standing in for. It scans `bot/` for
+    every call to a `bot/guild_keys.py` entry point, attributes each to its
+    enclosing function, and compares the resulting set against the `reader`
+    coordinates the enum declares plus the explicitly-reasoned recovery
+    entry point. Set equality in BOTH directions: a new site fails as
+    unaccounted, and a deleted site fails as stale — the second half matters
+    because a stale row is what lets a parametrization keep reporting eight
+    green cases over seven real ones.
+
+    Scanning `bot/` wholesale rather than `GUARDED_TREES` is deliberate: a
+    new top-level module that reaches the chokepoint is exactly the eighth
+    site nobody would think to add.
+    """
+    declared = {f"{site.module}::{site.reader}" for site in KeyConsumptionSite}
+    accounted = declared | set(RECOVERY_ENTRY_POINTS)
+
+    found = _chokepoint_call_sites()
+
+    unaccounted = sorted(found - accounted)
+    assert not unaccounted, (
+        "these production functions reach a guild key through the chokepoint "
+        "but are not declared in KeyConsumptionSite — AC-004.6 does not cover "
+        f"them, so nothing proves they refuse a quarantined guild: {unaccounted}"
+    )
+
+    stale = sorted(declared - found)
+    assert not stale, (
+        "KeyConsumptionSite names these readers but no production code calls "
+        "the chokepoint from them — a stale row makes AC-004.6 report a green "
+        f"case for a site that does not exist: {stale}"
+    )
+
+
+def test_the_recovery_entry_point_exemption_still_describes_real_code():
+    """The one site allowed NOT to refuse must still be the site we think.
+
+    `RECOVERY_ENTRY_POINTS` is the single hole in the "every site refuses"
+    rule, and it is only safe while the function named in it is still the
+    `/update_guild_key` handler. A renamed or deleted handler would leave the
+    exemption covering nothing — or, worse, covering some later function that
+    happens to reuse the name.
+    """
+    found = _chokepoint_call_sites()
+    stale = sorted(set(RECOVERY_ENTRY_POINTS) - found)
+    assert not stale, (
+        "these recovery entry points no longer call bot/guild_keys.py — "
+        f"delete the exemption rather than leave a standing hole: {stale}"
+    )
+
+
+# The three `bot/guild_keys.py` entry points that hand a caller a usable key
+# or a snapshot fetched with one. `key_ref`, `quarantine`, `release` and
+# `re_report_persisting_drift` are deliberately absent: none of them returns
+# key material or fetches with it, so calling them is not consumption.
+CHOKEPOINT_ENTRY_POINTS = frozenset({
+    "active_key", "verify_and_resolve", "install_guild_key",
+})
+
+
+def _chokepoint_call_sites() -> set[str]:
+    """Every `module::function` in `bot/` that calls a chokepoint entry point.
+
+    Matches both call shapes the codebase uses — `guild_keys.active_key(...)`
+    after `import bot.guild_keys as guild_keys`, and a bare `active_key(...)`
+    after `from bot.guild_keys import active_key`. `bot/guild_keys.py` itself
+    is skipped: its internal calls are the chokepoint, not consumers of it.
+    """
+    sites: set[str] = set()
+    for path in _python_files("bot"):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel == "bot/guild_keys.py":
+            continue
+        tree = ast.parse(path.read_text("utf-8"), filename=str(path))
+        parents: dict[ast.AST, ast.AST] = {}
+        for parent in ast.walk(tree):
+            for child in ast.iter_child_nodes(parent):
+                parents[child] = parent
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = (
+                func.attr if isinstance(func, ast.Attribute)
+                else func.id if isinstance(func, ast.Name)
+                else None
+            )
+            if name not in CHOKEPOINT_ENTRY_POINTS:
+                continue
+            enclosing = _innermost_function(node, parents)
+            if enclosing is not None:
+                sites.add(f"{rel}::{enclosing}")
+    return sites
+
+
+def _innermost_function(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str | None:
+    """The name of the nearest enclosing `def`, or None at module scope.
+
+    Innermost rather than the full enclosing set (which
+    `_api_key_reads` uses): a site is the function whose BODY holds the call,
+    because that is the unit a reviewer moves, renames or deletes.
+    """
+    cur = parents.get(node)
+    while cur is not None:
+        if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return cur.name
+        cur = parents.get(cur)
+    return None
 
 
 def test_the_player_key_exemptions_still_describe_real_code():

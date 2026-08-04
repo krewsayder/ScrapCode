@@ -20,8 +20,35 @@ What the doubles CANNOT model (Mandate 5 disclosure, self-review item 4):
 """
 from __future__ import annotations
 
-import json
+# ──────────────────────────────────────────────────────────────────────────
+# PRE-IMPORT env default. MUST precede any `import bot.*`.
+#
+# `bot/guilds.py:117` evaluates `repo = build_repo()` at IMPORT time, reading
+# SCRAPCODE_REPO_BACKEND / SCRAPCODE_DB_KEY / SCRAPCODE_DB_PATH from the
+# environment at that moment. Slice 07 (AC-010.1) made `build_repo` REFUSE to
+# start when backend=sqlite is requested without a Fernet key — so importing
+# `bot.guilds` with no backend set (or set to sqlite without a key) now raises
+# `StartupRefused` instead of silently falling back to JSON.
+#
+# This suite's autouse fixture `_repo_singleton_never_escapes_tmp_path` imports
+# `bot.guilds` during setup, which is why the standalone run raised 146
+# collection errors once the gate landed. The combined `pytest tests/unit
+# tests/acceptance` run masked it because a unit module set
+# SCRAPCODE_REPO_BACKEND=json at collection time.
+#
+# `setdefault`: if the operator's environment already has a value (e.g. a unit
+# module set it), keep it. Otherwise default to `json` — the documented
+# rollback path (ADR-006 D9), which constructs without a Fernet key. Per-test
+# fixtures (`env_vars`, `sqlite_repo`, `json_repo`) override this with the
+# real test environment via `monkeypatch.setattr(guilds_mod, "repo", ...)`.
+#
+# Same precedent as `tests/unit/test_guild_keys_policy.py:66` and
+# `tests/unit/test_slice_07_build_repo_classification.py:66`.
+# ──────────────────────────────────────────────────────────────────────────
 import os
+os.environ.setdefault("SCRAPCODE_REPO_BACKEND", "json")
+
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path

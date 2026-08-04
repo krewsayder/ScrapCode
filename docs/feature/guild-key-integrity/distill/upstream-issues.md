@@ -704,3 +704,82 @@ alongside the existing `from conftest import ...`, with the reasoning written
 at the import so it is not re-introduced.
 
 **Rule for this suite:** never `import conftest` inside a function body.
+
+## UI-18 — `sqlite-backend` acceptance tests codified the fallback this feature retires (RESOLVED this wave)
+
+**Severity:** blocking — two PRIOR-feature tests asserted the contract
+`guild-key-integrity` is mandated to replace. Production was green; the tests
+were wrong about what to assert, not wrong about what they asserted.
+
+### What was superseded
+
+The `sqlite-backend` feature shipped with ADR-006 D9's "safety net":
+`build_repo()` falls back to `JsonClusterRepository` "for one cycle" when
+`SCRAPCODE_REPO_BACKEND=sqlite` cannot be honoured (missing file, missing
+key). Two tests pinned that:
+
+1. `test_missing_sqlite_file_falls_back_to_json_for_one_cycle` — missing
+   file under `tmp_path` (parent exists) → `isinstance(repo,
+   JsonClusterRepository)`.
+2. `test_unit_build_repo_sqlite_missing_db_key_falls_back_to_json` —
+   missing `SCRAPCODE_DB_KEY` → `isinstance(repo, JsonClusterRepository)`
+   plus a WARNING naming the variable.
+
+Both were honest tests of the contract as it stood. The operator decision of
+2026-08-02 retired that contract: a silent JSON fallback serves stale data
+with quarantine inert, which is every failure mode of `guild-key-integrity`
+at once. AC-010.1/AC-010.3 replace the fallback with a refusal that names the
+offending variable.
+
+### How they were re-authored
+
+**In place, count preserved.** The suite stays at 100; no scenario was added
+or deleted. The port (`bot.guilds.build_repo`) is unchanged — the test still
+drives the composition root; it asserts what the composition root does NOW.
+
+| Test (old name) | Test (new name) | Old assertion | New assertion |
+|---|---|---|---|
+| `...falls_back_to_json_for_one_cycle` | `...refuses_to_start_naming_the_path` | `isinstance(repo, JsonClusterRepository)` | `pytest.raises(StartupRefused)` with `SCRAPCODE_DB_PATH` in message; valid key set to isolate the path gate |
+| `...missing_db_key_falls_back_to_json` | `...missing_db_key_refuses_to_start` | `isinstance(repo, JsonClusterRepository)` + WARNING log | `pytest.raises(StartupRefused)` with `SCRAPCODE_DB_KEY` in message; path ALSO broken to pin the key-gate-fires-first ordering; `health.startup.refused` structured record asserted at ERROR level |
+
+The second test's path is deliberately ALSO broken (parent exists, file
+missing) so the test pins the AC-010.1 ordering: the key gate fires BEFORE
+the file gate. If it didn't, the message would name `SCRAPCODE_DB_PATH` and
+the operator would fix the wrong thing. This ordering is also covered by
+the unit property in `test_slice_07_build_repo_classification.py` but at
+the acceptance layer it is the message the operator reads, and the test
+should fail on the wrong message, not just the wrong exception type.
+
+The `health.startup.refused` record assertion is kept from the old test
+(though the level moved from WARNING to ERROR) because it pins the
+observability surface an operator's journal query finds — the exception is
+for `main.py`'s handler, the record is for the dashboard.
+
+### The import-time break (same root cause as UI-17, different suite)
+
+The `sqlite-backend` conftest also needed
+`os.environ.setdefault("SCRAPCODE_REPO_BACKEND", "json")` before any
+`bot.guilds` import. The 09-01 gate made `build_repo()` raise at import
+time (`bot/guilds.py:117` evaluates `repo = build_repo()` at module level),
+so the first `from bot.guilds import build_repo` in any test raised
+`StartupRefused` unless a safe backend was already set. Added to the
+session-scoped `_config_env_precondition` fixture, same precedent as the
+guild-key-integrity conftest fix (UI-17) and `tests/unit/
+test_guild_keys_policy.py:66`.
+
+### Item 3 — migration-module exemptions (taken in the same run)
+
+UI-12 flagged two migration modules that read `guilds.api_key` legitimately.
+They are now pre-exempted in `SANCTIONED_KEY_READERS` so when 09-03 lands the
+crafter only has to deal with `bot/guilds.py` (the remaining offender) and
+does not discover them mid-slice:
+
+  - `bot/db/migrations_json_to_sqlite.py` — re-encrypts each guild key into
+    the SQLite row during the JSON cutover; the read IS the migration.
+  - `bot/migrations/to_cluster_layout.py` — relocates guild and
+    player-registration keys into the per-cluster layout; the read IS the
+    migration.
+
+Both are module-level sanctions (not per-function) because the entire
+module's purpose is migration. A NEW non-migration read in those modules
+would be exempted too — the same tradeoff the three original entries have.
