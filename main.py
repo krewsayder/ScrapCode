@@ -29,6 +29,13 @@ def _git_hash() -> str:
     except Exception:
         return "unknown"
 
+# Bound under an alias on purpose. `bot` is rebound below to the
+# `commands.Bot` INSTANCE, which shadows the `bot` package for the rest of
+# this module — `bot.guilds` there resolves to `discord.Client.guilds` (a
+# SequenceProxy of joined servers), not to `bot/guilds.py`. Reaching the
+# repository singleton through `bot.guilds` raises AttributeError at call
+# time, which is how this crashed production on 2026-08-04.
+from bot import guilds as guild_registry
 from bot.cogs.update_cog       import setup_update
 from bot.cogs.view_cog         import setup_view
 from bot.cogs.admin_cog        import setup_admin
@@ -121,7 +128,8 @@ async def load_cogs():
     # refusal does in `build_repo`. Production always starts on an already-
     # migrated database, so the probe passes here; test fixtures never execute
     # `main.py`, so the gate does not fire against `create_all`-only fixtures.
-    bot.guilds.repo.probe()
+    # NOTE the alias: `guild_registry`, not `bot.guilds` — see the import.
+    guild_registry.repo.probe()
 
     await setup_update(bot, player_service)
     await setup_view(bot)
