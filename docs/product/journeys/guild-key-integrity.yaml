@@ -1,0 +1,173 @@
+# Journey SSOT — created by feature `guild-key-integrity` (DISCUSS 2026-07-31).
+# Research depth: lightweight (operator selection). Happy path + error paths;
+# emotional arc recorded as one label per step rather than a full arc map.
+
+id: guild-key-integrity
+name: Verify, replace, and trust a guild's Tacticus key
+persona: cluster-admin
+secondary_personas: [guild-officer]
+jobs:
+  - trust-guild-data-provenance
+  - swap-a-guild-key-without-a-console
+created_by_feature: guild-key-integrity
+
+happy_path:
+  - step: 1
+    actor: cluster-admin
+    action: Runs `/update_guild_key guild_id:word_bearers api_key:<new>`
+    output: "ephemeral: Probing key…"
+    emotion: wary
+    artifacts_written: []
+
+  - step: 2
+    actor: bot
+    action: Probes `GET /api/v1/guild` with the SUBMITTED key, before storing
+    output: none (internal)
+    emotion: wary
+    artifacts_read: [submitted_api_key]
+    note: >
+      The probe uses the submitted key, never the stored one. An unverifiable
+      key is never installed (AC-003.6).
+
+  - step: 3
+    actor: bot
+    action: Reports the resolved identity for confirmation
+    output: >
+      ephemeral: "Key resolves to 【UNDV】Word Bearers [EUVQZ].
+      This matches the stored binding. Install?"
+    emotion: informed
+    note: >
+      The pivot of the journey. This is the information that did not exist
+      during the incident — the guild the key ACTUALLY belongs to, shown
+      before anything is written.
+
+  - step: 4
+    actor: cluster-admin
+    action: Confirms
+    output: >
+      ephemeral: "✅ Key updated for Word Bearers.
+      Binding: EUVQZ · b64bdba4. Quarantine cleared."
+    emotion: in control
+    artifacts_written: [api_key, api_key_hmac, tacticus_guild_id,
+                        tacticus_guild_tag, tacticus_guild_name,
+                        identity_bound_at, key_status]
+
+  - step: 5
+    actor: bot
+    action: Next hourly auto_update probes identity before any write
+    output: "update channel: 🔄 Auto-update complete — Season 106"
+    emotion: unremarkable
+    note: >
+      Deliberately unchanged from today's output. A healthy cycle should look
+      exactly as it always has — the feature is only visible when it fires.
+
+  - step: 6
+    actor: cluster-admin
+    action: Verifies at leisure with `/view_config config:guilds`
+    output: "Bound to: 【UNDV】Word Bearers [EUVQZ] · verified 2026-07-31 04:00"
+    emotion: confident
+
+emotional_arc: [wary, wary, informed, in-control, unremarkable, confident]
+arc_check: monotonically non-decreasing — no confidence dip after step 3
+
+error_paths:
+  - id: submitted-key-wrong-guild
+    trigger: probe identity ≠ stored binding, during `/update_guild_key`
+    detection: identity comparison on the submitted key
+    recovery: refuse write, name both guilds, offer `force:true` to re-bind
+    slice: "02"
+  - id: stored-key-drifted
+    trigger: probe identity ≠ stored binding, during hourly sync (THE INCIDENT)
+    detection: identity comparison before ingestion
+    recovery: quarantine, alert both channels, all writes stopped
+    slice: "03"
+  - id: dead-key
+    trigger: probe returns 401 or 403
+    detection: HTTP status
+    recovery: report as dead key; do NOT quarantine — a dead key returns no
+      data, so there is nothing to contaminate
+    slice: "01"
+  - id: tacticus-unreachable
+    trigger: transport exception or 5xx
+    detection: exception type / status class
+    recovery: no state change, retry next hour, no alert on first failure
+    slice: "01"
+    note: >
+      Load-bearing. Collapsing this into `mismatch` would quarantine every
+      guild in the cluster during a Tacticus outage.
+  - id: guild-id-absent
+    trigger: response has no `guildId` field (Tacticus drops the undocumented field)
+    detection: field missing
+    recovery: >
+      classify `unverifiable` — do NOT quarantine, do NOT block ingestion,
+      raise a loud persistent alert that identity verification is offline
+    slice: "01"
+    note: >
+      Deliberately no silent fallback to tag comparison. A quiet downgrade to a
+      weaker check is the same failure shape as the original incident: the
+      system appears protected while it is not. Blocking would be worse — the
+      field vanishing affects every guild at once, so quarantining on it would
+      halt the whole cluster over a vendor change.
+  - id: display-field-absent
+    trigger: response has no `guildTag` or no `name`
+    detection: field missing
+    recovery: non-fatal — bind on guildId, render the display field as `—`
+    slice: "01"
+  - id: legacy-unbound-guild
+    trigger: guild row predates the feature; both identity fields null
+    detection: null binding
+    recovery: trust-on-first-use adoption, announced once in update channel
+    slice: "01"
+  - id: quarantined-guild-first-in-dict
+    trigger: season detection picks a quarantined guild's key
+    detection: key_status check during season discovery
+    recovery: skip quarantined guilds, fall through to the next usable key
+    slice: "03"
+    note: >
+      Without this, quarantining one guild halts EVERY guild in the server —
+      strictly worse than the bug being fixed.
+  - id: all-guilds-quarantined
+    trigger: no usable key remains for season detection
+    detection: every guild quarantined
+    recovery: skip server with an explicit reason, not a silent continue
+    slice: "03"
+
+shared_artifacts:
+  - name: guild_uuid
+    source: guilds.tacticus_guild_id
+    consumers: [identity comparison, /view_config]
+    note: the ONLY field compared; tag and name are display only (D1)
+  - name: guild_tag
+    source: guilds.tacticus_guild_tag
+    consumers: [alert text, /view_config]
+    note: display only, never compared — a retag must not trip the lock
+  - name: guild_name
+    source: guilds.tacticus_guild_name
+    consumers: [alert text, /view_config]
+    note: display only, never compared — name is mutable
+  - name: key_status
+    source: guilds.key_status
+    consumers: [the single key accessor (D6)]
+  - name: quarantine_reason
+    source: guilds.quarantine_reason
+    consumers: [alert text, /view_config]
+  - name: identity_bound_at
+    source: guilds.identity_bound_at
+    consumers: [/view_config, trust-on-first-use gate]
+  - name: probe_result
+    source: the single identity-probe function
+    consumers: [all]
+    note: never re-probed per call site
+  - name: api_key
+    source: guilds.api_key (Fernet) + guilds.api_key_hmac (HKDF-HMAC)
+    consumers: [all seven key-consumption sites, via the D6 accessor]
+    note: written only via save_guilds; never raw SQL
+
+open_to_design:
+  - Column layout is a recommendation; a separate `guild_key_bindings` table
+    is acceptable.
+  - Step 3's confirmation may be a modal, a button pair, or the `force:true`
+    parameter the ACs are written against.
+  - The identity probe and `_fetch_roster` hit the same URL and the roster
+    response already carries the identity fields — folding them into one call
+    is likely correct and saves a request per guild per hour.

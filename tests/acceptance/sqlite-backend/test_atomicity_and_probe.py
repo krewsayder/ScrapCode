@@ -502,22 +502,59 @@ def test_scrapcode_repo_backend_selects_live_repository(monkeypatch, env_vars):
     assert isinstance(guilds_mod.repo, JsonClusterRepository)
 
 
-def test_missing_sqlite_file_falls_back_to_json_for_one_cycle(monkeypatch, tmp_path):
-    """@infrastructure-failure — AP10."""
+def test_a_missing_sqlite_file_refuses_to_start_naming_the_path(monkeypatch, tmp_path):
+    """@infrastructure-failure — AP10 (RE-AUTHORED 2026-08-03).
+
+    The ADR-006 D9 "safety net" this test used to pin — fall back to JSON
+    "for one cycle" when the SQLite file is missing — is the reassuring-but-
+    false signal the `guild-key-integrity` feature exists to remove. The
+    operator decision of 2026-08-02 is that a deploy which says
+    `SCRAPCODE_REPO_BACKEND=sqlite` but cannot honour it is broken, not
+    degraded; a bot that comes up on a silent JSON fallback serves stale
+    data with quarantine inert, which is every failure mode of that feature
+    at once. AC-010.3 replaces the fallback with a refusal.
+
+    The contract this test must now pin is the one the old one pinned in
+    the opposite direction: the composition root (`bot.guilds.build_repo`)
+    REFUSES to start, and the refusal names `SCRAPCODE_DB_PATH` (or the path
+    itself) so the operator knows WHICH file to restore. A refusal that
+    does not name the setting turns a five-second fix into an incident.
+
+    A VALID Fernet key is set so the key gate does not fire first — the
+    AC-010.1 ordering (key before path) is pinned by the unit property
+    `test_a_missing_or_empty_key_refuses_before_any_file_state_is_inspected`
+    in `tests/unit/test_slice_07_build_repo_classification.py`. This test
+    isolates the PATH gate by providing everything else it needs.
+    """
+    from bot.guilds import build_repo, StartupRefused
+    from conftest import HERM_FERNET_KEY
+
     monkeypatch.setenv("SCRAPCODE_REPO_BACKEND", "sqlite")
+    monkeypatch.setenv("SCRAPCODE_DB_KEY", HERM_FERNET_KEY)
+    # Parent exists (tmp_path), file does not — the file was deleted or
+    # corrupted, not a first-run (first-run has no parent dir).
     monkeypatch.setenv("SCRAPCODE_DB_PATH", str(tmp_path / "missing.db"))
-    import importlib, bot.guilds as guilds_mod
-    importlib.reload(guilds_mod)
-    from bot.repository import JsonClusterRepository
-    assert isinstance(guilds_mod.repo, JsonClusterRepository), \
-        "missing SQLite file must fall back to JSON for one cycle"
+
+    with pytest.raises(StartupRefused) as refusal:
+        build_repo()
+
+    message = str(refusal.value)
+    assert "SCRAPCODE_DB_PATH" in message or str(tmp_path / "missing.db") in message, (
+        "a missing SQLite file refused to start but the message did not name "
+        f"the path the operator has to restore: {message!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
-# Unit tests — env-driven composition-root factory (ADR-006 D9) + the
-# missing-file/missing-key fallback branch (ADR-006 D9 / DEVOPS safety net).
-# Behavior budget: 4 behaviors (default-sqlite, =json, missing-key fallback,
+# Unit tests — env-driven composition-root factory (ADR-006 D9).
+# Behavior budget: 4 behaviors (default-sqlite, =json, missing-key refusal,
 # probe Protocol) x 2 = 8; 4 unit tests used.
+#
+# RE-AUTHORED 2026-08-03: the missing-key and missing-file branches that used
+# to fall back to JSON now refuse (AC-010.1 / AC-010.3). The fallback was the
+# ADR-006 D9 "safety net"; the operator decision of 2026-08-02 retired it
+# because it was the reassuring-but-false signal `guild-key-integrity` exists
+# to remove. See `distill/upstream-issues.md` UI-18.
 # ---------------------------------------------------------------------------
 
 def test_unit_build_repo_default_backend_is_sqlite(monkeypatch, tmp_path):
@@ -536,7 +573,8 @@ def test_unit_build_repo_default_backend_is_sqlite(monkeypatch, tmp_path):
 
 def test_unit_build_repo_json_backend_selects_json(monkeypatch):
     """Unit: SCRAPCODE_REPO_BACKEND=json → JsonClusterRepository; no SQLite
-    probe is attempted (so a missing SCRAPCODE_DB_KEY is OK)."""
+    probe is attempted (so a missing SCRAPCODE_DB_KEY is OK). This is the ONE
+    deliberate fallback ADR-006 D9 keeps: a human chose to roll back."""
     from bot.guilds import build_repo
     monkeypatch.setenv("SCRAPCODE_REPO_BACKEND", "json")
     monkeypatch.delenv("SCRAPCODE_DB_KEY", raising=False)
@@ -545,23 +583,56 @@ def test_unit_build_repo_json_backend_selects_json(monkeypatch):
     assert isinstance(repo, JsonClusterRepository)
 
 
-def test_unit_build_repo_sqlite_missing_db_key_falls_back_to_json(monkeypatch, tmp_path, caplog):
+def test_unit_build_repo_sqlite_missing_db_key_refuses_to_start(monkeypatch, tmp_path, caplog):
     """Unit: SCRAPCODE_REPO_BACKEND=sqlite but SCRAPCODE_DB_KEY missing —
-    fall back to JsonClusterRepository for one cycle (ADR-006 D9 safety net;
-    the probe is skipped on the JSON path so a missing key does not block
-    rollback). A loud warning is logged."""
-    from bot.guilds import build_repo
+    the composition root REFUSES to start (AC-010.1, replacing the ADR-006
+    D9 safety net retired by operator decision 2026-08-02).
+
+    The refusal must name `SCRAPCODE_DB_KEY` so the operator knows WHICH
+    variable to set. The path is ALSO broken (parent exists, file missing)
+    so this test additionally pins the AC-010.1 ordering: the key gate fires
+    BEFORE the file gate. If the path gate fired first, the message would
+    name `SCRAPCODE_DB_PATH` and the operator would be sent on a wrong
+    errand — fixing the file when the actual fault is the missing key.
+
+    A `health.startup.refused` structured record is emitted before the
+    raise (DEVOPS U1 — the record the operator's journal query finds). The
+    old test asserted a WARNING log; the new contract emits an ERROR-level
+    structured record, which is the correct severity for "the bot will not
+    start". Asserting the record is kept from the old test because it pins
+    the observability surface an operator relies on, not just the exception.
+    """
+    from bot.guilds import build_repo, StartupRefused
     import logging
+
     monkeypatch.setenv("SCRAPCODE_REPO_BACKEND", "sqlite")
+    # Path is ALSO broken (parent exists, file missing) — verifies the key
+    # gate fires first. If it didn't, the message would name the path.
     monkeypatch.setenv("SCRAPCODE_DB_PATH", str(tmp_path / "missing.db"))
     monkeypatch.delenv("SCRAPCODE_DB_KEY", raising=False)
-    with caplog.at_level(logging.WARNING, logger="bot.guilds"):
-        repo = build_repo()
-    from bot.repository import JsonClusterRepository
-    assert isinstance(repo, JsonClusterRepository), \
-        "missing SCRAPCODE_DB_KEY with backend=sqlite must fall back to JSON"
-    assert any("SCRAPCODE_DB_KEY" in r.getMessage() for r in caplog.records), \
-        "fallback must log a loud warning naming SCRAPCODE_DB_KEY"
+
+    with caplog.at_level(logging.ERROR, logger="bot.guilds"):
+        with pytest.raises(StartupRefused) as refusal:
+            build_repo()
+
+    message = str(refusal.value)
+    assert "SCRAPCODE_DB_KEY" in message, (
+        "a missing SCRAPCODE_DB_KEY refused to start but the message did not "
+        f"name the variable the operator has to set: {message!r}"
+    )
+    assert "SCRAPCODE_DB_PATH" not in message, (
+        "the key gate did not fire first — the message named the path "
+        f"instead of the key, sending the operator to fix the wrong thing: "
+        f"{message!r}"
+    )
+    assert any(
+        getattr(r, "event", None) == "health.startup.refused"
+        for r in caplog.records
+    ), (
+        "the refusal did not emit a `health.startup.refused` structured "
+        "record. This is the record the operator's journal query finds; "
+        f"records seen: {[r.getMessage() for r in caplog.records]}"
+    )
 
 
 def test_unit_composition_root_adapters_expose_probe_protocol():

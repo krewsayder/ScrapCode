@@ -1,0 +1,372 @@
+# kpi-contracts.yaml — SSOT for outcome-KPI instrumentation.
+#
+# One entry per KPI, per feature. Records HOW each KPI is collected: the
+# event names, log fields, and queries that produce the number — not just
+# what the target is (that lives in the feature's `feature-delta.md`).
+#
+# Created by the DEVOPS wave of feature `guild-key-integrity` (2026-07-31).
+# The `sqlite-backend` feature predates this file; its KPI-1..KPI-4 remain in
+# docs/feature/sqlite-backend/devops/kpi-instrumentation.md and are recorded
+# here as a back-reference rather than re-derived.
+#
+# Signal classes available in this project (DEVOPS D5): structured JSON log
+# records in discord.log / journald, SQL queries against the SQLite DB, and
+# test artifacts. There is NO metrics stack and NO tracing — one process on
+# one VM. "Dashboard" means a documented grep.
+
+version: 1
+
+conventions:
+  log_sink: "discord.log (RotatingFileHandler, 10 MB x 5) and journalctl -u discord-bot"
+  record_shape: >-
+    Single-line JSON emitted via the _emit_structured pattern. Every record
+    carries: ts (ISO-8601 UTC), level, event (dotted name). Feature families
+    add their own required fields.
+  key_ref: >-
+    Correlation ID for anything key-related. The FIRST 8 HEX CHARACTERS of
+    api_key_hmac (HKDF-SHA256 keyed by SCRAPCODE_DB_KEY, ADR-006 D7). It is
+    not key material and cannot be reversed without the Fernet key. Plaintext
+    api_key values MUST NEVER appear in any record, on any path, including
+    tracebacks.
+  gate_classes: >-
+    Added by DISTILL (2026-08-01). HARD = the slice does not ship until the
+    KPI is met, and an acceptance scenario fails when it is not. SOFT =
+    reviewed by a human at the incident review or the slice retro; a miss is
+    a conversation, not a block. Every HARD KPI names the scenario that
+    enforces it, because a hard gate with no executable assertion behind it
+    is a soft gate with a firm adjective.
+  scenario_paths: >-
+    Scenario references below are relative to
+    tests/acceptance/guild-key-integrity/. The `.feature` files under
+    acceptance/ are the human-readable SSOT; the test_*.py modules beside
+    them are the executable specs (this project does not use pytest-bdd).
+
+features:
+
+  guild-key-integrity:
+    wave: DEVOPS
+    dated: 2026-07-31
+    delta: docs/feature/guild-key-integrity/feature-delta.md
+    environments: docs/feature/guild-key-integrity/environments.yaml
+
+    event_family:
+      prefix: "guild.key."
+      required_fields: [ts, level, event, server_id, guild_id, key_ref]
+      events:
+        - {name: "guild.key.probe.ok",         level: INFO,    emitter: "bot/guild_keys.py",       fields: [tacticus_guild_id]}
+        # `tacticus_guild_name`, NOT `name`. `logging` refuses an `extra` key
+        # that collides with a LogRecord attribute, and `record.name` is the
+        # logger's own name — a `name` field here raises KeyError at emit
+        # time, turning the one adoption announcement that matters into an
+        # exception inside the hourly loop. Corrected 2026-08-02: this row
+        # declared `name` while production has always emitted
+        # `tacticus_guild_name` (`guild_keys.py:490`), so an operator
+        # following this contract would have written a query that returns
+        # nothing, or worse, a patch that raises.
+        - {name: "guild.key.bound",            level: INFO,    emitter: "bot/guild_keys.py",       fields: [tacticus_guild_id, tacticus_guild_tag, tacticus_guild_name]}
+        - {name: "guild.key.mismatch",         level: ERROR,   emitter: "bot/guild_keys.py",       fields: [bound_id, observed_id, observed_tag, observed_name]}
+        - {name: "guild.key.quarantined",      level: ERROR,   emitter: "bot/guild_keys.py",       fields: [reason, quarantined_at]}
+        # Corrected 2026-08-02 against production. This row declared
+        # `level: WARNING`, `emitter: bot/guild_keys.py`, `fields: [caller]`.
+        # All three were wrong: `_emit_ingest_blocked` lives in
+        # `bot/cogs/tasks_cog.py:701`, emits at INFO, and carries `key_ref`
+        # rather than `caller`. An operator alerting on WARNING from
+        # guild_keys.py would have seen zero blocked-ingest events and
+        # concluded the block never fires.
+        - {name: "guild.key.ingest.blocked",   level: INFO,    emitter: "bot/cogs/tasks_cog.py",   fields: [key_ref]}
+        - {name: "guild.key.unverifiable",     level: ERROR,   emitter: "bot/guild_keys.py",       fields: [reason]}
+        - {name: "guild.key.unreachable",      level: WARNING, emitter: "bot/guild_keys.py",       fields: [reason, status]}
+        - {name: "guild.key.dead",             level: ERROR,   emitter: "bot/guild_keys.py",       fields: [status]}
+        - {name: "guild.key.alert.sent",       level: INFO,    emitter: "bot/guild_keys.py",       fields: [channel_id, suppressed_until]}
+        - {name: "guild.key.alert.suppressed", level: DEBUG,   emitter: "bot/guild_keys.py",       fields: [last_alerted_at]}
+        # Corrected 2026-08-02: emitter is `bot/guild_keys.py:334`
+        # (`_emit_updated`), not the cog. The cog renders the reply; the
+        # policy layer emits the record, which is what keeps the plaintext
+        # key out of it (`_KeyContext` cannot carry one).
+        - {name: "guild.key.updated",          level: INFO,    emitter: "bot/guild_keys.py",       fields: [tacticus_guild_id, forced, elapsed_ms, rebound_from]}
+        - {name: "guild.key.collision",        level: ERROR,   emitter: "bot/guild_keys.py",       fields: [holder_guild_id]}
+        - {name: "auto_update.cycle",          level: INFO,    emitter: "bot/cogs/tasks_cog.py",   fields: [server_id, season, guilds_total, guilds_processed, guilds_skipped, skip_reasons]}
+        # Added 2026-08-03 (remediation slice 04): cycle-level containment so
+        # the NEXT unhandled exception cannot silently end hourly ingestion.
+        # These are `auto_update.*`, not `guild.key.*` — no key material, so
+        # the `key_ref` required-field does not apply.
+        - {name: "auto_update.server.failed",  level: ERROR,   emitter: "bot/cogs/tasks_cog.py",   fields: [server_id, error_type]}
+        - {name: "auto_update.loop.failed",    level: ERROR,   emitter: "bot/cogs/tasks_cog.py",   fields: [restart_attempt, backoff_seconds]}
+        - {name: "auto_update.loop.abandoned", level: ERROR,   emitter: "bot/cogs/tasks_cog.py",   fields: [restart_attempt]}
+        # Added 2026-08-03 (remediation slice 07): composition-root health.
+        # `health.startup.refused` fires before the bot exits on a bad .env;
+        # `health.startup.json_rollback` announces the guard is inert on the
+        # deliberate JSON rollback path. Neither is `guild.key.*`.
+        - {name: "health.startup.refused",     level: ERROR,   emitter: "bot/guilds.py",           fields: [reason, variable]}
+        - {name: "health.startup.json_rollback", level: WARNING, emitter: "bot/guilds.py",         fields: [reason]}
+
+    kpis:
+
+      - id: KPI-1
+        name: "Time to detect a wrong-guild key"
+        baseline: "~72 h (2026-07-28 -> 2026-07-31, human-noticed)"
+        target: "<= 1 h"
+        ga_baseline: "<= 1 h by construction (hourly probe + first-alert-of-a-quarantine-always-fires); recorded 2026-08-02 at DELIVER ship — not yet measured in production, dogfood pending"
+        signal: log
+        formula: "detection_latency = alerted_at - last_probe_ok_at"
+        events: ["guild.key.probe.ok", "guild.key.mismatch", "guild.key.alert.sent"]
+        collection: |
+          For the affected guild_id, take the ts of the last guild.key.probe.ok
+          BEFORE the guild.key.mismatch, and the ts of the guild.key.alert.sent
+          that follows it. The difference is the widest window in which drift
+          could have gone unnoticed.
+        query: |
+          grep -E 'guild\.key\.(probe\.ok|mismatch|alert\.sent)' discord.log \
+            | grep '"guild_id": "word_bearers"' | tail -20
+        threshold_note: |
+          Bounded above by the @tasks.loop(hours=1) interval plus alert
+          latency. Exceeding 1 h means a cycle was missed, an httpx call hung,
+          or the loop was throttled — all real failures worth surfacing.
+        supersedes: |
+          DISCUSS defined this as "delta between the first probe returning a
+          mismatched identity and the alert message timestamp". Those two
+          events fire in the same coroutine on the same tick, so that value is
+          ~0 whether or not the feature works — a metric that cannot fail
+          cannot inform. Target and intent are unchanged; only the formula is
+          corrected. See feature-delta.md `Changed Assumptions` U2.
+        alerting: "The Discord alert IS the instrument. No separate alert rule."
+        gate: soft
+        window: "reviewed at each slice retro and at any incident review"
+        scenarios:
+          - "slice-01-bind-and-report.feature :: A drifted key is reported naming both the bound and the resolved guild"
+          - "slice-01-bind-and-report.feature :: A mismatch that persists is reported on every cycle in this slice"
+          - "slice-01-bind-and-report.feature :: The time from the last agreeing check to the alert can be measured"
+          - "environment-matrix.feature :: bound-matching — the steady state is completely silent"
+        measurement_note: |
+          Soft because the numerator depends on a real drift occurring, which
+          cannot be scheduled. The scenarios prove the INSTRUMENT works —
+          that probe.ok, mismatch and alert.sent are all emitted with the
+          fields the formula needs. Whether the observed latency lands under
+          1 h in production is the review question.
+
+          Added 2026-08-01 after the Final Wave Review Gate: the third
+          scenario asserts the formula is COMPUTABLE — that both timestamps
+          parse, that alerted_at is after last_probe_ok_at, and that the span
+          fits one loop interval. The earlier scenarios only asserted the
+          three records were emitted. That gap mattered because this KPI was
+          already replaced once for being unfalsifiable (U2); three
+          correctly-named records carrying an unparseable timestamp would
+          reproduce the same failure in a new place.
+
+          Alert suppression does NOT mask this measurement. Slice 01 has no
+          suppression at all (AC-002.6), and in Slice 03 the FIRST alert of a
+          quarantine always fires — suppression only applies to repeats,
+          which are after detection has already happened.
+
+      - id: KPI-2
+        name: "Contaminated rows written after a mismatch is detectable"
+        baseline: "50 (30 battle + 20 bomb, season 106)"
+        target: "0"
+        ga_baseline: "0 — quarantine blocks roster AND hits (verified by test_a_quarantined_guild_writes_not_one_raid_record / _not_one_roster_record); recorded 2026-08-02 at DELIVER ship — pre-dogfood"
+        signal: [log, sql]
+        events: ["guild.key.ingest.blocked", "guild.key.quarantined"]
+        query: |
+          SELECT (SELECT COUNT(*) FROM battle_hits
+                   WHERE discord_server_id = :sid AND guild_id = :gid
+                     AND completed_on > :quarantined_at)
+               + (SELECT COUNT(*) FROM bomb_hits
+                   WHERE discord_server_id = :sid AND guild_id = :gid
+                     AND completed_on > :quarantined_at) AS contaminated;
+        collection: |
+          :quarantined_at comes from guild_key_bindings.quarantined_at.
+          Corroborate with the log: every guild.key.ingest.blocked record is a
+          write that did not happen.
+        precondition: |
+          quarantined_at MUST be stored ISO-8601 UTC in the SAME shape as
+          battle_hits.completed_on (String(32), sourced verbatim from the
+          Tacticus payload). The comparison is lexicographic on strings — a
+          shape mismatch returns a WRONG result set silently rather than
+          erroring. Verify against a production row before relying on it.
+        alerting: none
+        review: "Checked at incident review and as a DoD gate, not continuously."
+        gate: hard
+        window: "asserted on every run of the Slice 03 suite"
+        scenarios:
+          - "slice-03-quarantine-enforcement.feature :: A quarantined guild writes not one raid record"
+          - "slice-03-quarantine-enforcement.feature :: A quarantined guild writes not one roster record"
+          - "environment-matrix.feature :: bound-drifted — the incident replay writes nothing once enforcement is on"
+          - "tier_b/test_key_status_state_machine.py :: quarantined_guilds_never_write"
+        measurement_note: |
+          CORRECTED 2026-08-02. This note previously read: "The only KPI with
+          a property-based assertion behind it as well as examples: the Tier B
+          invariant holds across every interleaving of probes and key
+          updates, not just the orderings someone enumerated."
+
+          It held across ZERO interleavings. `quarantined_guilds_never_write`
+          is an @invariant guarded by a precondition, and a SECOND invariant
+          in the same machine — `quarantine_is_never_a_trap` — called
+          `update_key`, which releases the quarantine. Hypothesis runs
+          invariants in name order, so the mutating one always ran first and
+          this one always found the guild ACTIVE and short-circuited before
+          its assertion. Measured across 200 examples x 25 steps: 0
+          executions of the assertion body. The KPI had exactly the
+          example-based evidence of every other KPI, and a green tick where
+          the property should have been.
+
+          Fixed in the DISTILL remediation wave: the reachability check runs
+          against a deep copy (non-mutating), the real rescue moved to a
+          @rule, and `test_both_properties_actually_assert_something` now
+          counts assertion-body executions and fails at zero. Re-measured at
+          the same budget: 1037 executions. The claim above is true as of
+          that change and is no longer taken on trust — the counter is the
+          evidence.
+
+          The precondition on quarantined_at's string shape (above) is
+          asserted directly in
+          test_a_drifted_guild_is_quarantined_with_both_identities_recorded,
+          so a shape drift fails a test rather than silently returning a
+          wrong result set.
+
+      - id: KPI-3
+        name: "Wall-clock to replace a guild key"
+        baseline: "~25 min, 1 SSH session, 1 DB backup, 1 throwaway script"
+        target: "<= 60 s, 0 SSH sessions"
+        ga_baseline: "one Discord interaction (seconds, 0 SSH) via /update_guild_key; elapsed_ms recorded per use; recorded 2026-08-02 at DELIVER ship — not yet measured in production, dogfood pending"
+        signal: log
+        events: ["guild.key.updated"]
+        formula: "elapsed_ms, measured from interaction receipt to write commit"
+        collection: |
+          The command records its own elapsed_ms. Corroborate the "0 SSH"
+          half independently — the log cannot prove the absence of a shell:
+            journalctl -u ssh --since '1 hour ago' | grep 'Accepted'
+          An empty result during the swap window is the evidence.
+        alerting: none
+        gate: soft
+        window: "measured on each use of /update_guild_key"
+        scenarios:
+          - "slice-02-update-guild-key.feature :: An admin installs a new key and is told which guild it belongs to"
+          - "slice-02-update-guild-key.feature :: Replacing a key destroys nothing"
+        measurement_note: |
+          Soft on the wall-clock half — elapsed_ms is recorded, not gated.
+          The "0 SSH sessions" half is the part that matters and it is
+          structural: the command exists, so the console procedure is no
+          longer required. `Replacing a key destroys nothing` is the
+          assertion that makes the command a real replacement for the manual
+          procedure rather than a faster way to lose data.
+
+      - id: KPI-4
+        name: "False-positive quarantines"
+        baseline: "n/a (feature does not exist)"
+        target: "0 in 30 days"
+        ga_baseline: "0 false positives in the suite — a matching guild is completely silent (test_a_matching_guild_is_completely_silent, test_bound_matching_is_completely_silent) and a retag/rename never trips the lock (uuid-only comparison, D1); recorded 2026-08-02 at DELIVER ship, 30-day production window not yet started"
+        signal: log
+        events: ["guild.key.quarantined"]
+        collection: |
+          Enumerate every guild.key.quarantined record in the window; each
+          MUST correspond to a real guild move the operator can confirm. There
+          is no automated ground truth — confirmation is a human judgement,
+          recorded at review. Any record that cannot be explained is a
+          false positive.
+        query: |
+          grep 'guild.key.quarantined' discord.log \
+            | jq -r '[.ts, .guild_id, .bound_id, .observed_id] | @tsv'
+        window: "30 days from the Slice 03 deploy"
+        depends_on: |
+          DEVOPS D11 — the 7-day non-blocking soak of Slice 01 is what makes a
+          0 target credible. Enforcement deploying without the soak would make
+          this KPI a coin flip.
+        alerting: none
+        gate: hard
+        window: "30 days from the Slice 03 deploy; the 7-day Slice 01 soak is the entry gate"
+        scenarios:
+          - "slice-01-bind-and-report.feature :: A guild whose key resolves to the guild it is bound to produces no message anywhere"
+          - "slice-01-bind-and-report.feature :: A retag or a rename is not a mismatch"
+          - "environment-matrix.feature :: bound-matching — the steady state is completely silent"
+        measurement_note: |
+          The silence scenarios are the executable half of this KPI. Every
+          OTHER alerting scenario in the suite passes against an
+          implementation that alerts unconditionally; these are the ones that
+          fail it. The retag/rename cases are the most likely real-world
+          false positive, since guilds rename routinely and both incident
+          guilds share the 【UNDV】 alliance prefix.
+
+      - id: KPI-5
+        name: "Guilds unaffected by another guild's quarantine"
+        baseline: "0% — the season SPOF halts the whole server"
+        target: "100%"
+        ga_baseline: "100% — season discovery falls through a quarantined guild to the next usable key and a healthy sibling ingests normally (test_a_quarantined_guild_listed_first_does_not_stop_the_server, test_a_healthy_guild_beside_a_quarantined_one_updates_normally, test_mixed_cluster_survives_a_quarantined_first_guild); recorded 2026-08-02 at DELIVER ship — pre-dogfood"
+        signal: log
+        events: ["auto_update.cycle"]
+        formula: "guilds_processed == guilds_total - guilds_quarantined"
+        collection: |
+          One auto_update.cycle record per server per hourly cycle.
+          skip_reasons is a list, never empty when guilds_skipped > 0 — an
+          unexplained skip is itself the defect this KPI exists to catch.
+        query: |
+          grep 'auto_update.cycle' discord.log | tail -24 \
+            | jq -r '[.ts, .server_id, .guilds_total, .guilds_processed, (.skip_reasons|join(","))] | @tsv'
+        alerting:
+          rule: "guilds_processed == 0 AND guilds_total > 0"
+          level: ERROR
+          rationale: |
+            A whole-server skip is exactly what happened during the incident
+            and produced no signal of any kind. This is the only automated
+            alert rule the feature adds outside the guild.key.* family.
+        new_instrumentation: |
+          auto_update emits NOTHING structured today. This KPI is
+          unmeasurable without the new record — which is why the incident's
+          whole-server skip risk was invisible.
+        gate: hard
+        window: "asserted on every run of the Slice 03 suite"
+        scenarios:
+          - "slice-03-quarantine-enforcement.feature :: A quarantined guild listed first does not stop the rest of the server"
+          - "slice-03-quarantine-enforcement.feature :: A healthy guild beside a quarantined one updates normally"
+          - "slice-03-quarantine-enforcement.feature :: A server with no usable key is skipped for a stated reason"
+          - "environment-matrix.feature :: mixed-cluster — a quarantined guild listed first does not take the server down"
+        measurement_note: |
+          The mixed-cluster fixture pins the quarantined guild FIRST in dict
+          order and the scenario ASSERTS that precondition before acting.
+          next(iter(guilds.values())) only misbehaves in that ordering, so a
+          scenario that happens to place it second passes while the bug is
+          fully present.
+
+      - id: KPI-6
+        name: "Key values leaked to logs or Discord"
+        baseline: "1 known exposure (replacement key in shell history and a temp file)"
+        target: "0"
+        ga_baseline: "0 by construction — no guild.key.* record carries api_key (correlation is key_ref, the first 8 hex of api_key_hmac), the /update_guild_key reply is ephemeral and echoes no key, and /view_config renders no key and no identifier beyond 8 characters (the quarantine line strips the uuid embedded in quarantine_reason). Asserted by the parametrized leak tests across every outcome and every render state; recorded 2026-08-02 at DELIVER ship"
+        signal: test
+        collection: |
+          Two gates, one runtime and one build:
+          (1) Runtime — decrypt the stored key via bot/db/secrets.decrypt_api_key
+              and grep for it as a fixed string across every sink:
+                grep -F "$KEY" discord.log
+                journalctl -u discord-bot --no-pager | grep -F "$KEY"
+              Both MUST return nothing. Never echo $KEY; never place it in a
+              heredoc or a shell literal.
+          (2) Build — a test asserting no guild.key.* event schema declares an
+              api_key field, and that /update_guild_key responses are ephemeral.
+        alerting: none
+        note: |
+          key_ref (8 hex of api_key_hmac) is the sanctioned correlation ID and
+          is explicitly NOT a leak: it is a truncated HKDF derivation keyed by
+          SCRAPCODE_DB_KEY and is not reversible without that key.
+        gate: hard
+        window: "asserted on every run of the Slice 02 and Slice 03 suites"
+        scenarios:
+          - "slice-02-update-guild-key.feature :: No key value is ever shown or written down (5 outcomes)"
+          - "slice-03-quarantine-enforcement.feature :: No key value and no full identifier is ever shown (4 states)"
+        measurement_note: |
+          Both scenarios are parametrized across OUTCOMES and STATES rather
+          than run once on the happy path. That is deliberate: this feature's
+          one known exposure came from an error path, and a leak test that
+          only covers success proves nothing about the case where a traceback
+          carries the argument list.
+
+          /view_config is officer-tier and NOT ephemeral, so anything it
+          renders is visible to everyone in the channel — hence the separate
+          uuid-truncation assertion there.
+
+  sqlite-backend:
+    wave: DEVOPS
+    dated: 2026-07-18
+    note: |
+      Predates this file. KPI-1..KPI-4 (contract-suite pass, JSON/SQL parity,
+      crash-safety, cutover duration) are documented at
+      docs/feature/sqlite-backend/devops/kpi-instrumentation.md and are not
+      re-derived here. Recorded so this file reads as the complete index.

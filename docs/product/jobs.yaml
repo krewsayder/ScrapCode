@@ -27,3 +27,109 @@ jobs:
       Motivations are clear (ADR-002 already accepted SQLite as successor);
       the value is data integrity preservation, not new user outcomes.
     traces_to_feature: sqlite-backend
+
+  # -------------------------------------------------------------------------
+  # Feature `guild-key-integrity` (DISCUSS 2026-07-31). First real JTBD pass in
+  # this repository. Grounded in a diagnosed production incident, not a
+  # hypothetical: a guild master moved Tacticus guilds on ~2026-07-28 and his
+  # API key — registered as the `word_bearers` guild key — moved with him,
+  # writing 【UNDV】Dark Mechanicum data into 【UNDV】Word Bearers for ~72 hours
+  # before a human noticed. Forces below are taken from the audit run on
+  # 2026-07-31, not from recollection.
+  # -------------------------------------------------------------------------
+
+  - id: trust-guild-data-provenance
+    type: user-facing
+    statement: >
+      When my guild's leaderboard updates each hour, I want certainty the
+      numbers came from my guild and nobody else's, so I can make roster and
+      performance calls without second-guessing them.
+    primary_persona: cluster-admin
+    secondary_personas: [guild-officer]
+    jtbd_skipped: false
+    dimensions:
+      functional: >
+        Prove that every ingested roster and raid row came from the Tacticus
+        guild the key was registered for, and refuse the write when it did not.
+      emotional: >
+        Absence of doubt. The operator should not have to periodically wonder
+        whether the leaderboard is real, nor audit it by hand to find out.
+      social: >
+        An officer who posts a leaderboard call-out is publicly asserting who
+        did what. Being wrong about that — naming players who are not even in
+        the guild — costs credibility with the people they lead.
+    four_forces:
+      push: >
+        Three days of another guild's data written silently. Season 106 was
+        30-of-30 battle rows and 20-of-30 bomb rows off-roster; 30 real members
+        were flipped to is_former while 30 strangers were marked active. The
+        shared 【UNDV】 alliance prefix on both guild names is very likely why
+        the wrong names did not read as obviously wrong.
+      pull: >
+        A bot that refuses bad data loudly instead of accepting it silently —
+        detection in one hourly cycle rather than three days.
+      anxiety: >
+        A false positive locks out a healthy guild and stops its data entirely.
+        Alert fatigue if a mismatch re-fires every hour. A Tacticus outage
+        being misread as a mismatch and quarantining the whole cluster.
+      habit: >
+        Today the operator trusts the numbers implicitly and investigates only
+        when something looks visibly wrong — which is exactly what took 72 hours.
+    opportunity:
+      importance: 9
+      satisfaction: 1
+      score: 17
+      note: >
+        Satisfaction is near-zero because there is currently no signal of any
+        kind. Not a weak signal — no signal. `_fetch_roster` takes whatever
+        roster the API returns with no identity check whatsoever.
+    traces_to_feature: guild-key-integrity
+    traces_to_stories: [US-001, US-002, US-004, US-006]
+
+  - id: swap-a-guild-key-without-a-console
+    type: user-facing
+    statement: >
+      When a guild's API key stops being valid for that guild — revoked,
+      rotated, or the holder moved guilds — I want to install the replacement
+      from Discord in under a minute, so I can restore hourly updates without
+      SSH, a hand-written Python script, and a database backup.
+    primary_persona: cluster-admin
+    jtbd_skipped: false
+    dimensions:
+      functional: >
+        Replace one guild's stored key — Fernet ciphertext plus its derived
+        HMAC — atomically, without disturbing any dependent row.
+      emotional: >
+        Control without fear. The current options are a destructive command or
+        an improvised script against a live database; both feel risky because
+        both are.
+      social: >
+        An admin who fixes it live during the conversation looks in command of
+        their own system. One who says "give me twenty minutes, I need to SSH
+        in" does not.
+    four_forces:
+      push: >
+        The only two paths today are both bad. `/deregister_guild` +
+        `/register_guild` CASCADE-deletes every player and hit row for the
+        guild — `/register_guild` hard-blocks an existing guild_id, so there is
+        no in-place option. The alternative is stopping the service, backing up
+        the database, and running a throwaway script on the VM, which is what
+        was actually done on 2026-07-31.
+      pull: >
+        One ephemeral slash command that shows which guild the new key resolves
+        to before installing it, and never echoes the key.
+      anxiety: >
+        Pasting a secret into Discord. Installing a wrong key by typo. Someone
+        with only the officer tier being able to change guild keys.
+      habit: >
+        Reaching for SSH first, because that has always been the only way.
+    opportunity:
+      importance: 8
+      satisfaction: 2
+      score: 14
+      note: >
+        Satisfaction is above zero only because a workaround exists at all. It
+        costs ~25 minutes, requires stopping the bot, and one of its two forms
+        destroys history.
+    traces_to_feature: guild-key-integrity
+    traces_to_stories: [US-003, US-005]

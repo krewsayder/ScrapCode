@@ -1,0 +1,99 @@
+schema_version: "0.1"
+
+# SSOT for "what we promise the system does". One row per new typed contract
+# surface. DESIGN of later features runs `nwave-ai outcomes check-delta`
+# against this file to catch duplicate contracts before they are built.
+#
+# Rows below were written by hand during DISTILL of `guild-key-integrity`
+# (2026-07-31): `nwave-ai outcomes register` fails in the installed version
+# with FileNotFoundError on its own bundled
+# `docs/product/outcomes/schema.json`, which is missing from the wheel. The
+# shape matches nwave_ai/outcomes/adapters/yaml_registry.py::_to_outcome, so
+# the CLI can read these rows even though it could not write them.
+#
+# DESIGN ran `check-delta` against the then-empty registry and reported
+# "0 outcomes checked" — a vacuous pass, recorded as such at the time. These
+# five rows are what make the next feature's check mean something.
+
+outcomes:
+
+  - id: OUT-1
+    kind: specification
+    summary: >-
+      Classify one reading of a guild key into exactly one of five outcomes.
+      Collapsing any two of them is a documented failure mode: mismatch vs
+      unreachable quarantines the cluster during a vendor outage; mismatch vs
+      unverifiable quarantines it on a vendor schema change.
+    feature: guild-key-integrity
+    inputs:
+      - shape: "raw /api/v1/guild response or transport error"
+      - shape: "stored GuildIdentity binding, possibly absent"
+    output:
+      shape: "ProbeOutcome in {match, mismatch, unverifiable, unreachable, dead}"
+    keywords: [guild, key, identity, probe, classification, tacticus]
+    artifact: bot/services/tacticus/guild_client.py
+    related: []
+
+  - id: OUT-2
+    kind: invariant
+    summary: >-
+      A guild api_key is read only by the policy chokepoint and the two
+      repository adapters. No cog and no service reads it directly. Seven call
+      sites across three cogs plus a service route through one place; a guard
+      on six of seven is a silent contamination path.
+    feature: guild-key-integrity
+    inputs:
+      - shape: "the bot/ source tree"
+    output:
+      shape: "pass, or the list of modules reading api_key outside the sanctioned set"
+    keywords: [chokepoint, api_key, architecture, enforcement, boundary]
+    artifact: tests/acceptance/guild-key-integrity/test_architecture_chokepoint.py
+    related: [OUT-3]
+
+  - id: OUT-3
+    kind: invariant
+    summary: >-
+      A quarantined guild writes zero rows — no battle hits, no bomb hits, no
+      player inserts, updates or is_former flips — until a key resolving to
+      its bound identity is installed. Holds under every interleaving of
+      probes and key updates, not only the enumerated ones.
+    feature: guild-key-integrity
+    inputs:
+      - shape: "guild key_status plus any sequence of probe outcomes and key updates"
+    output:
+      shape: "row counts unchanged while key_status = quarantined"
+    keywords: [quarantine, ingestion, contamination, invariant, state-machine]
+    artifact: tests/acceptance/guild-key-integrity/tier_b/test_key_status_state_machine.py
+    related: [OUT-2, OUT-4]
+
+  - id: OUT-4
+    kind: operation
+    summary: >-
+      Replace a guild Tacticus key from Discord in one command, probing the
+      SUBMITTED key before storing it, without deleting any dependent row.
+      Replaces a procedure that required stopping the service, backing up the
+      database and running a hand-written script.
+    feature: guild-key-integrity
+    inputs:
+      - shape: "guild_id: str, api_key: str, force: bool = False"
+    output:
+      shape: "ephemeral reply naming the resolved GuildIdentity; key and hmac written in one transaction, or refused"
+    keywords: [update_guild_key, key-rotation, admin, slash-command, recovery]
+    artifact: bot/cogs/admin_cog.py
+    related: [OUT-3]
+
+  - id: OUT-5
+    kind: invariant
+    summary: >-
+      Quarantining one guild never stops another. Season discovery skips
+      guilds without a usable key and falls through to the next; a server with
+      no usable key is skipped with a stated reason rather than a silent
+      continue.
+    feature: guild-key-integrity
+    inputs:
+      - shape: "guilds dict for one discord_server_id, in iteration order, with mixed key_status"
+    output:
+      shape: "season resolved from the first usable key; auto_update.cycle records total/processed/skipped/reasons"
+    keywords: [season, spof, blast-radius, auto_update, fall-through]
+    artifact: bot/cogs/tasks_cog.py
+    related: [OUT-3]

@@ -9,3 +9,17 @@ sqlalchemy>=2.0
 alembic
 aiosqlite
 cryptography
+# Architecture enforcement (ADR-008 D3 / DEVOPS D10): the import-graph
+# contracts live in pyproject.toml and the reachability rules in
+# tests/acceptance/guild-key-integrity/. Enforcement that depends on someone
+# having pip-installed the tool by hand is not enforcement.
+import-linter
+pytest-archon
+# Property-based stateful testing (ADR-008 D3 / Mandate 10 Tier B): the
+# key-status state machine in tests/acceptance/guild-key-integrity/tier_b/
+# asserts two whole-state-space properties no enumerated example establishes
+# (quarantine_is_never_a_trap, quarantined_guilds_never_write). The
+# `pytest.importorskip` in that suite stays honest only while this is declared
+# here, so a fresh checkout actually runs the state machine instead of
+# silently skipping it.
+hypothesis>=6.100

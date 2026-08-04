@@ -7,6 +7,31 @@
 # designs these to drop into a future CI unchanged; local `lint-imports`
 # and `pytest` are the gates today.
 
+# --------------------------------------------------------------------------
+# Pytest — the config that makes the DECLARED gate actually run.
+#
+# DEVOPS stage 1 names `pytest tests/unit tests/acceptance` as the blocking
+# gate before every push. That command did not work. Each suite ships its own
+# `pytest.ini` (tests/unit, tests/acceptance/sqlite-backend,
+# tests/acceptance/guild-key-integrity), and pytest honours exactly ONE config
+# per invocation. Given two or more directories it resolves rootdir to the
+# repository root and picks THIS file — which, until now, declared no pytest
+# section at all. `asyncio_mode = auto` was therefore silently dropped and
+# every `async def` test failed with "async def functions are not natively
+# supported".
+#
+# It went unnoticed because every wave ran the suites one at a time and
+# reported them one at a time. Standalone runs are unaffected by this section:
+# a per-suite `pytest.ini` sits closer to its own directory and still wins.
+# This block only governs the combined invocation, which is the one an
+# operator and any future CI actually type.
+# --------------------------------------------------------------------------
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+python_files = ["test_*.py"]
+addopts = "-ra"
+
 [tool.importlinter]
 root_packages = ["bot"]
 include_external_packages = true
@@ -72,3 +97,39 @@ type = "forbidden"
 source_modules = ["bot.cogs.replay_cog"]
 forbidden_modules = ["replay_index"]
 allow_indirect_imports = true
+
+# ADR-008 §Architecture enforcement rule 4: policy depends on storage, never
+# the reverse. `bot.guild_keys` is the key-usage chokepoint; it reads the key
+# THROUGH the repositories. A repository that imported the chokepoint back
+# could quarantine during a read, which makes the quarantine state unreadable
+# while quarantined. Direct imports only — this mirrors the AST assertion
+# `test_storage_never_imports_policy`, so an operator running `lint-imports`
+# sees the same rule the test enforces.
+[[tool.importlinter.contracts]]
+name = "Repositories MUST NOT import bot.guild_keys — the dependency runs backwards"
+type = "forbidden"
+source_modules = ["bot.repository", "bot.repository_sqlalchemy"]
+forbidden_modules = ["bot.guild_keys"]
+allow_indirect_imports = true
+
+# DEVOPS U1: `bot/obs.py` exists ONLY so the policy layer can emit structured
+# records without importing the SQLite stack. `bot/guild_keys.py` is imported
+# by three cogs and a service, so a heavy import here reaches all of them —
+# including on the SCRAPCODE_REPO_BACKEND=json rollback path, where SQLAlchemy
+# is meant to be untouched (ADR-006 D9). The module's docstring states the
+# constraint absolutely; this contract is what makes it true tomorrow.
+[[tool.importlinter.contracts]]
+name = "bot.obs stays dependency-free — the whole reason the module exists"
+type = "forbidden"
+source_modules = ["bot.obs"]
+forbidden_modules = [
+    "sqlalchemy",
+    "alembic",
+    "aiosqlite",
+    "cryptography",
+    "httpx",
+    "discord",
+    "bot.db",
+    "bot.guilds",
+    "bot.repository",
+]

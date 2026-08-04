@@ -61,7 +61,24 @@ PARITY_TABLES: tuple[str, ...] = (
     "replay_entries",
 )
 
-# FK-safe delete order (children before parents) for rollback.
+# FK-safe delete order (children before parents) for rollback. `_rollback_data`
+# deletes with `PRAGMA foreign_keys=OFF`, so the `ondelete="CASCADE"` that would
+# otherwise clear a child when its parent goes is switched OFF here — every
+# child table must therefore be named explicitly in the position the FK order
+# requires. `guild_key_bindings` (FK -> `guilds`, AC-009.6 / DDD-4) is listed
+# before `guilds` for that reason; leaving it out left every binding —
+# quarantines included — orphaned with no parent row, waiting for the next
+# registration of the same slug to silently re-adopt it.
+#
+# `guild_key_quarantine_history` is deliberately NOT in this list. A parity
+# rollback re-migrates from a JSON tree that has never held a binding or a
+# tombstone, and a quarantine that HAPPENED does not stop having happened when
+# the migration is re-run — losing it on rollback is the same laundering
+# step 08-03 exists to prevent. The table has no FK to `guilds` by design, so
+# it survives the `/deregister_guild` CASCADE and must survive the rollback
+# too. See `GuildKeyQuarantineHistoryRow`'s docstring (UI-11 / UI-14). This fix
+# is FORWARD-ONLY: it stops NEW orphans; it does not delete rows an earlier
+# rollback already left.
 _DATA_TABLES_DELETE_ORDER: tuple[str, ...] = (
     "live_lb_messages",
     "live_leaderboards",
@@ -72,6 +89,7 @@ _DATA_TABLES_DELETE_ORDER: tuple[str, ...] = (
     "players",
     "player_registrations",
     "guild_member_roles",
+    "guild_key_bindings",
     "guilds",
     "role_tiers",
     "clusters",

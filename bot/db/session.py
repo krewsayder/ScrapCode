@@ -27,12 +27,15 @@ Structured log records are emitted via the `bot.db.session` logger with
 `extra={"structured": True, "event": ..., "step": ...}`. The Slice-04 JSON
 formatter (observability-design.md §2) renders them as single-line JSON;
 until then the message itself is a JSON string so the operator can grep
-`health.startup.refused` in `discord.log` today.
+`health.startup.refused` in `discord.log` today. The helper that writes that
+record now lives in `bot/obs.py` (DEVOPS U1) so the policy layer can emit the
+same shape without dragging sqlalchemy, alembic and cryptography onto the
+`SCRAPCODE_REPO_BACKEND=json` rollback path; this module passes its own
+`logger` in, so the `db.*` records land exactly where they always have.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sqlite3
@@ -46,6 +49,8 @@ from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
+
+from bot.obs import emit_structured
 
 logger = logging.getLogger("bot.db.session")
 
@@ -97,18 +102,6 @@ def _fernet_roundtrip(fernet_key: str, plaintext: bytes) -> bytes:
     fernet = Fernet(fernet_key.encode() if isinstance(fernet_key, str) else fernet_key)
     ciphertext = fernet.encrypt(plaintext)
     return fernet.decrypt(ciphertext)
-
-
-def _emit_structured(level: int, event: str, **fields) -> None:
-    """Emit one structured log record as a JSON message + `extra` payload.
-
-    The Slice-04 JSON formatter reads `extra={"structured": True, ...}` and
-    renders the record as JSON; until then the JSON message string is what
-    lands in `discord.log` so `grep health.startup.refused` works today.
-    """
-    payload = {"event": event, **fields}
-    extra = {"structured": True, "event": event, **fields}
-    logger.log(level, json.dumps(payload, sort_keys=True), extra=extra)
 
 
 class Database:
@@ -170,7 +163,8 @@ class Database:
 
     def probe(self) -> None:
         """Run the 4-step startup health gate; raise `ProbeRefusedError` on failure."""
-        _emit_structured(
+        emit_structured(
+            logger,
             logging.INFO,
             "db.probe.start",
             backend="sqlite",
@@ -183,7 +177,8 @@ class Database:
 
     def _refuse(self, step: str, reason: str, detail: str = "") -> None:
         """Emit the refusal record and raise. Never returns."""
-        _emit_structured(
+        emit_structured(
+            logger,
             logging.ERROR,
             "health.startup.refused",
             step=step,
@@ -206,7 +201,9 @@ class Database:
         if mode != "wal":
             self._refuse("wal_mode", "not_wal", detail=f"journal_mode={mode}")
             return
-        _emit_structured(logging.INFO, "db.probe.pass", step="wal_mode", value=mode)
+        emit_structured(
+            logger, logging.INFO, "db.probe.pass", step="wal_mode", value=mode
+        )
 
     def _step_alembic_version(self) -> None:
         head = _compiled_alembic_head()
@@ -228,7 +225,8 @@ class Database:
                 detail=f"head={head} db={db_rev}",
             )
             return
-        _emit_structured(
+        emit_structured(
+            logger,
             logging.INFO,
             "db.probe.pass",
             step="alembic_version",
@@ -249,7 +247,7 @@ class Database:
                 detail="decrypted != plaintext",
             )
             return
-        _emit_structured(logging.INFO, "db.probe.pass", step="fernet_roundtrip")
+        emit_structured(logger, logging.INFO, "db.probe.pass", step="fernet_roundtrip")
 
     def _step_write_rollback(self) -> None:
         try:
@@ -268,7 +266,7 @@ class Database:
         if count != 0:
             self._refuse("write_rollback", "rollback_leaked", detail=f"count={count}")
             return
-        _emit_structured(logging.INFO, "db.probe.pass", step="write_rollback")
+        emit_structured(logger, logging.INFO, "db.probe.pass", step="write_rollback")
 
     # ------------------------------------------------------------------
     # URI helpers

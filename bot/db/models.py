@@ -14,6 +14,7 @@ Per ADR-006 D3 + data-dictionary §4. Tables:
   replay_entries                 surrogate PK, unique (server_id, boss, map_name, url)
   live_leaderboards              surrogate PK
   live_lb_messages               (config_id, tier_value)
+  guild_key_bindings             (server_id, guild_id) 1:1 with guilds
 
 D4: no `battle_hits_simple` table. D5: `capped_state` is the `is_capped`
 column on `player_registrations`. D7: `api_key` columns are Fernet
@@ -25,6 +26,9 @@ can enforce the 1:1 binding. D10: `replay_threads` + `replay_entries`
 replace `replay_index.json`. D11: `replay_entries.discord_server_id` is
 new; URL uniqueness is scoped per `(discord_server_id, boss, map_name)`.
 D12: no `update_channel_id` column anywhere.
+
+ADR-008 DDD-4: `guild_key_bindings` is the thirteenth table. Binding state
+deliberately does NOT live on `guilds` — see `GuildKeyBindingRow`.
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ from sqlalchemy import (
     CheckConstraint,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Integer,
     JSON,
     String,
@@ -297,3 +302,124 @@ class LiveLbMessageRow(Base):
     )
     tier_value: Mapped[str] = mapped_column(String(32), primary_key=True)
     message_id: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class GuildKeyBindingRow(Base):
+    """Which Tacticus guild a guild's API key is bound to (ADR-008 DDD-4).
+
+    1:1 with `guilds` — same composite key, FK `ondelete="CASCADE"`. The
+    CASCADE is load-bearing: a deregistered guild that left an orphan binding
+    behind would hand a later re-registration of the same slug a stale
+    identity to compare a fresh key against, which is the exact confusion
+    this feature exists to remove.
+
+    Binding state is a separate table rather than columns on `guilds` because
+    `bot/guilds.py:save_guilds` reconstructs each `Guild` from a five-key
+    dict. A binding field reachable from the `Guild` dataclass would be
+    overwritten with `None` by any unrelated admin command — `/set_ping_channel`
+    alone would wipe it. A separate table makes that clobber structurally
+    impossible instead of guarded by a test someone must remember to keep.
+
+    No row means UNBOUND. Trust-on-first-use (DDD-8) populates the table on
+    the first successful probe, so there is no backfill and every non-key
+    column except `key_status` is nullable — the absence of a row, not a
+    NULL, is how "never verified" is represented.
+
+    `tacticus_guild_id` is the ONLY field ever compared (DDD-1);
+    `tacticus_guild_tag` / `tacticus_guild_name` are display-only and may be
+    absent, because a retag or rename must never trip the lock.
+
+    Timestamps are ISO-8601 UTC strings in the SAME `String(32)` shape as
+    `battle_hits.completed_on` (e.g. `2026-07-25T14:45:19Z`). KPI-2 verifies
+    quarantine by comparing `quarantined_at` against `completed_on` AS
+    STRINGS; a different shape returns a wrong result set silently rather
+    than erroring.
+
+    `key_status` stores the string values of
+    `bot.services.tacticus.guild_client.KeyStatus` (`active` / `quarantined`).
+    The literal is duplicated rather than imported on purpose: storage must
+    not depend on the service layer.
+    """
+
+    __tablename__ = "guild_key_bindings"
+
+    discord_server_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    guild_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tacticus_guild_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tacticus_guild_tag: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    tacticus_guild_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    identity_bound_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    key_status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    quarantine_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quarantined_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_alerted_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["discord_server_id", "guild_id"],
+            ["guilds.discord_server_id", "guilds.guild_id"],
+            ondelete="CASCADE",
+        ),
+    )
+
+
+class GuildKeyQuarantineHistoryRow(Base):
+    """A quarantine that happened, kept after the guild it happened to is gone.
+
+    THE ABSENCE OF A FOREIGN KEY IS THE DESIGN, not an omission. `guilds` is
+    the parent of every other table here and `/deregister_guild` deletes that
+    row with `PRAGMA foreign_keys=ON`, so the CASCADE that destroys the
+    players, the hits and the binding would destroy this too if it were
+    attached to them. It exists precisely because the binding does not
+    survive: without it, an admin who quarantines a guild, deregisters it and
+    re-registers the same slug has trust-on-first-use (DDD-8) silently adopt
+    whatever the drifted key now resolves to — the incident, adopted on
+    purpose, in two commands with no warning (AC-009.5).
+
+    Append-only. Nothing releases a tombstone: a quarantine that HAPPENED does
+    not stop having happened when the guild is re-registered, and
+    `/update_guild_key` clears the live binding (`guild_keys.release`) rather
+    than this. The surrogate `id` is what makes a second quarantine of the
+    same slug a second row instead of an overwrite — the composite key the
+    rest of the schema uses would collapse a history into its latest entry.
+
+    Carries NO key material (KPI-6). It outlives every other trace of the
+    guild, so a key value written here is a leak with no expiry. The observed
+    identity is the drifted uuid recovered from the binding's
+    `quarantine_reason`, which is the only carrier the codebase has for it.
+
+    Timestamps are ISO-8601 UTC strings in the SAME `String(32)` shape as
+    `battle_hits.completed_on` and `guild_key_bindings.quarantined_at`; KPI-2
+    compares them AS STRINGS, so a different shape returns a wrong result set
+    silently instead of erroring.
+
+    Deliberately NOT in `migrations_json_to_sqlite._DATA_TABLES_DELETE_ORDER`
+    — a parity rollback re-migrates from a JSON tree that has never held a
+    binding or a tombstone, so the whole cluster returns to unbound and
+    trust-on-first-use re-announces every adoption. That is a coherent reset,
+    and it is a different hazard from an orphaned BINDING (UI-11): an orphaned
+    binding is compared against a fresh key and silently adopted, a surviving
+    tombstone is only ever read to warn. Fail-open versus fail-safe.
+    """
+
+    __tablename__ = "guild_key_quarantine_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    discord_server_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    guild_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    tacticus_guild_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tacticus_guild_tag: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    tacticus_guild_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    observed_tacticus_guild_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    quarantine_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quarantined_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    recorded_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_guild_key_quarantine_history_guild",
+            "discord_server_id", "guild_id",
+        ),
+    )
