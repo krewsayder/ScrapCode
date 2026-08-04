@@ -26,3 +26,7 @@ logs/
 #      audited by anyone but the machine that wrote it.
 !tests/**/fixtures/*.json
 !docs/feature/**/*.json
+
+# Local review scratch — untracked by design. Reading guides for GitHub PR
+# review, generated per-wave. Not a deliverable; regenerate rather than share.
+review-notes/
