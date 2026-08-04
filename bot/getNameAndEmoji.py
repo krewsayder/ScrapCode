@@ -43,6 +43,10 @@ def get_clean_boss_name(unit_id: str) -> str:
         "ordnance":"Chaddeus Noble",
         "primarispsy":"Sibyll Devine",
         # ===========================================
+        "darkalion": "Lion El'Jonson",
+        "darkaterminator": "Baraqiel",
+        "darkacompanion": "Forcas",
+        # ===========================================
 
 
     }
@@ -260,6 +264,8 @@ def get_boss_emoji(unit_id: str) -> str:
         # Assorted other characters
         # ===========================================
         "ultracalgar":       "<:Calgar:1476686945051738254>",
+        "darkalion":         "<:lionelj:1522115254153117748>",
+        "darkaterminator":   "<:Baraq:1476625959284113612>",
         "darkaasmodai":      "<:Asmo:1476625574561714388>",
         "darkacompanion":    "<:Forcas:1476625758997970964>",
         "votanmemnyr":       "<:Ammuk:1507567576102862999>",
