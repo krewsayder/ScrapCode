@@ -54,17 +54,51 @@ features:
       required_fields: [ts, level, event, server_id, guild_id, key_ref]
       events:
         - {name: "guild.key.probe.ok",         level: INFO,    emitter: "bot/guild_keys.py",       fields: [tacticus_guild_id]}
-        - {name: "guild.key.bound",            level: INFO,    emitter: "bot/guild_keys.py",       fields: [tacticus_guild_id, tacticus_guild_tag, name]}
+        # `tacticus_guild_name`, NOT `name`. `logging` refuses an `extra` key
+        # that collides with a LogRecord attribute, and `record.name` is the
+        # logger's own name — a `name` field here raises KeyError at emit
+        # time, turning the one adoption announcement that matters into an
+        # exception inside the hourly loop. Corrected 2026-08-02: this row
+        # declared `name` while production has always emitted
+        # `tacticus_guild_name` (`guild_keys.py:490`), so an operator
+        # following this contract would have written a query that returns
+        # nothing, or worse, a patch that raises.
+        - {name: "guild.key.bound",            level: INFO,    emitter: "bot/guild_keys.py",       fields: [tacticus_guild_id, tacticus_guild_tag, tacticus_guild_name]}
         - {name: "guild.key.mismatch",         level: ERROR,   emitter: "bot/guild_keys.py",       fields: [bound_id, observed_id, observed_tag, observed_name]}
         - {name: "guild.key.quarantined",      level: ERROR,   emitter: "bot/guild_keys.py",       fields: [reason, quarantined_at]}
-        - {name: "guild.key.ingest.blocked",   level: WARNING, emitter: "bot/guild_keys.py",       fields: [caller]}
+        # Corrected 2026-08-02 against production. This row declared
+        # `level: WARNING`, `emitter: bot/guild_keys.py`, `fields: [caller]`.
+        # All three were wrong: `_emit_ingest_blocked` lives in
+        # `bot/cogs/tasks_cog.py:701`, emits at INFO, and carries `key_ref`
+        # rather than `caller`. An operator alerting on WARNING from
+        # guild_keys.py would have seen zero blocked-ingest events and
+        # concluded the block never fires.
+        - {name: "guild.key.ingest.blocked",   level: INFO,    emitter: "bot/cogs/tasks_cog.py",   fields: [key_ref]}
         - {name: "guild.key.unverifiable",     level: ERROR,   emitter: "bot/guild_keys.py",       fields: [reason]}
         - {name: "guild.key.unreachable",      level: WARNING, emitter: "bot/guild_keys.py",       fields: [reason, status]}
         - {name: "guild.key.dead",             level: ERROR,   emitter: "bot/guild_keys.py",       fields: [status]}
         - {name: "guild.key.alert.sent",       level: INFO,    emitter: "bot/guild_keys.py",       fields: [channel_id, suppressed_until]}
         - {name: "guild.key.alert.suppressed", level: DEBUG,   emitter: "bot/guild_keys.py",       fields: [last_alerted_at]}
-        - {name: "guild.key.updated",          level: INFO,    emitter: "bot/cogs/admin_cog.py",   fields: [forced, elapsed_ms, rebound_from]}
+        # Corrected 2026-08-02: emitter is `bot/guild_keys.py:334`
+        # (`_emit_updated`), not the cog. The cog renders the reply; the
+        # policy layer emits the record, which is what keeps the plaintext
+        # key out of it (`_KeyContext` cannot carry one).
+        - {name: "guild.key.updated",          level: INFO,    emitter: "bot/guild_keys.py",       fields: [tacticus_guild_id, forced, elapsed_ms, rebound_from]}
+        - {name: "guild.key.collision",        level: ERROR,   emitter: "bot/guild_keys.py",       fields: [holder_guild_id]}
         - {name: "auto_update.cycle",          level: INFO,    emitter: "bot/cogs/tasks_cog.py",   fields: [server_id, season, guilds_total, guilds_processed, guilds_skipped, skip_reasons]}
+        # Added 2026-08-03 (remediation slice 04): cycle-level containment so
+        # the NEXT unhandled exception cannot silently end hourly ingestion.
+        # These are `auto_update.*`, not `guild.key.*` — no key material, so
+        # the `key_ref` required-field does not apply.
+        - {name: "auto_update.server.failed",  level: ERROR,   emitter: "bot/cogs/tasks_cog.py",   fields: [server_id, error_type]}
+        - {name: "auto_update.loop.failed",    level: ERROR,   emitter: "bot/cogs/tasks_cog.py",   fields: [restart_attempt, backoff_seconds]}
+        - {name: "auto_update.loop.abandoned", level: ERROR,   emitter: "bot/cogs/tasks_cog.py",   fields: [restart_attempt]}
+        # Added 2026-08-03 (remediation slice 07): composition-root health.
+        # `health.startup.refused` fires before the bot exits on a bad .env;
+        # `health.startup.json_rollback` announces the guard is inert on the
+        # deliberate JSON rollback path. Neither is `guild.key.*`.
+        - {name: "health.startup.refused",     level: ERROR,   emitter: "bot/guilds.py",           fields: [reason, variable]}
+        - {name: "health.startup.json_rollback", level: WARNING, emitter: "bot/guilds.py",         fields: [reason]}
 
     kpis:
 
@@ -158,9 +192,30 @@ features:
           - "environment-matrix.feature :: bound-drifted — the incident replay writes nothing once enforcement is on"
           - "tier_b/test_key_status_state_machine.py :: quarantined_guilds_never_write"
         measurement_note: |
-          The only KPI with a property-based assertion behind it as well as
-          examples: the Tier B invariant holds across every interleaving of
-          probes and key updates, not just the orderings someone enumerated.
+          CORRECTED 2026-08-02. This note previously read: "The only KPI with
+          a property-based assertion behind it as well as examples: the Tier B
+          invariant holds across every interleaving of probes and key
+          updates, not just the orderings someone enumerated."
+
+          It held across ZERO interleavings. `quarantined_guilds_never_write`
+          is an @invariant guarded by a precondition, and a SECOND invariant
+          in the same machine — `quarantine_is_never_a_trap` — called
+          `update_key`, which releases the quarantine. Hypothesis runs
+          invariants in name order, so the mutating one always ran first and
+          this one always found the guild ACTIVE and short-circuited before
+          its assertion. Measured across 200 examples x 25 steps: 0
+          executions of the assertion body. The KPI had exactly the
+          example-based evidence of every other KPI, and a green tick where
+          the property should have been.
+
+          Fixed in the DISTILL remediation wave: the reachability check runs
+          against a deep copy (non-mutating), the real rescue moved to a
+          @rule, and `test_both_properties_actually_assert_something` now
+          counts assertion-body executions and fails at zero. Re-measured at
+          the same budget: 1037 executions. The claim above is true as of
+          that change and is no longer taken on trust — the counter is the
+          evidence.
+
           The precondition on quarantined_at's string shape (above) is
           asserted directly in
           test_a_drifted_guild_is_quarantined_with_both_identities_recorded,
