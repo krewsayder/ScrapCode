@@ -48,6 +48,66 @@ def _refuse_startup(step: str, reason: str, detail: str) -> None:
     raise StartupRefused(detail)
 
 
+# A Fernet key is 32 url-safe base64-encoded bytes — exactly 44 chars from
+# `[A-Za-z0-9_-]` plus a single trailing `=`. `Fernet.__init__` is LENIENT
+# about surrounding whitespace (it delegates to `base64.urlsafe_b64decode`,
+# which discards whitespace and accepts trailing garbage), so a CRLF-mangled
+# `.env` value passes `Fernet(key)` and the failure surfaces hours later
+# inside the hourly loop as a cryptography traceback. The shape is therefore
+# validated explicitly: any whitespace, control char, wrong length, or
+# non-alphabet byte is refused here, naming `SCRAPCODE_DB_KEY` before the
+# probe runs (AC-010.2). The `Fernet` round-trip remains the final guard so a
+# 44-char alphabet-only string that still is not a decodable key is refused.
+_FERNET_KEY_ALPHABET = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_="
+)
+
+
+def _require_real_fernet_key(fernet_key: str) -> None:
+    """Refuse startup unless `fernet_key` is byte-identical to a Fernet key.
+
+    Raises `StartupRefused` (via `_refuse_startup`) whose message names
+    `SCRAPCODE_DB_KEY`, so the composition root's caller surfaces the
+    variable the operator has to fix. The trailing-carriage-return case is
+    not hypothetical: a Windows-edited `.env` has already broken auth on
+    this VM once (operator's notes), which is why the production-data
+    criterion for this slice is to mangle the real file with `printf
+    'KEY=abc\\r\\n'`.
+    """
+    if (not isinstance(fernet_key, str)
+            or len(fernet_key) != 44
+            or any(c not in _FERNET_KEY_ALPHABET for c in fernet_key)):
+        _refuse_startup(
+            step="db_key",
+            reason="malformed_key",
+            detail=(
+                "SCRAPCODE_DB_KEY is not a valid Fernet key. A real key is "
+                "exactly 44 url-safe base64 chars (`[A-Za-z0-9_-]` plus a "
+                "trailing `=`) with no whitespace. A common cause is a "
+                "Windows-edited `.env` that leaves a trailing carriage return "
+                "on the value. Regenerate with `python -c \"from "
+                "cryptography.fernet import Fernet; "
+                "print(Fernet.generate_key().decode())\"`, or roll back with "
+                "SCRAPCODE_REPO_BACKEND=json. Refusing to start."
+            ),
+        )
+    from cryptography.fernet import Fernet
+    try:
+        Fernet(fernet_key.encode())
+    except (ValueError, TypeError) as exc:
+        _refuse_startup(
+            step="db_key",
+            reason="malformed_key",
+            detail=(
+                f"SCRAPCODE_DB_KEY is not a valid Fernet key ({exc}). "
+                "Regenerate with `python -c \"from cryptography.fernet "
+                "import Fernet; print(Fernet.generate_key().decode())\"`, "
+                "or roll back with SCRAPCODE_REPO_BACKEND=json. Refusing to "
+                "start."
+            ),
+        )
+
+
 def build_repo() -> ClusterRepository:
     """Construct the live ClusterRepository from SCRAPCODE_REPO_BACKEND
     (ADR-006 D9 — env-driven singleton; rollback = restart with =json).
@@ -81,6 +141,24 @@ def build_repo() -> ClusterRepository:
     """
     backend = os.getenv("SCRAPCODE_REPO_BACKEND", "sqlite")
     if backend == "json":
+        # ADR-006 D9: the deliberate rollback. DDD-4 gives the JSON adapter no
+        # binding representation, so the guild-key quarantine guard is INERT
+        # on this path — a drifted key is served, `quarantine()` writes
+        # nowhere. An operator who rolls back at 2am to restore service must
+        # be told that in the same breath, not in an ADR later (AC-010.4).
+        emit_structured(
+            logger,
+            logging.WARNING,
+            "health.startup.json_rollback",
+            reason="guild_key_quarantine_inert",
+            detail=(
+                "SCRAPCODE_REPO_BACKEND=json: the guild-key quarantine guard "
+                "is inert on this path (DDD-4 — the JSON adapter has no "
+                "binding store). A drifted key is served and quarantine "
+                "writes nowhere; the protection this feature adds is off "
+                "until the sqlite backend is restored."
+            ),
+        )
         return JsonClusterRepository()
     db_path = os.getenv("SCRAPCODE_DB_PATH", "data/scrapcode.db")
     fernet_key = os.getenv("SCRAPCODE_DB_KEY", "")
@@ -98,6 +176,14 @@ def build_repo() -> ClusterRepository:
                 "Refusing to start."
             ),
         )
+    # AC-010.2: validate the key's SHAPE, not its truthiness. A CRLF-mangled
+    # or truncated value (e.g. a Windows-edited `.env`) is truthy and the
+    # right length to look plausible, but `Fernet` raises `ValueError` on it.
+    # This gate runs BEFORE the probe so the refusal names SCRAPCODE_DB_KEY
+    # rather than a WAL or alembic step that failed downstream — the operator
+    # at 2am needs the variable, not a cryptography traceback from the hourly
+    # loop hours later.
+    _require_real_fernet_key(fernet_key)
     if Path(db_path).parent.exists() and not Path(db_path).exists():
         _refuse_startup(
             step="db_path",
@@ -111,7 +197,22 @@ def build_repo() -> ClusterRepository:
             ),
         )
     from bot.repository_sqlalchemy import SqlAlchemyClusterRepository
-    return SqlAlchemyClusterRepository()
+    repo = SqlAlchemyClusterRepository()
+    # ADR-006 D8: the startup probe "runs at composition time and MUST
+    # succeed before the bot starts". The probe is invoked from the startup
+    # entry point (`main.py`) rather than here so that the four health checks
+    # (WAL mode, alembic revision, Fernet round-trip, write rollback) run
+    # AFTER the repository is wired but BEFORE any cog consumes it — the
+    # "wires, then probes, then hands out" order ADR-006 D8 requires. The
+    # probe is deliberately NOT called inside `build_repo`: every test
+    # fixture and every `importlib.reload(bot.guilds)` constructs through
+    # this function against a `create_all`-only database that is not yet
+    # alembic-stamped, and the probe's alembic step correctly refuses such a
+    # database. Production always starts on an already-migrated database
+    # (migrations are applied before the bot process starts), so the probe
+    # passes there; the gate belongs at the process entry point, not in the
+    # factory. See `main.py` for the single production caller (AC-010.5).
+    return repo
 
 
 repo: SupportsProbe = build_repo()

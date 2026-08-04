@@ -109,6 +109,20 @@ async def load_cogs():
     chronicl3r_client.authenticate()
     player_service = PlayerService(chronicl3r_client)
 
+    # ADR-006 D8 / AC-010.5: the startup probe "runs at composition time and
+    # MUST succeed before the bot starts". `build_repo` (in `bot.guilds.py`)
+    # wired the repository singleton at import time; this is the one production
+    # caller of `probe()`, placed AFTER wiring and BEFORE any cog is handed the
+    # repository — the "wires, then probes, then hands out" order D8 requires.
+    # The four health checks (WAL mode, alembic revision, Fernet round-trip,
+    # write rollback) live in `Database.probe`; a failure already emitted its
+    # `health.startup.refused` record via `bot/obs.py`, and letting
+    # `ProbeRefusedError` propagate here stops startup the same way a key/path
+    # refusal does in `build_repo`. Production always starts on an already-
+    # migrated database, so the probe passes here; test fixtures never execute
+    # `main.py`, so the gate does not fire against `create_all`-only fixtures.
+    bot.guilds.repo.probe()
+
     await setup_update(bot, player_service)
     await setup_view(bot)
     await setup_admin(bot, player_service)
