@@ -28,7 +28,21 @@ from domain_types import (
     ProbeOutcome,
     TransportFailure,
 )
-from conftest import GUILD_WB, PROD_SERVER_ID, GuildServiceResponse, alembic_config
+# MODULE level, never inside a function. Two suites ship a bare `conftest`
+# module (`guild-key-integrity` and `sqlite-backend`), so `sys.modules
+# ["conftest"]` holds whichever was imported LAST. A module-level import binds
+# during this file's collection, while the right one is still installed; a
+# function-level `from conftest import ...` resolves when the test RUNS, by
+# which point the other suite's conftest has replaced it and the import raises.
+# Cost the pre-DELIVER gate one wrong-reason RED on 2026-08-03 — passing in
+# isolation, ImportError in a full run. Same hazard as UD-10.
+from conftest import (
+    GUILD_WB,
+    PRE_FEATURE_HEAD,
+    PROD_SERVER_ID,
+    GuildServiceResponse,
+    alembic_config,
+)
 
 RED = pytest.mark.skip(reason="RED scaffold — enable one at a time in DELIVER")
 
@@ -89,24 +103,75 @@ def test_upgrade_creates_the_binding_store_and_touches_no_guild_record(
 def test_downgrade_restores_the_prior_shape_exactly(db_at_previous_head: Path):
     """AC-006.2. The rollback half of the DEVOPS ordering constraint: the
     probe refuses on `alembic_version != head` in BOTH directions, so a
-    downgrade that does not clean up leaves the unit unable to start."""
+    downgrade that does not clean up leaves the unit unable to start.
+
+    THE TARGET IS A REVISION, NOT A DISTANCE. This asserted
+    `downgrade(cfg, "-1")` until 2026-08-03. `-1` means "one step back from
+    wherever head is", which equals the pre-feature baseline only while this
+    feature owns exactly one revision. Step 08-03 added `0004`
+    (`guild_key_quarantine_history`), so `-1` landed on `0003` and left
+    `guild_key_bindings` standing — the test failed while the migration it
+    was accusing was in fact clean. Verified independently before rewriting:
+    an ABSOLUTE downgrade to the baseline restores `0002` byte-for-byte;
+    only the relative spelling does not.
+
+    That is the same failure shape as UI-13 — a test asset that describes the
+    system by restating a moving relationship rather than pinning the thing
+    it means. The cost here was lower (a red build, not a false green), but
+    the fix is the same: name the baseline once, in
+    `conftest.PRE_FEATURE_HEAD`, and have both the fixture and this scenario
+    read it. The scenario now stays correct for every future revision — and
+    grows to cover them, because each new migration must also downgrade
+    cleanly back to the baseline.
+
+    THE UPGRADE IS ASSERTED TO HAVE DONE SOMETHING. Without that guard the
+    scenario is vacuous whenever head equals the baseline: upgrade and
+    downgrade both become no-ops, `after == before` holds trivially, and a
+    suite with every migration deleted would report this as passing.
+    """
     from alembic import command
 
-    with sqlite3.connect(db_at_previous_head) as conn:
-        before = sorted(r[0] for r in conn.execute(
-            "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL"
-        ))
+    before = _schema_objects(db_at_previous_head)
 
     cfg = alembic_config(db_at_previous_head)
     command.upgrade(cfg, "head")
-    command.downgrade(cfg, "-1")
 
-    with sqlite3.connect(db_at_previous_head) as conn:
-        after = sorted(r[0] for r in conn.execute(
+    assert _schema_objects(db_at_previous_head) != before, (
+        "upgrading to head changed nothing, so this scenario is not "
+        f"exercising a rollback. Is any revision newer than {PRE_FEATURE_HEAD} "
+        "still present?"
+    )
+
+    command.downgrade(cfg, PRE_FEATURE_HEAD)
+
+    after = _schema_objects(db_at_previous_head)
+    assert _current_revision(db_at_previous_head) == PRE_FEATURE_HEAD, (
+        "the downgrade did not land on the baseline, so the comparison below "
+        "would be against the wrong shape"
+    )
+    assert after == before, (
+        "the downgrade did not restore the pre-feature schema. Left behind: "
+        f"{sorted(set(after) - set(before))}. Failed to restore: "
+        f"{sorted(set(before) - set(after))}"
+    )
+
+
+def _schema_objects(db_path: Path) -> list[str]:
+    """Every CREATE statement in the database, sorted.
+
+    The full schema rather than a table-name list on purpose: a downgrade that
+    restored a table but dropped one of its indexes, or rebuilt it with a
+    different constraint, would pass a name-only comparison.
+    """
+    with sqlite3.connect(db_path) as conn:
+        return sorted(r[0] for r in conn.execute(
             "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL"
         ))
 
-    assert after == before
+
+def _current_revision(db_path: Path) -> str:
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
 
 
 @pytest.mark.error

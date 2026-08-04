@@ -33,8 +33,10 @@ from domain_types import (
     WORD_BEARERS,
     Environment,
     GuildIdentity,
+    GuildIdVariant,
     KeyStatus,
     ProbeOutcome,
+    VendorBody,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -111,17 +113,41 @@ def alembic_config(db_path: Path):
     return cfg
 
 
+# The last alembic revision that predates `guild-key-integrity`. Every
+# migration this feature adds sits on top of it, so it is the shape a rollback
+# has to restore and the shape an upgrade has to leave untouched.
+#
+# NAMED ONCE, AND ABSOLUTE. Two rules follow from this constant existing:
+#
+#   * migration scenarios state the revision they mean, never a DISTANCE from
+#     head. `downgrade(cfg, "-1")` is only "back to the pre-feature shape"
+#     while this feature owns exactly one revision — it silently stopped being
+#     that the moment 0004 landed, and it would break again for every future
+#     migration in the project, feature-related or not.
+#   * the fixture and the scenarios read the SAME name, so the baseline cannot
+#     be changed in one place and left stale in the other.
+#
+# Bump this only when a revision predating the feature is squashed away.
+PRE_FEATURE_HEAD = "0002"
+
+
 @pytest.fixture
 def db_at_previous_head(sqlite_db_path: Path, env_vars) -> Path:
-    """A database at revision 0002 — the head BEFORE this feature's revision.
+    """A database at `PRE_FEATURE_HEAD` — the shape before this feature existed.
 
     The `Given a copy of a cluster whose guilds were registered before this
     feature existed` precondition. Migration scenarios upgrade from here, so
     they test the real transition rather than a fresh create_all.
+
+    The name says "previous head" because 0002 WAS head when this fixture was
+    written. It is now two revisions back (0003 bindings, 0004 quarantine
+    history) and will keep receding. What it pins is the pre-feature baseline,
+    which is the stable idea; read `PRE_FEATURE_HEAD` for the authoritative
+    value rather than inferring one from the fixture's name.
     """
     from alembic import command
     sqlite_db_path.parent.mkdir(parents=True, exist_ok=True)
-    command.upgrade(alembic_config(sqlite_db_path), "0002")
+    command.upgrade(alembic_config(sqlite_db_path), PRE_FEATURE_HEAD)
     return sqlite_db_path
 
 
@@ -365,31 +391,194 @@ def guild_with_recorded_rows(registered_guilds):
 
 @dataclass
 class GuildServiceResponse:
-    """One programmed answer from the guild service."""
+    """One programmed answer from the guild service.
+
+    EXTENDED 2026-08-02 to the full vendor input domain. Before that, this
+    class could render exactly two things: a well-formed `{"guild": {...}}`
+    whose `guildId` was one of two hand-picked canonical constants, or the
+    same with a field dropped. It could not express a non-JSON body, a
+    non-dict payload, a re-cased or whitespace-padded `guildId`, a non-string
+    `guildId`, or a malformed roster entry.
+
+    That was not a coverage gap, it was an EXPRESSIVENESS gap, and it is the
+    root cause behind the whole slice-04 defect class: every one of those
+    defects was unreachable from this suite by construction, so no amount of
+    diligence writing scenarios against this double could have found them.
+    A double that can only emit well-formed input certifies a parser that
+    only handles well-formed input.
+
+    `body` and `guild_id` are orthogonal knobs (see `VendorBody` /
+    `GuildIdVariant`): the body chooses the SHAPE, the variant chooses the
+    `guildId` VALUE within a dict-shaped body. The defaults reproduce the old
+    behaviour byte-for-byte, so every existing scenario is untouched.
+    """
 
     identity: GuildIdentity | None = None
     members: list[str] = field(default_factory=list)
     status: int = 200
     raises: BaseException | None = None
     drop_fields: tuple[str, ...] = ()
+    body: VendorBody = VendorBody.WELL_FORMED
+    guild_id: GuildIdVariant = GuildIdVariant.CANONICAL
 
-    def payload(self) -> dict:
-        """Render the `/api/v1/guild` body, honouring `drop_fields`.
+    # -- the JSON-shaped half --------------------------------------------
 
-        `drop_fields` is how the `unverifiable` environment is built: a real
-        recorded response with a key removed, never a hand-written stub. A
-        stub would let the test pass against an implementation that reads a
-        field name Tacticus does not actually use.
+    def payload(self):
+        """Render the `/api/v1/guild` body as a decoded JSON value.
+
+        Returns a dict for every dict-shaped body — which is every case the
+        pre-2026-08-02 suite could produce, so existing call sites see no
+        change. Returns a list / str / bool / None for the bodies that are
+        valid JSON but not an object, because `response.json()` hands
+        `parse_guild_snapshot` exactly those values and the classifier has to
+        survive them.
+
+        Raises for the bodies that are not JSON at all: those cannot be
+        rendered through a `json=` kwarg and must go through `raw_body()`.
+        Raising rather than silently substituting `{}` is deliberate — a
+        transport double that quietly downgrades a hostile body to a benign
+        one is how the suite got here.
         """
+        if not self.is_json:
+            raise AssertionError(
+                f"{self.body.value} is not a JSON body — render it through "
+                "`raw_body()` / `render_into(httpx)`, not `payload()`. A "
+                "double that substitutes a benign body for a hostile one is "
+                "the defect this class was extended to remove."
+            )
+        if self.body is VendorBody.JSON_NULL:
+            return None
+        if self.body is VendorBody.JSON_LIST:
+            return [{"guildId": self._guild_id_value()}]
+        if self.body is VendorBody.JSON_STRING:
+            return "guild service temporarily unavailable"
+        if self.body is VendorBody.JSON_BOOL:
+            return True
+        if self.body is VendorBody.GUILD_NOT_A_DICT:
+            # Truthy, so `payload.get("guild") or {}` keeps it and the very
+            # next `.get("guildId")` raises AttributeError on a str.
+            return {"guild": "unavailable"}
+        if self.body is VendorBody.GUILD_NULL:
+            return {"guild": None}
+        return {"guild": self._guild_object()}
+
+    def _guild_object(self) -> dict:
         guild: dict = {
-            "guildId": self.identity.uuid if self.identity else None,
+            "guildId": self._guild_id_value(),
             "guildTag": self.identity.tag if self.identity else None,
             "name": self.identity.name if self.identity else None,
-            "members": [{"userId": m} for m in self.members],
+            "members": self._member_entries(),
         }
+        if self.guild_id is GuildIdVariant.ABSENT:
+            guild.pop("guildId")
+        # `drop_fields` predates `GuildIdVariant.ABSENT` and remains the way
+        # the `unverifiable` environment is built: a real recorded response
+        # with a key removed, never a hand-written stub. A stub would let the
+        # test pass against an implementation reading a field name Tacticus
+        # does not use.
         for f in self.drop_fields:
             guild.pop(f, None)
-        return {"guild": guild}
+        return guild
+
+    def _member_entries(self) -> list[dict]:
+        entries = [{"userId": m} for m in self.members]
+        if self.body is VendorBody.MEMBER_WITHOUT_USER_ID and entries:
+            # One entry loses `userId`. The eager
+            # `frozenset(m["userId"] for m in ...)` in `parse_guild_snapshot`
+            # raises KeyError on it, which kills the cycle for a roster the
+            # rest of which is perfectly usable.
+            entries[-1] = {"displayName": "a member the vendor sent partially"}
+        return entries
+
+    def _guild_id_value(self):
+        """The `guildId` VALUE for this variant.
+
+        The six same-guild variants are built FROM `self.identity.uuid`
+        rather than from a literal, so a scenario cannot accidentally assert
+        that a hard-coded string matches a different hard-coded string.
+        """
+        uuid = self.identity.uuid if self.identity else None
+        v = GuildIdVariant
+        return {
+            v.CANONICAL: uuid,
+            v.UPPERCASE: uuid.upper() if uuid else None,
+            v.MIXED_CASE: _alternating_case(uuid) if uuid else None,
+            v.SURROUNDING_WHITESPACE: f"  {uuid}  " if uuid else None,
+            v.BOM_PREFIXED: f"﻿{uuid}" if uuid else None,
+            v.TRAILING_NEWLINE: f"{uuid}\n" if uuid else None,
+            v.WHITESPACE_ONLY: "   ",
+            v.EMPTY_STRING: "",
+            v.JSON_NUMBER: 12345,
+            v.JSON_BOOL: True,
+            v.JSON_NULL: None,
+            v.NOT_A_UUID: "not-a-uuid-at-all",
+            v.ABSENT: None,          # popped by `_guild_object`
+            v.MISMATCHED_UUID: DARK_MECHANICUM.uuid,
+        }[self.guild_id]
+
+    # -- the raw half -----------------------------------------------------
+
+    @property
+    def is_json(self) -> bool:
+        return self.body not in {
+            VendorBody.NOT_JSON_HTML, VendorBody.EMPTY, VendorBody.TRUNCATED_JSON,
+        }
+
+    @property
+    def content_type(self) -> str:
+        return "text/html" if self.body is VendorBody.NOT_JSON_HTML else "application/json"
+
+    def raw_body(self) -> bytes:
+        """The literal bytes on the wire, for bodies that are not JSON.
+
+        These are the ones that make `response.json()` raise. Today that
+        exception escapes `fetch_guild_snapshot` — which documents itself as
+        "Never raises for an expected failure" — travels up through
+        `verify_and_resolve` and `_update_one_guild` (whose only `except` is
+        `GuildQuarantined`), and ends the hourly loop for EVERY server until
+        the process is restarted.
+        """
+        if self.body is VendorBody.NOT_JSON_HTML:
+            return (
+                b"<html>\r\n<head><title>502 Bad Gateway</title></head>\r\n"
+                b"<body>\r\n<center><h1>502 Bad Gateway</h1></center>\r\n"
+                b"<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n"
+            )
+        if self.body is VendorBody.EMPTY:
+            return b""
+        if self.body is VendorBody.TRUNCATED_JSON:
+            return b'{"guild": {"guildId": "b64bdba4-36ac-4229-bd29-'
+        raise AssertionError(
+            f"{self.body.value} IS a JSON body — render it through `payload()`"
+        )
+
+    def as_httpx_response(self, url: str):
+        """A REAL `httpx.Response` for this answer, hostile bodies included.
+
+        One renderer, so a transport double cannot accidentally serve a
+        different body than the scenario programmed. Real `httpx.Response`
+        rather than a stub so `raise_for_status()`, `.json()` and
+        `.status_code` behave exactly as production will see them — including
+        `.json()` RAISING, which is the whole point of the non-JSON members.
+        """
+        import httpx
+
+        request = httpx.Request("GET", url)
+        if self.is_json:
+            return httpx.Response(self.status, json=self.payload(), request=request)
+        return httpx.Response(
+            self.status, content=self.raw_body(),
+            headers={"content-type": self.content_type}, request=request,
+        )
+
+
+def _alternating_case(value: str) -> str:
+    """`b64bdba4-…` → `B64BdBa4-…`. Not `.upper()`, so a scenario that passes
+    for `UPPERCASE` and fails here has found a comparison that normalises one
+    direction only."""
+    return "".join(
+        c.upper() if i % 2 == 0 else c.lower() for i, c in enumerate(value)
+    )
 
 
 class FakeGuildService:

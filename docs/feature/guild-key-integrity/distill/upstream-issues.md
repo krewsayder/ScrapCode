@@ -609,3 +609,98 @@ so this was not hypothetical.
 
 AC-009.4 still does not pin the mechanism. It asserts "nothing has been
 deleted yet" BEFORE any confirmation, which any widget satisfies.
+
+## UI-16 — AC-006.2 spelled its downgrade as a distance from head (FIXED this wave)
+
+**Severity:** blocking the baseline — it was the one red in an otherwise clean
+`254 passed, 1 failed`. **Third instance of the UI-13 shape**, and the one that
+proves the shape is a class rather than a one-off.
+
+Step 08-03 added revision `0004_guild_key_quarantine_history` (the tombstone
+from UI-11), moving head from `0003` to `0004`.
+`test_downgrade_restores_the_prior_shape_exactly` did:
+
+```python
+command.upgrade(cfg, "head")
+command.downgrade(cfg, "-1")     # <-- a DISTANCE, not a revision
+```
+
+against a fixture pinned at `0002`. `-1` equals "back to the baseline" only
+while the feature owns exactly one revision. With head at `0004` it landed on
+`0003` and left `guild_key_bindings` standing, so the comparison against the
+`0002` shape failed — **and it would have broken again for every future
+migration in the project, related to this feature or not.**
+
+**The migration is innocent.** Verified independently rather than taken on the
+crafter's word: upgrade/downgrade across three databases, comparing full
+`sqlite_master`. An ABSOLUTE downgrade to `0002` restores the pre-feature
+schema byte-for-byte; only the relative spelling does not. `0004`'s downgrade
+is a plain drop of its own table and index. AC-006.2 holds.
+
+### Fixed
+
+The baseline is now named once, in `conftest.PRE_FEATURE_HEAD = "0002"`, read
+by both the fixture that establishes it and the scenario that returns to it —
+so it cannot be changed in one place and left stale in the other. The scenario
+stays correct for every future revision and *grows* to cover them: each new
+migration must also downgrade cleanly back to the pre-feature baseline.
+
+Two guards added, both mutation-verified rather than assumed:
+
+* **the upgrade must have changed something** — without it the scenario is
+  vacuous whenever head equals the baseline (upgrade and downgrade both become
+  no-ops and `after == before` holds trivially). Setting
+  `PRE_FEATURE_HEAD = "0004"` fires it.
+* **the downgrade must land on the baseline** — asserted from
+  `alembic_version` before the schema comparison. Reintroducing
+  `downgrade(cfg, "-1")` now fails with "the downgrade did not land on the
+  baseline" instead of an opaque schema diff, so the next person to make this
+  mistake is told what they did.
+
+`db_at_previous_head`'s docstring was corrected too: it claimed `0002` was
+"the head BEFORE this feature's revision", which stopped being true when
+`0004` landed. It pins the pre-feature baseline, which is the stable idea.
+
+### Sibling audit — one instance, and it is now closed
+
+Swept every migration-facing test in the repository. `downgrade(cfg, "-1")`
+was the **only** relative target; every other call is
+`command.upgrade(..., "head")`, which is absolute by definition (head is
+always the newest) and correct for a "give me a current database" fixture.
+`test_upgrade_creates_the_binding_store_and_touches_no_guild_record` shares
+the fixture but upgrades to head, so it is stable — and it strengthened for
+free, since its "no column added to `guilds`" assertion now covers `0004` as
+well.
+
+**Owed upstream, cosmetic:** `tests/acceptance/sqlite-backend/
+test_atomicity_and_probe.py:44` documents its fixture as "Apply the alembic
+baseline (0001)" while the code upgrades to `head`. Stale docstring, not a
+coupling defect, and it belongs to the `sqlite-backend` suite — flagged, not
+edited.
+
+## UI-17 — a function-level `conftest` import passes alone and fails in a full run (FIXED this wave)
+
+**Severity:** blocking — and it is a wrong-reason RED, which is the class the
+pre-DELIVER gate exists for. Found by running the full suite rather than the
+file, which is the only reason it was caught.
+
+The UI-16 fix first read its constant with `from conftest import
+PRE_FEATURE_HEAD` **inside the test function**. In isolation:
+`26 passed`. In a full run: `ImportError: cannot import name
+'PRE_FEATURE_HEAD' from 'conftest'` — resolving to
+`tests/acceptance/sqlite-backend/conftest.py`.
+
+Two suites ship a bare `conftest` module, so `sys.modules["conftest"]` holds
+whichever was imported last. A **module-level** import binds during this
+file's collection, while the right conftest is still installed. A
+**function-level** import resolves when the test RUNS — after all collection,
+by which point `sqlite-backend`'s conftest (collected later, alphabetically)
+has replaced it.
+
+This is the same hazard UD-10 records for cross-importing test modules,
+reaching a new surface: it applies to a suite importing *its own* conftest
+too, if it does so late. Fixed by hoisting the import to module level
+alongside the existing `from conftest import ...`, with the reasoning written
+at the import so it is not re-introduced.
+
+**Rule for this suite:** never `import conftest` inside a function body.

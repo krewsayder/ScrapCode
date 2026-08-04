@@ -350,6 +350,40 @@ is UNBOUND and registration will correctly adopt it under trust-on-first-use",
 instead of failing 100 lines later on a roster assertion that names the wrong
 defect.
 
+## AC-006.2 — third instance of the same shape (2026-08-03, later)
+
+`test_downgrade_restores_the_prior_shape_exactly` spelled its rollback as
+`downgrade(cfg, "-1")` — a distance from a moving head, against a fixture
+pinned at `0002`. Revision `0004` (the UI-11 tombstone) landed, `-1` stopped
+meaning "back to the baseline", and the test red while the migration it
+accused was clean. Verified independently: an absolute downgrade restores
+`0002` byte-for-byte. **AC-006.2 holds; the defect was the spelling.**
+
+Fixed by naming the baseline once (`conftest.PRE_FEATURE_HEAD`) and having
+both the fixture and the scenario read it. Full write-up: UI-16.
+
+| Guard added | Mutation | Result |
+|---|---|---|
+| the upgrade must change something | set `PRE_FEATURE_HEAD = "0004"` (baseline == head) | fires — "upgrading to head changed nothing, so this scenario is not exercising a rollback" |
+| the downgrade must land on the baseline | restore `downgrade(cfg, "-1")` | fires — "the downgrade did not land on the baseline", naming the cause instead of showing a schema diff |
+
+**A wrong-reason RED was found and fixed while fixing it** (UI-17). The first
+version read the constant with a function-level `from conftest import ...`.
+That passed in isolation (`26 passed`) and raised `ImportError` in a full run,
+because two suites ship a bare `conftest` and `sys.modules["conftest"]` holds
+whichever was imported last. Only running the whole suite surfaced it. Hoisted
+to module level.
+
+Counts after both fixes:
+
+| Run | Result |
+|---|---|
+| baseline, remediation markers deselected | `255 passed, 2 skipped, 1 xfailed` |
+| full suite | `8 failed, 321 passed, 2 skipped, 1 xfailed` |
+
+The 8 are slice 06's AC-009.4 + AC-009.6 (DELIVER steps in flight) and all 6
+of slice 07 (not started). No DISTILL asset is among them.
+
 ## `_confirm_if_awaiting` — both seams verified, not merely written
 
 Five mutation checks run against the rewritten helper before it was recorded:
