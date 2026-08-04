@@ -28,6 +28,7 @@ from bot.db.models import (
     BombHitRow,
     ClusterRow,
     GuildKeyBindingRow,
+    GuildKeyQuarantineHistoryRow,
     GuildMemberRoleRow,
     GuildRow,
     LiveLeaderboardRow,
@@ -48,6 +49,7 @@ from bot.repository import (
     DuplicateReplayUrlError,
     GuildBinding,
     GuildKeyAlreadyRegisteredError,
+    QuarantineTombstone,
     ReplayEntry,
     ReplayThreadInfo,
 )
@@ -834,6 +836,58 @@ class SqlAlchemyClusterRepository(ClusterRepository):
                 ),
             )
         ).scalars().first()
+
+    # ------------------------------------------------------------------
+    # Quarantine history (08-03; UI-11). Append-only, and written to a table
+    # with NO foreign key to `guilds` — see `GuildKeyQuarantineHistoryRow`.
+    # The binding methods above CASCADE away with the guild; these exist to
+    # outlive exactly that deletion.
+    # ------------------------------------------------------------------
+
+    def record_quarantine_tombstone(self, discord_server_id: int,
+                                    tombstone: QuarantineTombstone) -> None:
+        with self._db.session_scope() as session:
+            session.add(GuildKeyQuarantineHistoryRow(
+                discord_server_id=discord_server_id,
+                guild_id=tombstone.guild_id,
+                tacticus_guild_id=tombstone.tacticus_guild_id,
+                tacticus_guild_tag=tombstone.tacticus_guild_tag,
+                tacticus_guild_name=tombstone.tacticus_guild_name,
+                observed_tacticus_guild_id=tombstone.observed_tacticus_guild_id,
+                quarantine_reason=tombstone.quarantine_reason,
+                quarantined_at=tombstone.quarantined_at,
+                recorded_at=tombstone.recorded_at,
+            ))
+
+    def list_quarantine_tombstones(self, discord_server_id: int,
+                                   guild_id: str) -> list[QuarantineTombstone]:
+        """Oldest first, by insertion order.
+
+        Ordered on the surrogate `id` rather than on `quarantined_at`: the
+        timestamp is nullable (a legacy binding may carry none) and NULLs sort
+        unpredictably, whereas the sequence a history is read in is the
+        sequence it was written in.
+        """
+        with self._db.session_scope() as session:
+            rows = session.execute(
+                select(GuildKeyQuarantineHistoryRow).where(
+                    GuildKeyQuarantineHistoryRow.discord_server_id == discord_server_id,
+                    GuildKeyQuarantineHistoryRow.guild_id == guild_id,
+                ).order_by(GuildKeyQuarantineHistoryRow.id)
+            ).scalars().all()
+            return [self._tombstone_from_row(row) for row in rows]
+
+    def _tombstone_from_row(self, row) -> QuarantineTombstone:
+        return QuarantineTombstone(
+            guild_id=row.guild_id,
+            tacticus_guild_id=row.tacticus_guild_id,
+            tacticus_guild_tag=row.tacticus_guild_tag,
+            tacticus_guild_name=row.tacticus_guild_name,
+            observed_tacticus_guild_id=row.observed_tacticus_guild_id,
+            quarantine_reason=row.quarantine_reason,
+            quarantined_at=row.quarantined_at,
+            recorded_at=row.recorded_at,
+        )
 
     def _binding_from_row(self, row) -> GuildBinding:
         return GuildBinding(

@@ -125,6 +125,46 @@ class GuildBinding:
         return self.tacticus_guild_id is None
 
 
+@dataclass(frozen=True)
+class QuarantineTombstone:
+    """A quarantine that happened, kept after the guild it happened to is gone.
+
+    The port-level shape of one `guild_key_quarantine_history` row. Written by
+    `/deregister_guild` from the binding it is about to destroy, and read by
+    `/register_guild` when the same slug comes back.
+
+    IT HAS NO FOREIGN KEY AND THAT IS THE DESIGN (DELIVER's answer to UI-11,
+    recorded in the feature delta). The CASCADE that makes `/deregister_guild`
+    destructive is what drops the binding, so anything attached to `guilds`
+    dies with it — including the only record that the guild was ever
+    quarantined. Without this row, deregistering and re-registering a slug
+    launders the quarantine in two commands and trust-on-first-use (DDD-8)
+    adopts the drifted key as the new truth, with no warning (AC-009.5).
+
+    It is SURFACED, never enforced. Re-registration stays allowed: refusing it
+    would break a legitimate re-registration, and the operator's decision of
+    2026-08-02 is that deregistering destroys data by design.
+
+    Frozen and value-compared for the same reason as `GuildBinding` — history
+    that can be edited in place is not history.
+
+    Carries no key material (KPI-6). This row outlives every other trace of
+    the guild, so a key value written into it is a leak with no expiry.
+    `observed_tacticus_guild_id` is the drifted uuid recovered from the
+    binding's `quarantine_reason`, which is the only carrier the codebase has
+    for it.
+    """
+
+    guild_id: str
+    tacticus_guild_id: str | None = None
+    tacticus_guild_tag: str | None = None
+    tacticus_guild_name: str | None = None
+    observed_tacticus_guild_id: str | None = None
+    quarantine_reason: str | None = None
+    quarantined_at: str | None = None
+    recorded_at: str | None = None
+
+
 # ADR-006 D8 / §Architecture enforcement: every ClusterRepository adapter
 # wired into the composition root (`bot.guilds.repo`) MUST expose a `probe()`
 # method. The probe is the Earned-Trust startup gate; the composition root
@@ -331,6 +371,35 @@ class ClusterRepository(ABC):
 
         Raw-SQL key edits are forbidden — this is the only sanctioned write
         path for a key replacement.
+        """
+
+    # --- Quarantine history (08-03; ADR-008 DDD-4, UI-11) ---
+    # Separate from the binding methods above because the two have opposite
+    # lifetimes: a binding is 1:1 with a guild and CASCADEs away with it, a
+    # tombstone is append-only and exists to OUTLIVE that deletion.
+
+    @abstractmethod
+    def record_quarantine_tombstone(self, discord_server_id: int,
+                                    tombstone: QuarantineTombstone) -> None:
+        """Append one quarantine to the guild's history.
+
+        Append-only: a second quarantine of the same slug is a second entry,
+        never an overwrite. Nothing removes one — a quarantine that HAPPENED
+        does not stop having happened when the guild is re-registered, and
+        `guild_keys.release` clears the live binding rather than this.
+
+        Called on the path that PERFORMS the deregistration, from the binding
+        it is about to destroy, so that a later confirmation gate on the
+        command cannot leave a tombstone for a deletion that never happened.
+        """
+
+    @abstractmethod
+    def list_quarantine_tombstones(self, discord_server_id: int,
+                                   guild_id: str) -> list[QuarantineTombstone]:
+        """Every quarantine recorded against this guild id, oldest first.
+
+        Empty is the normal answer and never an error: most slugs have no
+        history, and a re-registration of one of them proceeds silently.
         """
 
     @staticmethod
@@ -685,6 +754,30 @@ class JsonClusterRepository(ClusterRepository):
 
     def list_guild_bindings(self, discord_server_id: int) -> dict[str, GuildBinding]:
         return {}
+
+    def record_quarantine_tombstone(self, discord_server_id: int,
+                                    tombstone: QuarantineTombstone) -> None:
+        """Dropped, like every other binding write on this path (ADR-006 D9).
+
+        A tombstone records that a QUARANTINE happened, and this adapter
+        cannot quarantine anything: `load_guild_binding` returns the unbound
+        value, so no guild here is ever quarantined and there is no history to
+        keep. Degrading to a no-op rather than raising is what keeps
+        `/deregister_guild` working for the operator who rolled back to
+        restore service.
+        """
+        return None
+
+    def list_quarantine_tombstones(self, discord_server_id: int,
+                                   guild_id: str) -> list[QuarantineTombstone]:
+        """Always empty — nothing on this path can have written one.
+
+        "No history" is a truthful answer here rather than a degraded one, and
+        it is the fail-safe direction: a re-registration proceeds exactly as
+        it did before the SQLite cutover instead of reporting a quarantine
+        this adapter cannot substantiate.
+        """
+        return []
 
     def replace_guild_key(self, discord_server_id: int, guild_id: str,
                           api_key: str) -> None:

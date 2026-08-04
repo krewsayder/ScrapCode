@@ -4,6 +4,13 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot import guild_keys
+# The MODULE, not `repo` by value. `bot/guilds.py` binds `repo = build_repo()`
+# at import time; a test (or a rollback that rebuilds it) swaps that attribute,
+# and a `from bot.guilds import repo` in this module would keep pointing at the
+# object that existed when the cog was first imported. Every wrapper in
+# `bot/guilds.py` resolves `repo` as a module global at CALL time, so reaching
+# it through the module is the same late binding they get.
+from bot import guilds as guild_registry
 from bot.guilds import (
     load_guilds,
     save_guilds,
@@ -15,6 +22,7 @@ from bot.guilds import (
     add_guild_member_role,
     repo,
 )
+from bot.repository import QuarantineTombstone
 from bot.embeds import guild_autocomplete, encounter_limit
 from bot.permissions import require_tier, check_tier
 from bot.services.chronicl3r.player_service import PlayerService
@@ -156,6 +164,23 @@ class AdminCog(commands.Cog):
             f"✅ Guild **{name}** registered! Fetching player roster...",
             ephemeral=True,
         )
+
+        # AC-009.5 — SURFACED, NEVER USED TO REFUSE. The registration above
+        # has already happened: an admin re-registering a slug is doing
+        # something legitimate, and the operator's decision of 2026-08-02 is
+        # that deregistering destroys data by design. What must not happen
+        # silently is the ADOPTION — trust-on-first-use (DDD-8) is about to
+        # bind whatever the submitted key resolves to, and if that slug was
+        # quarantined before it was deregistered, the identity being adopted
+        # may be the drift that caused the quarantine. Sent as its own
+        # message, before the probe, so the history reaches the admin even
+        # when the probe fails or the guild is quarantined again.
+        history = _quarantine_history_warning(
+            guild_registry.repo.list_quarantine_tombstones(server_id, guild_id),
+            guild_id,
+        )
+        if history:
+            await interaction.followup.send(history, ephemeral=True)
 
         try:
             # One call does both jobs, which is why it is here and not in two
@@ -308,6 +333,17 @@ class AdminCog(commands.Cog):
             return
 
         guild_name = guild_data["name"]
+        # AC-009.5 — WRITTEN BEFORE THE DELETION, AND ON THE PATH THAT
+        # PERFORMS IT. `save_guilds` drops the `guilds` row; `PRAGMA
+        # foreign_keys=ON` plus `ondelete="CASCADE"` then destroys the
+        # binding, which is the only record that this guild was ever
+        # quarantined. Reading it afterwards is not possible and recording it
+        # at quarantine time would miss every binding written before this
+        # shipped, so the tombstone is taken from the binding one line before
+        # it ceases to exist. It sits here rather than at command invocation
+        # so a later confirmation gate (AC-009.4) cannot leave a tombstone
+        # behind for a deletion the admin declined.
+        _record_quarantine_history(server_id, guild_id)
         del guilds[guild_id]
         save_guilds(server_id, guilds)
 
@@ -922,6 +958,89 @@ def _strip_uuids(text: str) -> str:
     import re
 
     return re.sub(_UUID_PATTERN, "", text).strip()
+
+
+# ==========================================
+# Quarantine history across the CASCADE (AC-009.5 / UI-11)
+# ==========================================
+
+def _record_quarantine_history(discord_server_id: int, guild_id: str) -> None:
+    """Keep the quarantine after the binding that recorded it is destroyed.
+
+    Called from `/deregister_guild` immediately BEFORE `save_guilds` drops the
+    `guilds` row. `PRAGMA foreign_keys=ON` plus `ondelete="CASCADE"` then takes
+    the binding with it, and the binding is the only place a quarantine is
+    written. The tombstone table has no foreign key, so it is the one thing
+    that outlives the deletion.
+
+    Reads the binding rather than being called from `guild_keys.quarantine`:
+    every binding quarantined before this shipped would otherwise have no
+    history at all, and the state that matters at deregistration time is what
+    the binding SAYS NOW, not what some earlier command did.
+
+    A guild that is not quarantined leaves no tombstone. Writing one for every
+    deregistration would put the word "quarantined" in front of an admin
+    re-registering a guild that never was, which trains them to ignore the
+    warning that matters.
+
+    `guild_keys._observed_uuid_from_reason` and `guild_keys._utc_now` are
+    reached through their own module rather than re-implemented here. Both the
+    `— observed=` marker and the millisecond ISO-8601 shape KPI-2 compares as
+    strings are DEFINED in `bot/guild_keys.py`; a second parser or a second
+    `strftime` in this file is the drift UI-5 is a record of.
+    """
+    binding = load_guild_binding(discord_server_id, guild_id)
+    if binding.key_status != KeyStatus.QUARANTINED.value:
+        return
+    guild_registry.repo.record_quarantine_tombstone(
+        discord_server_id,
+        QuarantineTombstone(
+            guild_id=guild_id,
+            tacticus_guild_id=binding.tacticus_guild_id,
+            tacticus_guild_tag=binding.tacticus_guild_tag,
+            tacticus_guild_name=binding.tacticus_guild_name,
+            observed_tacticus_guild_id=guild_keys._observed_uuid_from_reason(
+                binding.quarantine_reason or ""
+            ),
+            quarantine_reason=binding.quarantine_reason,
+            quarantined_at=binding.quarantined_at,
+            recorded_at=guild_keys._utc_now(),
+        ),
+    )
+
+
+def _quarantine_history_warning(
+    tombstones: list[QuarantineTombstone], guild_id: str,
+) -> str:
+    """What a re-registered slug's history says, or the empty string.
+
+    SURFACED, NEVER ENFORCING. The registration has already succeeded by the
+    time this is rendered, and that is deliberate: refusing would break a
+    legitimate re-registration, and the operator's decision of 2026-08-02 is
+    that `/deregister_guild` destroys data by design. What this closes is the
+    silence — trust-on-first-use (DDD-8) is about to adopt whatever the
+    submitted key resolves to, and on a slug that was quarantined before it
+    was deregistered, that identity may be the drift which caused the
+    quarantine. Two commands, and the incident becomes the new truth.
+
+    Both identifiers are truncated to eight characters and the reason is never
+    rendered raw — it embeds the full observed uuid for drift re-reporting
+    (KPI-6: 0 full-identifier leaks).
+    """
+    if not tombstones:
+        return ""
+    latest = tombstones[-1]
+    observed = latest.observed_tacticus_guild_id or ""
+    return (
+        f"⚠️ `{guild_id}` was QUARANTINED before it was deregistered, and that "
+        f"history outlived the guild ({len(tombstones)} on record, most recent "
+        f"{(latest.quarantined_at or EM_DASH)[:ISO_DATE_LENGTH]}).\n"
+        f"• It was bound to {_identity_label(latest)} and its key had drifted "
+        f"to ({observed[:IDENTIFIER_PREFIX_LENGTH] or EM_DASH}).\n"
+        f"• Nothing was refused — the registration went ahead. Check that the "
+        f"key you just submitted is this guild's real key before trusting the "
+        f"binding reported below; `/update_guild_key` replaces it."
+    )
 
 
 # ==========================================

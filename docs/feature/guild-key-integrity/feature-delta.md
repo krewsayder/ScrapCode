@@ -2232,11 +2232,24 @@ the hypothesis state machine).
 - [x] AC-003.2 — `replace_guild_key` touches only `api_key`+`api_key_hmac`;
   players/battle_hits/bomb_hits counts identical before/after (no CASCADE).
 - [x] DDD-5 — quarantine blocks roster AND hits (the larger 60-of-67 half).
-- [x] DDD-6 — only a well-formed 200 with a different `guildId` quarantines;
-  UNREACHABLE/UNVERIFIABLE/DEAD leave `key_status` untouched (adversarial review
-  CLEAN).
-- [x] AC-004.6 — all seven key-consumption sites refuse a quarantined guild
-  with `call_count == 0`.
+- [~] DDD-6 — only a well-formed 200 with a different `guildId` quarantines;
+  UNREACHABLE/UNVERIFIABLE/DEAD leave `key_status` untouched. **The
+  "(adversarial review CLEAN)" that stood here is withdrawn, 2026-08-02.** It
+  was not supported: the review verified the policy layer's branching on a
+  classification it was HANDED and never questioned the classifier's input
+  domain. The branching is in fact correct — it survived every direct attack.
+  The classifier is not: six well-formed 200s naming the bound guild
+  (re-cased, whitespace-padded, BOM-prefixed) quarantine a healthy guild, and
+  a 200 whose body is not JSON raises out of `parse_guild_snapshot` and ends
+  the hourly loop for every server. Slice 04 / AC-007.x.
+- [~] AC-004.6 — all key-consumption sites refuse a quarantined guild with
+  `call_count == 0`. **The word "seven" is withdrawn, 2026-08-02.** The
+  parametrizing enum named seven sites, three of which were wrong (two consume
+  no key at all) and three real ones were missing — including every site where
+  a confirmed defect lives. The real shape is six reader functions behind
+  eight driving ports plus one recovery entry point that must NOT refuse; the
+  enum is now checked against production by an AST scan rather than asserted
+  in prose. See `distill/upstream-issues.md` UI-5.
 - [x] KPI-5 — one guild's quarantine does not stop the server (season
   fall-through, all-quarantined skip with stated reason, cycle counters).
 - [x] KPI-6 — no plaintext key and no full identifier (beyond 8 chars) in any
@@ -2267,3 +2280,201 @@ UD-11 (05-01 enforce flip + slice-01 test inversions), UD-12 (05-03 SQLite
 insertion-order fix), UD-13 (05-05 mutating Tier B invariant), UD-14 (L1 dead
 code from the enforce flip) — all in `## Wave: DELIVER / [WHY] Upstream Issues`
 above.
+
+> **UD-13 is reclassified as of 2026-08-02.** It is recorded above as a
+> potential *flake*. Measured, the defect is *vacuity*: the mutating
+> invariant starved the neighbouring property of every one of its
+> assertions. Different class, different fix. See
+> `distill/upstream-issues.md` UI-6.
+
+---
+
+## Wave: DISTILL / [REF] Remediation inherited commitments
+
+Provenance: adversarial re-review 2026-08-02, four independent Opus reviewers
+each instructed to falsify one load-bearing claim. Four of five broke.
+Scope: `remediation-plan.md` + `slices/slice-04-…` through `slice-07-…`.
+
+| Origin | Commitment | DDR | Impact |
+|--------|------------|-----|--------|
+| DELIVER#Quality gates | "Adversarial review APPROVED — all 10 load-bearing claims CLEAN" | n/a | Withdrawn in part. The reviewer was a Haiku model asked to confirm; a re-review asked to falsify broke 4 of 5 claims it re-examined. The policy core survived every attack; the parser, three call sites, the composition root and three test assets did not. |
+| DELIVER#2235 | DDD-6 "(adversarial review CLEAN)" | n/a | Withdrawn. The review verified policy branching on a classification it was handed and never questioned the classifier's input domain — which is where every slice-04 defect lives. |
+| DISTILL#AC-004.6 | "all seven key-consumption sites refuse" | n/a | Corrected. The parametrizing enum named 3 sites that consume no key and omitted 3 that do. Now derived from production and checked by an AST scan; the count is no longer stated. |
+| kpi-contracts#KPI-2 | "holds across every interleaving" | n/a | Corrected. Held across zero — measured 0 assertion executions across 200×25. Now 1037, with a counter-based gate that fails at zero. |
+| ADR-008 D3 | "seven call sites across three cogs plus a service" | n/a | Never true of this repository. Real shape: 6 reader functions behind 8 driving ports, plus 1 recovery entry point that must NOT refuse. |
+| DISCUSS D3 | "quarantine is never a trap" | n/a | Not met. A case-poisoned binding refuses the operator's correct key, because `install_guild_key` compares uuids raw. AC-007.10. |
+| ADR-006 D8 | "the probe runs at composition time and MUST succeed before the bot starts" | n/a | Not met. `probe()` has zero production callers — AST-verified, not grepped. AC-010.5. |
+
+## Wave: DISTILL / [REF] Remediation scenario list
+
+`.feature` files are the scenario SSOT. All four are new; all are expected
+RED against production as it stands.
+
+| File | Scenarios | Tags |
+|---|---|---|
+| `acceptance/slice-04-survive-hostile-vendor-output.feature` | 8 (2 Outline ×6/×9) → 26 tests | `@kpi` `@driving_port` `@error` `@real-io` `@adapter-integration` |
+| `acceptance/slice-05-close-the-write-holes.feature` | 8 | `@kpi` `@driving_port` `@error` |
+| `acceptance/slice-06-admin-command-safety.feature` | 7 (1 parametrized ×2) | `@kpi` `@driving_port` `@error` `@real-io` |
+| `acceptance/slice-07-composition-root-integrity.feature` | 6 | `@driving_port` `@error` |
+
+Executable specs: `test_slice_04_hostile_vendor_output.py`,
+`test_slice_05_close_the_write_holes.py`,
+`test_slice_06_admin_command_safety.py`,
+`test_slice_07_composition_root_integrity.py`. Markers `slice_04` … `slice_07`
+registered in `pytest.ini`, so the pre-existing baseline stays readable while
+the remediation is in flight:
+
+```
+pytest tests/unit tests/acceptance -m "not slice_04 and not slice_05 and not slice_06 and not slice_07"
+```
+
+## Wave: DISTILL / [REF] Remediation test-integrity fixes
+
+Three defects in the acceptance assets themselves, escalated out of DELIVER
+scope (DELIVER does not author acceptance tests). All three are fixed here.
+Each is verified by MUTATION rather than by running, because "it passes" is
+the signal that turned out to be untrustworthy.
+
+| # | Asset | Defect | Verification |
+|---|---|---|---|
+| a | `domain_types.py` `KeyConsumptionSite` | named 3 non-sites, omitted 3 real ones; 2 `_exercise_site` branches drove no production entry point, making `assert call_count == 0` vacuous | new AST inventory test replayed against the old enum → 3 unaccounted + 2 stale. Gate-disabling mutant kills **7 of 8** site branches |
+| b | `tier_b/test_key_status_state_machine.py` | `quarantine_is_never_a_trap` mutated the model and sorted first, starving `quarantined_guilds_never_write` of every assertion | assertion-body counter: **0 → 1037** at 200×25. New anti-vacuity test fails with `assert 0 > 0` when the mutation is restored |
+| c | `conftest.py` `GuildServiceResponse` | could render only a well-formed `{"guild": {...}}` with a canonical `guildId` — every slice-04 defect structurally unwritable | the 21 slice-04 REDs, none of which was expressible before |
+
+The (a) fix is the one worth reading twice: the enum's docstring already
+claimed "adding an eighth site without adding it here is the mistake this type
+is shaped to make visible". Nothing executed that claim. It does now —
+`test_the_key_consumption_inventory_matches_production` AST-scans `bot/` and
+requires set equality in both directions, so a new site fails as unaccounted
+and a deleted one fails as stale.
+
+## Wave: DISTILL / [REF] Remediation RED gate
+
+Full classification: `distill/red-classification.md` (remediation section).
+
+| Metric | Value |
+|---|---|
+| New tests | 47 |
+| RED, all `MISSING_FUNCTIONALITY` | 39 |
+| `GREEN_BY_DESIGN` (controls + regression guards) | 8 |
+| `IMPORT_ERROR` / `FIXTURE_BROKEN` / `SETUP_FAILURE` | **0** |
+| `WRONG_ASSERTION` / `OBSERVABLE_NOT_AT_PORT` | **0** |
+| Wrong-reason REDs found and fixed during authoring | 2 |
+| Baseline before / after (excluding remediation markers) | `246 passed` → `250 passed`, 0 regressions |
+| `lint-imports` | 6 kept, 0 broken |
+
+Gate verdict: **PASS.** DELIVER may take slices 04–07.
+
+## Wave: DISTILL / [REF] Remediation AC corrections
+
+The slice briefs' ACs are proposals; the designer owns the wording. Three did
+not survive contact with production. Detail in `distill/upstream-issues.md`
+UI-9 … UI-11.
+
+| AC | Verdict | Substitution |
+|---|---|---|
+| AC-008.5 "same for `/set_live_leaderboard`" | **not a defect** — `:404` reads the key of the guild the officer NAMED; no arbitrary pick, no cross-guild blast radius. Scenario passes today | kept as a regression guard; **AC-008.5b** substituted — the command reports a quarantined guild as having "no API key set", routing the officer to `/register_guild`, which AC-008.1 shows overwrites the roster |
+| AC-008.1 "`is_former` untouched on every existing member" | **two defects at two depths.** Zero-rows needs "no guild row" (`admin_cog.py:83` refuses a registered id), and that state cannot carry a roster — `players` CASCADEs from `guilds`. `is_former` needs a roster, so it is not the slash command at all: the reproduction describes a REGISTERED guild, so the measured five flips came from the sequence at `admin_cog.py:121-124` | **split.** AC-008.1 keeps zero-rows via the orphaned binding; new **AC-008.1b** asserts no `is_former` flips via the registration sequence. Both red |
+| AC-009.4 confirmation mechanism | under-specified, deliberately left so | scenario asserts the guarantee (nothing deleted before confirmation, real counts stated), not the widget |
+
+## Wave: DISTILL / [REF] Remediation SSOT corrections applied
+
+| Record | Was | Now |
+|---|---|---|
+| `feature-delta.md` DDD-6 row | "(adversarial review CLEAN)" | withdrawn, with the reason the review could not have seen it |
+| `feature-delta.md` AC-004.6 row | "all seven … sites" | "seven" withdrawn; pointer to UI-5 |
+| `kpi-contracts.yaml` KPI-2 `measurement_note` | "holds across every interleaving" | corrected with the 0→1037 measurement and the gate that now enforces it |
+| `kpi-contracts.yaml` `guild.key.ingest.blocked` | `WARNING` / `bot/guild_keys.py` / `[caller]` | `INFO` / `bot/cogs/tasks_cog.py` / `[key_ref]` — all three were wrong |
+| `kpi-contracts.yaml` `guild.key.updated` | `emitter: bot/cogs/admin_cog.py` | `bot/guild_keys.py` (`_emit_updated`, `:334`) |
+| `kpi-contracts.yaml` `guild.key.bound` | `fields: [… name]` | `tacticus_guild_name` — `name` collides with a `LogRecord` attribute and raises `KeyError` at emit time |
+| `feature-delta.md` UD-13 | "potential flake" | reclassified as vacuity |
+
+The `guild.key.bound` row is the sharpest of these: the contract instructed a
+reader to use a field name that, if anyone had implemented it, would have
+raised inside the hourly loop on the one announcement DDD-8 makes exactly
+once. Production had it right and the contract had it wrong.
+
+---
+
+## Wave: DELIVER / [WHY] UI-11 — where the quarantine history is retained
+
+**Decision (step 08-03, 2026-08-03): a TOMBSTONE ROW in a new
+`guild_key_quarantine_history` table, written by `/deregister_guild` before the
+deletion. NOT the surviving `guild.key.mismatch` log records.**
+
+UI-11 left this open on purpose — AC-009.5 asserts only that the history is
+SURFACED, never where it is kept — and named two candidates. This is DELIVER's
+answer.
+
+### Why the log-record candidate was rejected
+
+The `guild.key.mismatch` records do survive the CASCADE and do carry
+`observed_id`, so the candidate was real. It fails on two counts, and the first
+is disqualifying rather than inconvenient:
+
+1. **The history expires silently.** Those records land in `discord.log`, a
+   `RotatingFileHandler` with `backupCount=5`. After five rotations the
+   quarantine is gone, and what an admin then reads is not "no record found" —
+   it is the same silence a guild that was never quarantined produces. A
+   warning that stops working and looks identical to a warning that had nothing
+   to say is worse than no warning, because it is trusted.
+2. **A cog cannot read them.** Answering "was this slug ever quarantined" at
+   registration time would mean shipping a log parser into `admin_cog`, which
+   is a heavier and less durable dependency than a table.
+
+The tombstone is queryable, lives in the same storage as the binding it
+records, and is the shape the rest of this feature already uses.
+
+### The shape, and the one property that makes it work
+
+`guild_key_quarantine_history` has **NO foreign key to `guilds`.** That is the
+entire design. The CASCADE that makes `/deregister_guild` destructive is what
+drops the binding; anything attached to `guilds` dies in the same statement.
+The tombstone exists to outlive exactly that deletion.
+
+It is written **in `/deregister_guild`, before `save_guilds`, from the binding
+it is about to destroy** — not inside `guild_keys.quarantine()`. Two reasons:
+every binding quarantined before this shipped would otherwise carry no history
+at all, and the state that matters at deregistration time is what the binding
+SAYS NOW. It sits on the path that PERFORMS the deletion rather than at command
+invocation, so the confirmation gate AC-009.4 adds in step 08-05 cannot leave a
+tombstone behind for a deletion the admin declined.
+
+It carries the bound identity, the observed identity (the drifted uuid,
+recovered from `quarantine_reason` — the only carrier the codebase has for it),
+and `quarantined_at`. It carries **no key material**: this row outlives every
+other trace of the guild, so a key value written into it is a leak with no
+expiry (KPI-6).
+
+The history is **surfaced, never used to refuse.** Re-registration stays
+allowed — refusing would break a legitimate re-registration, and the operator's
+decision of 2026-08-02 is that deregistering destroys data by design.
+
+### Deliberately outside the rollback delete order
+
+The tombstone table is **not** added to
+`migrations_json_to_sqlite._DATA_TABLES_DELETE_ORDER` (step 08-04 adds
+`guild_key_bindings` there for AC-009.6, and stops). A parity rollback
+re-migrates from a JSON tree that has never held a binding or a tombstone, so
+the whole cluster returns to unbound and trust-on-first-use re-announces every
+adoption. That is a coherent reset, not a laundering.
+
+An orphaned BINDING and a surviving TOMBSTONE are different hazards and the
+asymmetry is the point: an orphaned binding is compared against a fresh key and
+silently adopted — fail-open; a surviving tombstone is only ever read to warn —
+fail-safe.
+
+### Not a substitute for the AC-008.1c gate
+
+A tombstone read bolted onto `/register_guild` looks like it covers both
+AC-009.5 and AC-008.1c. It does not. AC-008.1c gates on
+`load_guild_binding(...).key_status` — live state — and refuses; AC-009.5 reads
+history and only reports. Neither satisfies the other on its own.
+
+### Revision 0004
+
+`0004_guild_key_quarantine_history` (`down_revision = "0003"`) creates the new
+table and its lookup index and nothing else. Verified on a populated database:
+`upgrade head` → `downgrade 0003` → `downgrade 0002` → re-`upgrade head` leaves
+every `guilds` row and its column list byte-identical at every step, and the
+0002 schema is restored exactly.
