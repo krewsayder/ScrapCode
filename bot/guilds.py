@@ -2,6 +2,7 @@ import logging
 import os
 from pathlib import Path
 
+from bot.obs import emit_structured
 from bot.repository import (
     ClusterRepository,
     GuildBinding,
@@ -13,6 +14,40 @@ from bot.migrations.player_list_migrations import PlayerListMigrator
 logger = logging.getLogger(__name__)
 
 
+class StartupRefused(Exception):
+    """Raised when the composition root cannot honour the configured backend.
+
+    A deploy that says `SCRAPCODE_REPO_BACKEND=sqlite` but cannot back it with
+    a usable Fernet key or a present database file is broken, not degraded —
+    the bot that comes up on a silent JSON fallback serves stale data with
+    quarantine inert, which is every failure mode of this feature at once.
+    Refusing to start converts a silent outage into a visible one; the
+    obligation that creates is the message, which is why every refusal names
+    the exact variable AND the exact fix.
+    """
+
+
+def _refuse_startup(step: str, reason: str, detail: str) -> None:
+    """Emit a `health.startup.refused` record, then raise `StartupRefused`.
+
+    The structured record is emitted through `bot/obs.py` so it has the same
+    single-line JSON shape every KPI query assumes (DEVOPS U1). The raise
+    carries the same text so `str(exc)` surfaces the variable name without
+    the caller re-formatting — the composition root's caller (the import-
+    time singleton, or `main.py`) lets the exception propagate and systemd
+    marks the unit `failed`.
+    """
+    emit_structured(
+        logger,
+        logging.ERROR,
+        "health.startup.refused",
+        step=step,
+        reason=reason,
+        detail=detail,
+    )
+    raise StartupRefused(detail)
+
+
 def build_repo() -> ClusterRepository:
     """Construct the live ClusterRepository from SCRAPCODE_REPO_BACKEND
     (ADR-006 D9 — env-driven singleton; rollback = restart with =json).
@@ -20,20 +55,29 @@ def build_repo() -> ClusterRepository:
     Selection order:
       1. `SCRAPCODE_REPO_BACKEND=json` → JsonClusterRepository (rollback
          path; the probe is skipped so a missing/invalid SCRAPCODE_DB_KEY
-         does not block a JSON-backend rollback).
+         does not block a JSON-backend rollback). This is the ONE fallback
+         somebody chose; it is documented, reasoned, and correct under time
+         pressure, so the bot STILL STARTS here.
       2. `SCRAPCODE_REPO_BACKEND=sqlite` (the post-cutover default) →
-         SqlAlchemyClusterRepository, UNLESS the safety net fires:
-           - SCRAPCODE_DB_KEY missing/empty → fall back to JSON for one cycle
-             (the SQLite impl cannot operate without the Fernet key).
+         SqlAlchemyClusterRepository, UNLESS the configuration cannot be
+         honoured, in which case the bot REFUSES TO START:
+           - SCRAPCODE_DB_KEY missing/empty → refuse, naming SCRAPCODE_DB_KEY.
+             The SQLite impl cannot encrypt/decrypt guild keys without it,
+             and a silent JSON fallback serves stale data with quarantine
+             inert (slice 07 / AC-010.1).
            - SCRAPCODE_DB_PATH file missing AND its parent directory exists
              (i.e., the file was supposed to be there but is gone — deleted
-             or corrupted) → fall back to JSON for one cycle. A first-run
-             path whose parent dir does not yet exist constructs the SQLite
-             impl (which creates both the dir and the file via create_all).
+             or corrupted) → refuse, naming SCRAPCODE_DB_PATH (AC-010.3).
+           - A first-run path whose parent dir does NOT yet exist still
+             CONSTRUCTS the SQLite impl, which creates both the dir and the
+             file via create_all — refusing it would make a fresh install
+             impossible.
 
-    The safety net keeps the JSON tree as the one-cycle read-only fallback
-    (US-010). A loud WARNING is logged on each fallback so the operator
-    sees it in `discord.log` / journalctl.
+    Refusing to start is an availability trade and is accepted (operator
+    decision, 2026-08-02): a typo in `.env` becomes a visible outage instead
+    of a silent one. The refusal message is the only thing between the
+    operator and a bot that will not come up, so it names the exact variable
+    AND the exact fix — write it for the person reading it at 2am.
     """
     backend = os.getenv("SCRAPCODE_REPO_BACKEND", "sqlite")
     if backend == "json":
@@ -41,18 +85,31 @@ def build_repo() -> ClusterRepository:
     db_path = os.getenv("SCRAPCODE_DB_PATH", "data/scrapcode.db")
     fernet_key = os.getenv("SCRAPCODE_DB_KEY", "")
     if not fernet_key:
-        logger.warning(
-            "SCRAPCODE_DB_KEY missing — falling back to JsonClusterRepository "
-            "for one cycle (SCRAPCODE_REPO_BACKEND=sqlite, ADR-006 D9 safety net)"
+        _refuse_startup(
+            step="db_key",
+            reason="missing_or_empty",
+            detail=(
+                "SCRAPCODE_DB_KEY is unset or empty. The sqlite backend "
+                "(SCRAPCODE_REPO_BACKEND=sqlite) cannot encrypt or decrypt "
+                "guild keys without it. Set SCRAPCODE_DB_KEY to a Fernet "
+                "key (44 url-safe base64 chars, e.g. `python -c \"from "
+                "cryptography.fernet import Fernet; print(Fernet.generate_key()."
+                "decode())\"`), or roll back with SCRAPCODE_REPO_BACKEND=json. "
+                "Refusing to start."
+            ),
         )
-        return JsonClusterRepository()
     if Path(db_path).parent.exists() and not Path(db_path).exists():
-        logger.warning(
-            "SCRAPCODE_DB_PATH=%s missing — falling back to JsonClusterRepository "
-            "for one cycle (SCRAPCODE_REPO_BACKEND=sqlite, ADR-006 D9 safety net)",
-            db_path,
+        _refuse_startup(
+            step="db_path",
+            reason="missing_file",
+            detail=(
+                f"SCRAPCODE_DB_PATH={db_path} points at a missing file whose "
+                "parent directory exists — the database was deleted or "
+                "corrupted. Restore the file from backup, or point "
+                "SCRAPCODE_DB_PATH at a fresh location to re-create it. "
+                "Refusing to start."
+            ),
         )
-        return JsonClusterRepository()
     from bot.repository_sqlalchemy import SqlAlchemyClusterRepository
     return SqlAlchemyClusterRepository()
 
