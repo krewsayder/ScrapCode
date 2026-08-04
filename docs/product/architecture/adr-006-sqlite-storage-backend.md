@@ -189,6 +189,59 @@ default `sqlite` post-cutover). `=json` is the rollback path; a successful
 cutover cycle leaves the JSON tree untouched (read-only fallback). This is
 the safety mechanism for Slice 04.
 
+> **Amendment (2026-08-04, [ADR-008](adr-008-guild-key-identity-binding.md)
+> remediation slice 07).** D9 as written above reads as standing policy. It
+> was never meant to be: the JSON path is a **transition-period** measure —
+> a backup state in case the SQLite cutover failed — and the operator
+> confirmed on 2026-08-04 that perpetual fallback was not the intent. Two
+> changes follow.
+>
+> **1. The implicit auto-fallback is removed (shipped).** Three startup
+> configurations used to route to `JsonClusterRepository` silently. Only the
+> first was ever a decision:
+>
+> | Configuration | Was | Now |
+> |---|---|---|
+> | `SCRAPCODE_REPO_BACKEND=json` | starts on JSON | **unchanged**, and now announces at WARNING that the guild-key guard is inert |
+> | `backend=sqlite`, `SCRAPCODE_DB_KEY` missing or malformed | fell back to JSON, one WARNING | **refuses to start**, naming the variable and the fix |
+> | `backend=sqlite`, `SCRAPCODE_DB_PATH` file gone (parent exists) | fell back to JSON, one WARNING | **refuses to start**, naming the path |
+>
+> Nobody chose the last two. `backend=sqlite` is an explicit instruction and
+> a deploy that cannot honour it is broken, not degraded — it ran for an hour
+> with quarantine fully inert, alerts firing while contaminated data was
+> written. A first-run path whose parent directory does not yet exist still
+> creates the database; that is a fresh install, not a broken one.
+>
+> **2. The explicit `=json` escape hatch has a sunset condition.** It is
+> retired — the branch deleted from `build_repo`, leaving `SqlAlchemyClusterRepository`
+> as the only backend — when **all** of the following hold:
+>
+> - the SQLite backend has run in production for **30 consecutive days**
+>   with no rollback to `=json`. As of 2026-08-04 the operator reports 1–2
+>   weeks of clean running, so the earliest retirement date is **2026-08-18**
+>   on the 2-week reading, **2026-08-25** on the 1-week reading; take the
+>   later unless the deploy date is pinned more precisely;
+> - a restorable backup of the SQLite database exists and has been verified
+>   by an actual restore, not by the backup timer exiting 0 — the JSON tree
+>   is currently the de-facto backup, and removing the fallback without a
+>   proven replacement trades one risk for a worse one;
+> - `docs/feature/sqlite-backend`'s parity suite still passes against the
+>   production database shape.
+>
+> **Why this is not merely tidiness.** DDD-4 gives the JSON adapter no
+> binding representation, so `guild_key_bindings` has no JSON form: on that
+> path a drifted key is served and `quarantine()` writes nowhere. Every day
+> `=json` remains reachable is a day the guild-key-integrity feature has an
+> off switch. That is acceptable while it is a *deliberate* operator action
+> announced at startup; it is not acceptable as a permanent, silent
+> capability.
+>
+> **What this amendment does NOT change.** The `=json` branch still exists
+> and still works today — this records the condition for removing it, not
+> the removal. Deleting it is its own change with its own test run, because
+> `JsonClusterRepository` is also the second adapter in the parametrised
+> repository contract suite.
+
 ### D10 — `FORUM_CHANNELS` / `MAP_THREADS` seeded into `replay_threads` (resolved deferred decision #5)
 
 The data migration (Slice 03) seeds the `replay_threads` table from the
@@ -242,7 +295,11 @@ class, a factory function). This routes DELIVER to `@nw-software-crafter`
   schema, and thread IDs are no longer hardcoded in runtime code. `api_key`
   is encrypted at rest (D7).
 - **Positive:** rollback is a restart with `SCRAPCODE_REPO_BACKEND=json`
-  (D9); the JSON tree is the read-only fallback for one cycle.
+  (D9); the JSON tree is the read-only fallback for one cycle. *(Transitional
+  — see the D9 amendment of 2026-08-04 for the sunset condition. The implicit
+  auto-fallback on a missing/malformed `SCRAPCODE_DB_KEY` or a missing
+  `SCRAPCODE_DB_PATH` has been removed; those configurations now refuse to
+  start.)*
 - **Negative:** the `ClusterRepository` ABC grows 4 new methods (ADR-007) —
   an interface change the DISCUSS wave did not scope. `JsonClusterRepository`
   must implement them too (returning the existing `{"boss_hits": ...}` dict

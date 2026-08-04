@@ -17,9 +17,23 @@ Three behaviours bite if you reorder the steps:
    (`bot/db/migrations_json_to_sqlite.py`). Without the `set -a` source line in
    step 4 it fails on an empty Fernet key.
 2. **The database must exist before the bot starts.** `build_repo()` in
-   `bot/guilds.py` falls back to JSON (ADR-006 D9 safety net) if
-   `SCRAPCODE_DB_PATH` is missing while its parent directory exists. Promote the
-   DB (step 5) *before* `systemctl start`.
+   `bot/guilds.py` **refuses to start** if `SCRAPCODE_DB_PATH` is missing while
+   its parent directory exists, or if `SCRAPCODE_DB_KEY` is missing or
+   malformed. Promote the DB (step 5) *before* `systemctl start`.
+
+   > **Changed 2026-08-04** (`guild-key-integrity` remediation slice 07, ADR-006
+   > D9 amendment). This step used to say the bot "falls back to JSON (ADR-006
+   > D9 safety net)". It no longer does, and following the old text would leave
+   > you expecting a bot that comes up when it will not. The implicit fallback
+   > was removed because it produced a bot that looked healthy while running an
+   > hour with the guild-key quarantine guard fully inert. The failure message
+   > names the exact variable and the exact fix. A **deliberate**
+   > `SCRAPCODE_REPO_BACKEND=json` still starts — that path is unchanged, and
+   > now announces at WARNING that the guard is inert.
+   >
+   > A trailing `\r` from a Windows-edited `.env` is a real instance of the
+   > malformed-key case and has broken auth on this VM before: check with
+   > `cat -A .env` before suspecting the credentials.
 3. **Promote only on `PASS`.** The migration writes to a temp file; a failed run
    must never land on the production DB path.
 
