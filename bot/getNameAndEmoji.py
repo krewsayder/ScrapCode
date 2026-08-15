@@ -171,6 +171,8 @@ def get_boss_emoji(unit_id: str) -> str:
 
         "necroreanimator":"<:reanimator:1518808922989793290>",
 
+        "necrooverlord":"<:Anuphet:1476714135302443089>",
+
         # ===========================================
 
         "worldkharn": "<:Kharn:1476628049272246435>",
