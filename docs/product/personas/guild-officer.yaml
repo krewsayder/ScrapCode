@@ -1,0 +1,67 @@
+# Persona SSOT — created by feature `dynamic-tier-registry` (DISCUSS 2026-08-15).
+#
+# EVIDENCE STATUS: INFERRED, NOT RESEARCHED.
+#
+# `guild-officer` has been referenced as a secondary persona in jobs.yaml since
+# `guild-key-integrity` (2026-07-31) without ever having a file. This stub
+# closes that gap so the reference resolves. Everything below is derived from
+# the permission tiers and command surfaces present in the codebase — from what
+# an officer CAN do — not from any interview, ticket, or observed behaviour.
+#
+# Treat it accordingly: it is safe to use for command-surface reasoning and
+# unsafe to use for motivation or priority claims. `cluster-admin` is the only
+# incident-grounded persona in this repository.
+
+id: guild-officer
+name: Guild officer
+type: secondary
+count: unknown
+created_by_feature: dynamic-tier-registry
+evidence: inferred-from-permission-tiers
+
+summary: >
+  Holds the officer permission tier. Reads and posts leaderboards for the
+  guild membership. Consumes the data's correctness and completeness without
+  any ability to affect either.
+
+context:
+  access: Discord officer tier only; no VM access, no admin commands
+  relationship_to_admin: >
+    Distinct from cluster-admin, who is a single named operator. Officers are
+    plural, and are the surface that meets the guild membership.
+
+commands_available:
+  - /view_leaderboard
+  - /view_bomb_leaderboard
+  - /view_cluster_leaderboard
+  - /update_leaderboard        # officer tier — update_cog.py:43
+  - /upload_replay
+  - /get_replay
+
+goals:
+  - Post an accurate, complete leaderboard the guild can act on
+  - Recognise the members who performed, on the content they actually ran
+  - Answer "why isn't my run on the board?" without escalating
+
+frustrations:
+  # Inferred from the failure modes in the code, not reported by an officer.
+  - >
+    Cannot fix any cause of a wrong or incomplete board — every remedy needs
+    the admin tier or VM access.
+  - >
+    Has no way to distinguish "no hits at this tier" from "the bot cannot see
+    this tier". Both render as an empty board.
+
+relevance_to_this_feature: >
+  Officers feel the tier gap first and most publicly. They run the view
+  commands, they post the board, and they field the questions from members
+  whose Mythic 3 runs are absent. They are the reason the social dimension of
+  `see-every-tier-my-guild-clears` is real rather than theoretical: a board
+  missing the hardest tier is a public statement about the guild's top-end
+  content, made by someone with no power to correct it.
+
+open_questions:
+  # Answer these before treating this persona as validated.
+  - How many officers exist across the cluster?
+  - Do officers post the board manually, or rely on the live leaderboard channel?
+  - Do they run /update_leaderboard routinely, or only when something looks wrong?

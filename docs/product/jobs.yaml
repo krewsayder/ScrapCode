@@ -133,3 +133,133 @@ jobs:
         destroys history.
     traces_to_feature: guild-key-integrity
     traces_to_stories: [US-003, US-005]
+
+  # -------------------------------------------------------------------------
+  # Feature `dynamic-tier-registry` (DISCUSS 2026-08-15). Grounded in a
+  # confirmed, ongoing production loss: Tacticus shipped a Mythic 3 raid tier
+  # and `tracker.get_tier_key` returns None for `set >= 2`, so every Mythic 3
+  # hit is discarded at ingest by the `continue` at tracker.py:110. The
+  # operator confirmed hits have already been lost. The loss is IRREVERSIBLE —
+  # the guild-raid endpoint serves a rolling window, not season history, so
+  # nothing dropped before the fix can be backfilled from the vendor.
+  #
+  # This is the same failure shape as the wrong-guild-key incident, inverted:
+  # there, bad data was silently written; here, good data is silently dropped.
+  # _CycleReport's own docstring (tasks_cog.py:766) records the lesson — "a
+  # skip that leaves no trace is exactly how a whole-server outage stayed
+  # invisible for three days" — but that instrument counts skipped GUILDS. The
+  # recurrence happened one level down, at entry granularity, where no
+  # instrument exists.
+  # -------------------------------------------------------------------------
+
+  - id: see-every-tier-my-guild-clears
+    type: user-facing
+    statement: >
+      When my guild clears a raid tier the bot has never seen before, I want
+      its hits captured and shown from the first hourly cycle, so I can rank
+      members on the content they are actually running.
+    primary_persona: cluster-admin
+    secondary_personas: [guild-officer]
+    jtbd_skipped: false
+    dimensions:
+      functional: >
+        Capture and render hits for any tier within a tracked rarity, from
+        first observation, without a code release standing between the game
+        and the database.
+      emotional: >
+        Absence of doubt about completeness. `trust-guild-data-provenance`
+        bought absence of doubt about provenance — the numbers are from the
+        right guild. This is the other half: the numbers are all of them. An
+        operator burned once by silence does not fully trust a board that
+        could be silently partial.
+      social: >
+        A board missing the hardest tier in the game reads to members as
+        either the officer not caring about top-end content or the bot being
+        unmaintained. The members affected are precisely the ones clearing the
+        newest content — the guild's strongest players.
+    four_forces:
+      push: >
+        Mythic 3 shipped, the bot discarded every hit, and nothing said so. No
+        error, no log line, no counter. The elapsed window is unrecoverable
+        because the vendor serves a rolling window of recent hits. The bot's
+        only copy of that data was the one it declined to make.
+      pull: >
+        A bot that stores what it does not fully understand and announces the
+        fact. Detection in one hourly cycle, by the bot, rather than by a
+        member asking why their run is missing.
+      anxiety: >
+        That generalising the parser starts ingesting content nobody meant to
+        track — low rarities arrive in far greater volume and would swamp the
+        boards. That a derived label shows the wrong tier name against real
+        damage numbers, which is worse than no board because it looks
+        authoritative. Addressed by D1 (rarity allow-list stays closed) and
+        AC-003.2 (existing labels pinned byte-identical).
+      habit: >
+        The operator assumes silence means nothing happened. Same habit that
+        cost 72 hours in the guild-key incident, and not irrational — it is
+        what a system with no instruments trains you to believe.
+    opportunity:
+      importance: 9
+      satisfaction: 0
+      score: 18
+      note: >
+        Satisfaction is a TRUE zero, not a near-zero. Compare
+        trust-guild-data-provenance (9/1/17), whose note reads "no signal of
+        any kind. Not a weak signal — no signal." This job has that same
+        absence of signal PLUS irreversibility: contaminated rows could be,
+        and were, deleted and re-ingested on 2026-07-31. Discarded rows have
+        no such remedy. Highest opportunity score recorded in this repository.
+    traces_to_feature: dynamic-tier-registry
+    traces_to_stories: [US-001, US-002, US-003, US-005]
+
+  - id: add-a-tier-without-a-release
+    type: user-facing
+    statement: >
+      When the game adds a raid tier, I want the bot to keep working without
+      me editing a Python list and redeploying, so a vendor change does not
+      become an outage I have to notice first.
+    primary_persona: cluster-admin
+    jtbd_skipped: false
+    dimensions:
+      functional: >
+        A new tier flows through parse, storage, label and picker with no
+        hand-edited enumeration anywhere in the path.
+      emotional: >
+        Not being the single point of failure. Today the bot's correctness is
+        coupled to whether one person reads the game's patch notes — a
+        low-grade, permanent obligation.
+      social: >
+        An operator whose bot handles the new tier on day one is ahead of the
+        game; one whose board is missing the newest content is visibly behind
+        it, to exactly the audience that cares most.
+    four_forces:
+      push: >
+        Two hardcoded lists in two files that must agree, with an undocumented
+        off-by-one between them: `Mythic` displays as "Mythic 1", `Mythic_1`
+        as "Mythic 2". Adding a tier means editing config.py:22-30 and
+        tracker.py:9-18 and getting the skew right, and nothing checks it.
+      pull: >
+        One registry, one derivation rule, and a picker that discovers tiers
+        from stored data — so the next tier arrives without ceremony.
+      anxiety: >
+        Discord caps app_commands.Choice lists at 25 per option, so unbounded
+        growth eventually forces autocomplete regardless. A fully automatic
+        picker could surface a garbage tier from one malformed API row —
+        addressed by keeping the registry in the union (AC-006.6) and by
+        reporting malformed_set separately (D2).
+      habit: >
+        Reaching for config.py and editing a list. It has worked twice. It is
+        also why the skew exists — each edit was locally reasonable and the
+        inconsistency accumulated.
+    opportunity:
+      importance: 7
+      satisfaction: 2
+      score: 12
+      note: >
+        Satisfaction is above zero because the manual edit genuinely works and
+        costs minutes. This job is prevention, not triage. Ranked second and
+        scheduled last, both correctly: if only Slice 01 ever ships, job
+        see-every-tier-my-guild-clears is substantially served and this one is
+        not, which is the right way round.
+    traces_to_feature: dynamic-tier-registry
+    traces_to_stories: [US-004, US-006, US-007]
