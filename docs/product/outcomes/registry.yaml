@@ -97,3 +97,127 @@ outcomes:
     keywords: [season, spof, blast-radius, auto_update, fall-through]
     artifact: bot/cogs/tasks_cog.py
     related: [OUT-3]
+
+  # -------------------------------------------------------------------------
+  # Feature `dynamic-tier-registry` — DISTILL 2026-08-15.
+  #
+  # Written by hand for the reason the header gives: `nwave-ai outcomes
+  # register` still fails on its own missing bundled schema.json.
+  #
+  # DESIGN ran `check-delta` against this file and it exited 0 while reporting
+  # "1 outcomes checked, 0 collisions found across 0 outcomes" — a VACUOUS
+  # pass: the five rows above never loaded. The collision check was therefore
+  # performed by hand and recorded in ADR-009. Two related links came out of
+  # it and are set below: OUT-8 shares OUT-2's chokepoint-invariant SHAPE
+  # while guarding a different concept, and OUT-9 shares OUT-5's
+  # skip-with-a-stated-reason shape at a different grain (entries, not guilds).
+  #
+  # Neither is a duplicate. Sharing a shape is what a pattern IS — ADR-001,
+  # ADR-008 and ADR-009 are deliberately the same shape three times — and
+  # collapsing them would lose the thing each one actually guards.
+  # -------------------------------------------------------------------------
+
+  - id: OUT-6
+    kind: specification
+    summary: >-
+      Derive a stored tier key from a raid result. Any tier index within a
+      tracked rarity produces a key; the rarity allow-list stays closed. The
+      previous rule enumerated seven keys and silently discarded anything else,
+      which destroyed every Mythic 3 hit from the day the game shipped the tier
+      until the day this landed.
+    feature: dynamic-tier-registry
+    inputs:
+      - shape: "raw Tacticus entry with `rarity` and `set`"
+    output:
+      shape: "tier key string, or None with a stated reason for the caller to count"
+    keywords: [tier, parse, rarity, ingest, leaderboard, tacticus]
+    artifact: bot/tiers.py
+    related: []
+
+  - id: OUT-7
+    kind: specification
+    summary: >-
+      Derive a display label from a stored tier key, and an order from the key
+      set. Total: a key with no derivable label renders as itself rather than
+      being hidden. Stored keys are frozen, so labels reproduce today's strings
+      exactly — including the off-by-one between key and label, which is a bug
+      that is deliberately preserved because replay rows are keyed by the LABEL.
+    feature: dynamic-tier-registry
+    inputs:
+      - shape: "stored tier key, registered or not"
+    output:
+      shape: "Tier(value, name) — structurally compatible with app_commands.Choice[str]"
+    keywords: [tier, label, ordering, display, override, replay]
+    artifact: bot/tiers.py
+    related: [OUT-6]
+
+  - id: OUT-8
+    kind: invariant
+    summary: >-
+      Raid tier names appear in exactly one module. Every other file derives
+      them. Adding a tier is therefore one edit in one file, asserted on every
+      test run rather than reviewed at the next tier addition — which may be a
+      year away. The rule exempts the permission-tier paths by name, because
+      `tier` names two unrelated concepts and a rule that fires on correct code
+      gets ignored.
+    feature: dynamic-tier-registry
+    inputs:
+      - shape: "the bot/ source tree plus config.py"
+    output:
+      shape: "pass, or the list of modules naming a tier outside the registry"
+    keywords: [chokepoint, tier, architecture, enforcement, boundary, single-source]
+    artifact: tests/acceptance/dynamic-tier-registry/test_architecture_tier_literals.py
+    related: [OUT-2]
+
+  - id: OUT-9
+    kind: invariant
+    summary: >-
+      Every discarded raid result is counted under a stated reason, and the
+      total discarded equals the sum of the per-reason counts. A count that
+      exceeds its reasons means a path exists that discards a result without
+      naming itself. All reasons are emitted even at zero — an absent counter
+      is indistinguishable from one nobody built, which is how the original
+      defect stayed invisible.
+    feature: dynamic-tier-registry
+    inputs:
+      - shape: "one ingest pass over a Tacticus entry list"
+    output:
+      shape: "entries_skipped == sum(entry_skip_counts.values()), all reasons present"
+    keywords: [skip, reason, counter, observability, ingest, invariant]
+    artifact: bot/tracker.py
+    related: [OUT-5]
+
+  - id: OUT-10
+    kind: invariant
+    summary: >-
+      The always-on leaderboard sends exactly one message per tier, ever, and
+      deletes nothing. Holds across every interleaving of refresh, season
+      rollover, tier registration and refused send — not only the enumerated
+      orderings. A second send for one tier orphans the first, permanently and
+      publicly, in a channel every guild member reads.
+    feature: dynamic-tier-registry
+    inputs:
+      - shape: "remembered message ids x registered tiers x stored season, under any command sequence"
+    output:
+      shape: "one send per tier; deleted set empty"
+    keywords: [live-board, reconciliation, idempotent, additive, state-machine, duplicate]
+    artifact: tests/acceptance/dynamic-tier-registry/tier_b/test_live_board_state_machine.py
+    related: [OUT-7]
+
+  - id: OUT-11
+    kind: operation
+    summary: >-
+      Offer the tier picker from the registry unioned with the tiers actually
+      present in stored data, so a tier the game ships needs no code edit, no
+      redeploy and no command re-sync. Never observed-alone, so one malformed
+      row cannot define the tier list and a tier can be selected before its
+      first hit lands. Unmatched text is refused by name, never with an empty
+      board.
+    feature: dynamic-tier-registry
+    inputs:
+      - shape: "typed prefix, plus SELECT DISTINCT tier_key and the registry"
+    output:
+      shape: "at most 25 matching Tier labels; a submitted label resolves to a stored key or is refused"
+    keywords: [autocomplete, picker, tier, discovery, slash-command, union]
+    artifact: bot/cogs/view_cog.py
+    related: [OUT-6, OUT-7]

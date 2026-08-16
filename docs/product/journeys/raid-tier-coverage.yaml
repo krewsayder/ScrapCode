@@ -1,0 +1,221 @@
+# Journey SSOT — created by feature `dynamic-tier-registry` (DISCUSS 2026-08-15).
+# Research depth: lightweight (operator selection). Happy path + error paths;
+# emotional arc recorded as one label per step rather than a full arc map —
+# same convention as guild-key-integrity.
+
+id: raid-tier-coverage
+name: Capture, name and display every raid tier the game ships
+persona: cluster-admin
+secondary_personas: [guild-officer]
+jobs:
+  - see-every-tier-my-guild-clears
+  - add-a-tier-without-a-release
+created_by_feature: dynamic-tier-registry
+
+mental_model:
+  - >
+    "If a tier existed, it would be on the board." False. The board shows what
+    config.TIER_CHOICES enumerates, which is a human artefact, not a
+    reflection of the game.
+  - >
+    "If the bot couldn't handle something, it would error." False. The ingest
+    filter's rejection path is `continue` (tracker.py:110-111).
+  - >
+    "The number in the tier key matches the number in the name." False, and
+    off by one in both rarities: `Mythic_1` displays as "Mythic 2".
+  - >
+    "Adding a tier is a config change." Half true — it is two config changes
+    in two files that must agree, and nothing checks that they do.
+
+happy_path:
+  - step: 1
+    actor: game
+    action: Tacticus ships Mythic 3; guild members clear it
+    output: none — operator unaware
+    emotion: unaware
+
+  - step: 2
+    actor: bot
+    action: Hourly auto_update parses `set=2` and stores it under `Mythic_2`
+    output: >
+      update channel: "🔄 Auto-update complete — Season 107" followed by
+      "🆕 New tier observed: Mythic 3 — 14 hits captured"
+    emotion: alerted
+    artifacts_written: [tier_key, skip_counts_by_reason]
+    note: >
+      The pivot of the journey. This is the moment that does not exist today,
+      and it is the whole of Slice 01: the bot telling the operator something
+      it currently knows and does not say.
+
+  - step: 3
+    actor: cluster-admin
+    action: Runs `/view_leaderboard season:107 tier:"Mythic 3"`
+    output: '🏆 **Season 107 — Mythic 3 Leaderboard**' with the ranked hits
+    emotion: relieved
+    artifacts_read: [tier_key, tier_label]
+
+  - step: 4
+    actor: bot
+    action: Next hourly refresh reconciles the live board
+    output: live channel gains a Mythic 3 message, in tier order
+    emotion: in control
+    artifacts_written: [live_leaderboards.messages]
+
+  - step: 5
+    actor: game
+    action: Ships Mythic 4 at some later date
+    output: picker offers "Mythic 4"; no deploy occurred
+    emotion: unremarkable
+    note: >
+      Deliberately quiet. A solved problem should produce no event at all —
+      same convention as guild-key-integrity step 5.
+
+  - step: 6
+    actor: cluster-admin
+    action: Reads the cycle report at leisure
+    output: skip counts read zero; no ⚠️ line
+    emotion: confident
+
+emotional_arc: [unaware, alerted, relieved, in-control, unremarkable, confident]
+arc_check: >
+  monotonically non-decreasing. Step 2 (alerted) is an increase over step 1
+  (unaware), not a dip — moving from ignorance to awareness is a gain in
+  agency even though the news is unwelcome. Step 5 (unremarkable) follows the
+  guild-key-integrity convention where `unremarkable` sits between
+  `in-control` and `confident`.
+
+error_paths:
+  - id: untracked-rarity-observed
+    trigger: entry rarity outside the {Legendary, Mythic} allow-list
+    detection: allow-list miss
+    recovery: >
+      count by rarity and name it verbatim; do NOT auto-track. Adopting a new
+      rarity is a product decision and must not be made as a side effect of a
+      parser fix (D1).
+    slice: "01"
+
+  - id: malformed-set-field
+    trigger: '`set` missing or not an integer'
+    detection: TypeError / ValueError
+    recovery: count separately from untracked_rarity; report both
+    slice: "01"
+    note: >
+      Load-bearing, in the same way `tacticus-unreachable` was in
+      guild-key-integrity. Collapsing this into untracked_rarity hides a
+      vendor schema change inside a counter that is routinely non-zero —
+      which reproduces the original bug with an instrument attached.
+
+  - id: tier-observed-without-label
+    trigger: stored key absent from the registry
+    detection: derivation yields no sensible label
+    recovery: render the raw key as its own label; never hide the row
+    slice: "02"
+    note: D2's principle applied to the read path.
+
+  - id: choice-limit-exceeded
+    trigger: more than 25 tiers in TIER_CHOICES
+    detection: count at build time
+    recovery: >
+      before Slice 04, fail loudly at startup rather than let Discord silently
+      reject the command sync. After Slice 04, unreachable — autocomplete
+      filters by prefix.
+    slice: "02 → 04"
+
+  - id: live-message-send-fails
+    trigger: Forbidden or rate limit while adding the new tier's message
+    detection: exception from channel.send
+    recovery: >
+      retain existing message ids unchanged, retry next cycle, never
+      duplicate. A partial write that omits an already-sent message causes a
+      duplicate on the next cycle.
+    slice: "03"
+
+  - id: rollover-races-tier-add
+    trigger: season rollover and a new tier in the same cycle
+    detection: stored_season != season
+    recovery: rollover branch sends the full set; reconciliation is a no-op after
+    slice: "03"
+    note: >
+      This is the race that duplicates a live board publicly, in front of
+      every guild member in the channel.
+
+  - id: tier-disappears-from-registry
+    trigger: a tier is removed from the registry
+    detection: registry miss for a stored message_id
+    recovery: leave the message frozen; delete nothing
+    slice: "03"
+    note: >
+      Reconciliation is additive only (D5). Deleting boards automatically on a
+      vendor-shaped input contradicts the persona's stated anti-goal that a
+      problem should stop and wait for a human.
+
+  - id: autocomplete-value-unresolvable
+    trigger: free text matching no tier
+    detection: registry ∪ observed miss
+    recovery: explicit "unknown tier" naming the valid tiers; never an empty board
+    slice: "04"
+    note: >
+      An empty board is indistinguishable from a tier with no hits, which is
+      the ambiguity this feature exists to remove.
+
+shared_artifacts:
+  - name: tier_key
+    source: the registry parse rule (single function)
+    consumers: [ingest, battle_hits, bomb_hits, all render paths]
+    note: >
+      Frozen by D3. The only value ever written to the database. Existing
+      values must parse byte-identically (AC-001.4) or historical rows are
+      orphaned.
+
+  - name: tier_label
+    source: the registry label rule + override table
+    consumers: [TIER_CHOICES, embed titles, replay grouping, live board headers]
+    note: >
+      Must reproduce today's strings exactly (AC-003.2). Replay rows store the
+      LABEL, not the key (replay_cog.py:208), and rendering filters on it
+      (replay_cog.py:54) — so any label change silently drops historical
+      replays out of /get_replay while leaving them in the database.
+
+  - name: tier_order
+    source: the registry ordering rule
+    consumers: [replay_cog.tier_order, live board message order, picker order]
+    note: Legendary before Mythic, numeric suffix ascending (AC-004.6).
+
+  - name: skip_counts_by_reason
+    source: the ingest filter
+    consumers: [structured cycle event, update-channel post]
+    note: >
+      Never collapsed across reasons (D2). The update-channel post is the
+      operator's ONLY reporting surface — the persona has no dashboard and no
+      alerting outside it — so a count written solely to a structured log does
+      not satisfy D2.
+
+  - name: observed_tier_keys
+    source: SELECT DISTINCT tier_key
+    consumers: [autocomplete, slice 04]
+    note: >
+      Unioned with the registry, never used alone (AC-006.6), so one malformed
+      row cannot define the tier list.
+
+  - name: live_leaderboards.messages
+    source: the live leaderboard config row
+    consumers: [reconciliation]
+    note: >
+      Keyed by tier VALUE, not label. Its stability is the second of the three
+      reasons D3 freezes stored keys.
+
+open_to_design:
+  - >
+    Registry module placement. `bot/tiers.py` is the obvious home; `config.py`
+    keeps TIER_CHOICES co-located at the cost of putting a parse rule in a
+    config module.
+  - >
+    Whether the registry is a module-level table or a small class. The ACs
+    constrain behaviour, not shape.
+  - >
+    Where the entry-level skip counters attach. `_CycleReport`
+    (tasks_cog.py:762) is the natural seam, but `process_api_response` returns
+    None today and would need to return counts or accept a collector.
+  - >
+    The Slice 04 tier-object shape satisfying AC-006.3 — a small dataclass
+    exposing .name/.value, or an adapter at the call sites.
