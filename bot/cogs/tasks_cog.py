@@ -663,6 +663,27 @@ class TasksCog(commands.Cog):
                 for tier in TIER_CHOICES:
                     msg_id = message_ids.get(tier.value)
                     if not msg_id:
+                        # A tier added to TIER_CHOICES after this board was set
+                        # up (Mythic 3) has no message here. This used to
+                        # `continue` forever, so the new tier stayed invisible
+                        # until an officer re-ran /set_live_leaderboard —
+                        # which, mid-season, would abandon the existing
+                        # messages members are already watching. Adopt one
+                        # message instead, in place, on the next hourly pass.
+                        try:
+                            msg = await channel.send(contents[tier.value])
+                        except discord.Forbidden:
+                            print(f"[live_leaderboard] No permission to send new tier message in channel {channel_id} ({key})")
+                            break
+                        except Exception as e:
+                            print(f"[live_leaderboard] Error sending new tier message for {tier.value} ({key}): {e}")
+                            continue
+                        # Reassigned, not just mutated: `message_ids` is a
+                        # fresh dict when the config carried no `messages` key
+                        # at all, and mutating that would be lost on save.
+                        message_ids[tier.value] = msg.id
+                        config["messages"] = message_ids
+                        dirty = True
                         continue
                     try:
                         msg = await channel.fetch_message(msg_id)

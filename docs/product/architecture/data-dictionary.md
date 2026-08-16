@@ -176,7 +176,7 @@ Config for pinned leaderboard messages that the bot edits each hour.
 | `<key>` | str | no | — | `_refresh_live_leaderboards`, `admin._config_leaderboards` | `set_live_leaderboard`, `set_live_cluster_leaderboard` | Either `guild:<guild_id>` (per-guild LB) or literal `cluster` (cluster-wide). |
 | `channel_id` | int | no | — | `_refresh_live_leaderboards` | `set_live_leaderboard`/`set_live_cluster_leaderboard` | Discord channel hosting the messages. |
 | `guild_id` | str | yes (cluster has none) | — | `_refresh_live_leaderboards` (per-guild branch) | `set_live_leaderboard` | Present only for `guild:` keys. FK → `guilds.guild_id`. |
-| `messages` | `dict<tier_value, message_id>` | no | `{}` | `_refresh_live_leaderboards` (fetch+edit) | `set_live_*`, `_refresh_live_leaderboards` (rollover rewrites) | Keys are `TIER_CHOICES` values (`Legendary_0..4`, `Mythic`, `Mythic_1`). Values are Discord message IDs. |
+| `messages` | `dict<tier_value, message_id>` | no | `{}` | `_refresh_live_leaderboards` (fetch+edit) | `set_live_*`, `_refresh_live_leaderboards` (rollover rewrites) | Keys are `TIER_CHOICES` values — an **open** set: `Mythic` (index 0, bare) or `<rarity>_<n>` for any tracked rarity and any `n >= 0`. Values are Discord message IDs. A tier added to `TIER_CHOICES` after a board was created has no entry here; `_refresh_live_leaderboards` sends one message for it and adopts the id in place, leaving existing messages untouched. |
 | `season` | int \| null | yes | `null` (legacy) | `_refresh_live_leaderboards` (rollover logic) | `set_live_*`, `_refresh_live_leaderboards` (adopts/rollover) | `null` ⇒ legacy config adopted to current season without spawning new messages. Rollover freezes old messages and writes a fresh set. |
 
 **Migration:** `live_leaderboards` table, PK surrogate, FK `discord_server_id`
@@ -248,7 +248,7 @@ player-per-roster. Written by `bot/tracker.py::process_api_response`.
 | `boss_hits` | dict | no | `{}` | `tracker.load_json`, embeds | `tracker.save_json` | Root. |
 | `<boss_id>` (key) | str | no | — | leaderboard render (`embeds.build_*`), `_refresh_live_leaderboards` | `process_api_response` | Tacticus boss `unitId`. |
 | `<encounter_index>` (key) | str | no | — | render (limit 5 if `"0"` else 1), `LABELS` map | `process_api_response` | `"0"`=Main, `"1"`=Left, `"2"`=Right (config `LABELS`). Determines top-N limit. |
-| `<tier_key>` (key) | str | no | — | render (filtered by chosen tier) | `process_api_response` | `Legendary_0..4`, `Mythic`, `Mythic_1` (`get_tier_key`). |
+| `<tier_key>` (key) | str | no | — | render (filtered by chosen tier) | `process_api_response` | **Open** set (`get_tier_key`): `Mythic` (index 0, bare) or `<rarity>_<n>` for any tracked rarity and any `n >= 0`. The bare-`Mythic` skew is historical and frozen — index 0 of `Legendary` stores as `Legendary_0`. |
 | `damage` | int | no | — | sort key (`-damage`), render | `process_api_response` (from `entry["damageDealt"]`) | Primary sort desc. |
 | `user_id` | str | no | — | display lookup via `get_player_list` | `process_api_response` (from `entry["userId"]`) | FK → `players.tacticus_user_id` (logical). |
 | `completed_on` | str (ISO8601) | no | — | tiebreak sort (earliest first), render | `process_api_response` (from `entry["completedOn"]`) | Secondary sort asc. Pinned by `test_tracker_tiebreak.py`. |
