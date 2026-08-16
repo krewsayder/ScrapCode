@@ -3,26 +3,40 @@ TOP_N = 5
 
 
 def get_tier_key(entry: dict) -> str | None:
+    """Map a raw Tacticus entry to the tier key it is stored under.
+
+    The index is DERIVED, not enumerated. Both branches used to list the tiers
+    that existed when they were written (`Mythic` 0-1, `Legendary` 0-4), so the
+    game shipping Mythic 3 (`set=2`) meant every such hit was discarded here
+    with a bare `continue`. The guildRaid endpoint serves a rolling window, so
+    those hits could never be backfilled. Deriving the suffix means the next
+    tier the game adds is ingested the hour it ships, for either rarity.
+
+    The per-rarity skew is deliberate and MUST NOT be tidied: `Mythic` index 0
+    stores bare (`"Mythic"`) while `Legendary` index 0 stores as
+    `"Legendary_0"`. Historical rows are keyed both ways, and normalising one
+    to the other would orphan every row already written under the old name.
+    Labels are derived from these keys (config.TIER_CHOICES), never the
+    reverse — `bot/cogs/replay_cog.py` stores the LABEL, so a renamed key
+    silently drops history out of `/get_replay`.
+
+    The lower bound stays. `set=-1` parses as an int perfectly well, and
+    dropping the bound would store `"Mythic_-1"` — a row under a name no
+    picker offers and no label rule produces, which is the same silent-loss
+    defect arriving from the other direction.
+    """
     rarity = entry.get("rarity")
     if rarity not in TRACKED_RARITIES:
         return None
-    if rarity == "Mythic":
-        try:
-            tier = int(entry.get("set"))
-            if tier == 0:
-                return "Mythic"
-            if tier == 1:
-                return "Mythic_1"
-        except (TypeError, ValueError):
-            pass
-        return None
     try:
         tier = int(entry.get("set"))
-        if 0 <= tier <= 4:
-            return f"Legendary_{tier}"
     except (TypeError, ValueError):
-        pass
-    return None
+        return None
+    if tier < 0:
+        return None
+    if rarity == "Mythic" and tier == 0:
+        return "Mythic"
+    return f"{rarity}_{tier}"
 
 
 def get_roster_key(entry: dict) -> tuple:
