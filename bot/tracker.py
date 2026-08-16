@@ -1,5 +1,82 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+
 TRACKED_RARITIES = {"Legendary", "Mythic"}
 TOP_N = 5
+
+
+# ---------------------------------------------------------------------------
+# Ingest reporting — RED scaffold (created by DISTILL, feature
+# `dynamic-tier-registry`). DDD-7: `process_api_response` returns an
+# `IngestReport` instead of None, so the caller can count what was thrown away.
+#
+# __SCAFFOLD__: the SHAPE below is real and the tests are written against it;
+# nothing populates it yet. `process_api_response` still returns None until
+# DELIVER. Additive — no existing caller reads a return value, so this breaks
+# nothing while it waits.
+#
+# DESIGN Open Question 2 left the field NAMES to DISTILL; they are pinned here.
+# The one field DEVOPS fixed rather than left open is `tier_keys_written`:
+# TK-2 measures capture latency as `MIN(completed_on)` against the first cycle
+# record carrying the key, and no wording of an AC recovers that after the
+# fact. See devops/upstream-changes.md item 3.
+# ---------------------------------------------------------------------------
+
+__INGEST_REPORT_SCAFFOLD__ = True
+
+
+class SkipReason(Enum):
+    """Why one entry was not written.
+
+    Three reasons, NEVER collapsed into one total (ADR-009 D2). They share an
+    outcome — nothing is stored — and differ in the only thing TK-5 measures.
+    A single counter reading "7 skipped" is a number nobody can act on, which
+    is the defect this feature was opened to fix.
+
+    `UNTRACKED_RARITY` is expected to be non-zero forever: the allow-list is
+    closed on purpose, so every Epic hit the API returns is a deliberate and
+    correct discard. It is watched for NOVELTY (a rarity string nobody has
+    seen), not for volume — do not write an assertion against its count.
+    """
+
+    UNTRACKED_RARITY = "untracked_rarity"
+    MALFORMED_SET = "malformed_set"
+    UNPARSEABLE = "unparseable"
+
+
+@dataclass
+class IngestReport:
+    """What one call to `process_api_response` saw, stored and discarded.
+
+    Folded into `_CycleReport` by the caller and rendered onto the
+    update-channel post. The counters live here rather than in the cog because
+    `bot/tracker.py` is where the decision is made, and a count produced
+    anywhere other than the place that decides is a count that can drift from
+    it.
+    """
+
+    entries_total: int = 0
+    entries_written: int = 0
+    skip_counts: dict[SkipReason, int] = field(default_factory=dict)
+    unrecognised_rarities: set[str] = field(default_factory=set)
+    tier_keys_written: set[str] = field(default_factory=set)
+
+    @property
+    def entries_skipped(self) -> int:
+        raise AssertionError("Not yet implemented — RED scaffold (IngestReport)")
+
+    def counts_by_name(self) -> dict[str, int]:
+        """`{"untracked_rarity": 7, "malformed_set": 0, "unparseable": 0}`.
+
+        ALL THREE KEYS, ALWAYS, even at zero. An absent key is
+        indistinguishable from an unimplemented counter — and the whole feature
+        exists because something that left no trace was assumed not to be
+        happening. It also makes TK-5's equality checkable without a schema
+        lookup. See `docs/product/kpi-contracts.yaml`.
+        """
+        raise AssertionError("Not yet implemented — RED scaffold (IngestReport)")
 
 
 def get_tier_key(entry: dict) -> str | None:
