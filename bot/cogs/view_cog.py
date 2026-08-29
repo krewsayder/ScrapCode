@@ -4,7 +4,13 @@ from discord.ext import commands
 
 from config import TIER_CHOICES
 from bot.permissions import require_tier
-from bot.guilds import load_guilds, get_player_list, repo
+from bot.guilds import (
+    load_guilds,
+    get_player_list,
+    list_leaderboard_flags,
+    leaderboards_enabled,
+    repo,
+)
 from bot.embeds import (
     build_battle_messages,
     build_bomb_messages,
@@ -12,6 +18,26 @@ from bot.embeds import (
     guild_autocomplete,
     encounter_limit,
 )
+
+
+def _disabled_notice(guild_id: str, guild_name: str) -> str:
+    """The refusal shown when a guild's leaderboards are switched off.
+
+    Names the command that undoes it. A bare "disabled" leaves an officer
+    unable to tell a deliberate switch from a bug, which is the same
+    reassuring-but-useless signal the ingest alerts exist to avoid.
+
+    Spelled with the id, not the display name: the parameter is `guild_id`
+    and it is autocompleted on the slug, so a copy-pasted display name fails
+    the lookup at `toggle_leaderboards` and hands the officer a second dead
+    end instead of a way out.
+    """
+    return (
+        f"⏸️ Leaderboards are turned off for **{guild_name}**. "
+        f"Hits are still being recorded — run "
+        f"`/toggle_leaderboards guild_id:{guild_id} enabled:True` to turn them "
+        f"back on."
+    )
 
 
 class ViewCog(commands.Cog):
@@ -48,6 +74,10 @@ class ViewCog(commands.Cog):
         guild_data = guilds.get(guild_id)
         if not guild_data:
             await interaction.followup.send(f"❌ Guild `{guild_id}` not found.")
+            return
+
+        if not leaderboards_enabled(server_id, guild_id):
+            await interaction.followup.send(_disabled_notice(guild_id, guild_data["name"]))
             return
 
         guild_name = guild_data["name"]
@@ -96,6 +126,10 @@ class ViewCog(commands.Cog):
             await interaction.followup.send(f"❌ Guild `{guild_id}` not found.")
             return
 
+        if not leaderboards_enabled(server_id, guild_id):
+            await interaction.followup.send(_disabled_notice(guild_id, guild_data["name"]))
+            return
+
         guild_name = guild_data["name"]
         data = repo.load_bomb_hits(server_id, guild_id, season)
 
@@ -140,8 +174,13 @@ class ViewCog(commands.Cog):
 
         tier_key = tier.value
         merged   = {}
+        # Same exclusion as the hourly cluster board, so the on-demand view and
+        # the live one cannot disagree about who is in the cluster.
+        flags    = list_leaderboard_flags(server_id)
 
         for guild_id, guild_data in guilds.items():
+            if not flags.get(guild_id, True):
+                continue
             data = repo.load_battle_hits(server_id, guild_id, season)
             if not data or not data.get("boss_hits"):
                 continue

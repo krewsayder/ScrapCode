@@ -16,6 +16,7 @@ from bot.guilds import (
     save_capped_state,
     load_live_leaderboards,
     save_live_leaderboards,
+    list_leaderboard_flags,
     repo,
 )
 from bot.obs import emit_structured
@@ -556,6 +557,11 @@ class TasksCog(commands.Cog):
         if not live:
             return
 
+        # One bulk read per server per cycle rather than a lookup per board.
+        # Absent guild reads as enabled — the switch defaults ON so a guild
+        # registered before it existed keeps the behaviour it already had.
+        flags = list_leaderboard_flags(server_id)
+
         to_remove = []
         dirty     = False  # config changed (rollover, season adoption, removals)
 
@@ -579,6 +585,17 @@ class TasksCog(commands.Cog):
                     to_remove.append(key)
                     continue
 
+                if not flags.get(guild_id, True):
+                    # `continue`, NEVER `to_remove.append(key)`. The config is
+                    # the only record of which messages this board owns, so
+                    # discarding it would make re-enabling send a SECOND set
+                    # of messages beside the ones members are already
+                    # watching, with the originals frozen forever. Skipping
+                    # leaves the existing messages in place, stale, and the
+                    # next enabled cycle edits them back to current.
+                    print(f"[live_leaderboard] {guild_id} is disabled, skipping {key}")
+                    continue
+
                 guild_name = guild_data["name"]
                 data = repo.load_battle_hits(server_id, guild_id, season)
 
@@ -599,6 +616,14 @@ class TasksCog(commands.Cog):
             elif key == "cluster":
                 merged = {}
                 for gid, gdata in guilds.items():
+                    # A guild whose leaderboards are off drops out of the
+                    # cluster board too. "Leaderboards off, except the one
+                    # where you are still ranked against everybody" is the
+                    # surprising reading of the switch; this is the whole
+                    # reason the flag lives on `guilds` rather than on a
+                    # single board's config.
+                    if not flags.get(gid, True):
+                        continue
                     data = repo.load_battle_hits(server_id, gid, season)
                     if not data or not data.get("boss_hits"):
                         continue

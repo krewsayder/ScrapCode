@@ -162,6 +162,12 @@ def _a_board_missing_the_new_tier():
     originals = {
         "load_live_leaderboards": lambda server_id: world.live,
         "save_live_leaderboards": world.save,
+        # Every guild enabled — this module's universe is the TIER list
+        # changing underneath a live board, not the on/off switch. Pinned
+        # rather than left to the real wrapper because the real one reads
+        # `clusters/4242/guilds.json`, a directory that exists in this repo:
+        # unpatched, these scenarios would quietly depend on checked-in data.
+        "list_leaderboard_flags": lambda server_id: {GUILD_ID: True},
         "repo": _FakeRepo(),
     }
     saved = {name: getattr(tasks_cog, name) for name in originals}

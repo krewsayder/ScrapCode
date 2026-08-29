@@ -44,6 +44,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -88,6 +89,19 @@ class GuildRow(Base):
     api_key_hmac: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
     role_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     notification_channel_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Whether this guild's leaderboards run at all. A column on `guilds` and
+    # not on `live_leaderboards` deliberately: the switch has to be settable
+    # before a board exists and survive a board being torn down and rebuilt,
+    # neither of which a board-scoped flag can express.
+    #
+    # NOT the DDD-4 hazard `GuildKeyBindingRow` was moved out to avoid, because
+    # this column is NOT reachable from the five-key cog-facing guild dict —
+    # `save_guilds_dict` carries the stored value forward instead of rebuilding
+    # it from the dict (see both adapters). A field threaded through that dict
+    # WOULD be reset to its default by the next unrelated admin command.
+    leaderboards_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("1")
+    )
 
 
 class GuildMemberRoleRow(Base):

@@ -72,6 +72,17 @@ def test_upgrade_creates_the_binding_store_and_touches_no_guild_record(
     reason for existing — would have passed even if the revision DID add a
     column to `guilds`. Found during DELIVER 02-01; see the feature-delta
     `## Wave: DELIVER / [WHY] Upstream Issues`, UD-2.
+
+    THE TARGET IS `0004`, NOT `head`, for the reason
+    `test_downgrade_restores_the_prior_shape_exactly` records below: a target
+    spelled as a moving relationship stops meaning what it meant. This
+    scenario is about THIS FEATURE's revisions being additive to `guilds`, and
+    `head` expressed that only while this feature owned the newest revision.
+    `0005` (`guilds.leaderboards_enabled`) deliberately DOES add a column to
+    `guilds` — permitted because that flag is unreachable from the five-key
+    dict `save_guilds` rebuilds, which is the property DDD-4 actually protects
+    — and against `head` this scenario would have failed while accusing a
+    migration that is in fact clean.
     """
     from alembic import command
 
@@ -79,7 +90,7 @@ def test_upgrade_creates_the_binding_store_and_touches_no_guild_record(
         before = conn.execute("SELECT * FROM guilds ORDER BY guild_id").fetchall()
         guild_cols_before = [r[1] for r in conn.execute("PRAGMA table_info(guilds)")]
 
-    command.upgrade(alembic_config(db_at_previous_head), "head")
+    command.upgrade(alembic_config(db_at_previous_head), "0004")
 
     with sqlite3.connect(db_at_previous_head) as conn:
         tables = {r[0] for r in conn.execute(
