@@ -9,6 +9,7 @@ class Guild:
     api_key: str
     role_id: int
     notification_channel_id: Optional[int] = None
+    leaderboards_enabled: bool = True
     member_role_ids: list[int] = field(default_factory=list)
 
 

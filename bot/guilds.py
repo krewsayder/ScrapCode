@@ -313,6 +313,42 @@ def list_guild_bindings(discord_server_id: int) -> dict[str, GuildBinding]:
     return repo.list_guild_bindings(discord_server_id)
 
 
+# ==========================================
+# PER-GUILD LEADERBOARD SWITCH
+# ==========================================
+
+def set_guild_leaderboards_enabled(discord_server_id: int, guild_id: str,
+                                   enabled: bool) -> None:
+    """Turn one guild's leaderboards on or off.
+
+    The targeted single-column write, in the same shape and for the same
+    reason as `replace_guild_key` above: `save_guilds` rebuilds every guild
+    row and CASCADE-deletes absent ones, which is the wrong tool for flipping
+    one boolean. Raises `KeyError` for an unregistered guild.
+    """
+    repo.set_guild_leaderboards_enabled(discord_server_id, guild_id, enabled)
+
+
+def list_leaderboard_flags(discord_server_id: int) -> dict[str, bool]:
+    """Return {guild_id: leaderboards_enabled} for every registered guild.
+
+    Bulk because the hourly refresh asks for every guild on every cycle, and
+    key-free because answering a question about a boolean must not decrypt an
+    `api_key` into cog scope.
+    """
+    return repo.list_leaderboard_flags(discord_server_id)
+
+
+def leaderboards_enabled(discord_server_id: int, guild_id: str) -> bool:
+    """Whether one guild's leaderboards run. Unknown guild reads as enabled.
+
+    The default is ON in both directions — an absent row and an absent flag
+    both mean "nobody has turned this off" — so a guild registered before the
+    switch existed keeps the behaviour it already had.
+    """
+    return list_leaderboard_flags(discord_server_id).get(guild_id, True)
+
+
 def add_cluster_role(discord_server_id: int, tier: str, role_id: int) -> None:
     cluster = repo.load(discord_server_id)
     existing = cluster.role_tiers.get(tier, [])

@@ -433,9 +433,24 @@ class AdminCog(commands.Cog):
 
     def _config_leaderboards(self, server_id: int) -> discord.Embed:
         live  = load_live_leaderboards(server_id)
+        flags = guild_registry.list_leaderboard_flags(server_id)
         embed = discord.Embed(title="📊 Live Leaderboards", color=discord.Color.blurple())
 
-        if not live:
+        # Guilds switched off are listed even when they have no board at all:
+        # the switch is settable before a board exists, so a config screen that
+        # only walked `live` would show nothing for the one state an officer is
+        # most likely to be confused by. A guild that DOES have a board already
+        # carries a Paused status in its own field below, so it is held back
+        # here rather than saying the same thing twice on one screen.
+        boarded  = {
+            cfg.get("guild_id") for key, cfg in live.items()
+            if key.startswith("guild:")
+        }
+        disabled = sorted(
+            gid for gid, on in flags.items() if not on and gid not in boarded
+        )
+
+        if not live and not disabled:
             embed.description = "No live leaderboards configured."
             return embed
 
@@ -444,9 +459,24 @@ class AdminCog(commands.Cog):
             channel_str = f"<#{channel_id}>" if channel_id else "❌ No channel"
             tier_count  = len(cfg.get("messages", {}))
             label       = "Cluster" if key == "cluster" else key.replace("guild:", "")
+            # A board that is configured but paused reads as healthy on this
+            # screen unless it says otherwise — the silent-success failure the
+            # cycle records exist to prevent, in embed form.
+            paused = key.startswith("guild:") and not flags.get(cfg.get("guild_id"), True)
+            status = "\n**Status:** ⏸️ Paused (`/toggle_leaderboards`)" if paused else ""
             embed.add_field(
                 name=label,
-                value=f"**Channel:** {channel_str}\n**Tiers tracked:** {tier_count}",
+                value=f"**Channel:** {channel_str}\n**Tiers tracked:** {tier_count}{status}",
+                inline=False,
+            )
+
+        if disabled:
+            embed.add_field(
+                name="⏸️ Leaderboards off",
+                value=(
+                    " ".join(f"`{gid}`" for gid in disabled)
+                    + "\nStill ingesting hits; excluded from the cluster board."
+                ),
                 inline=False,
             )
         return embed
@@ -522,6 +552,19 @@ class AdminCog(commands.Cog):
             return
 
         guild_name = guild_data["name"]
+
+        # Refused BEFORE the season call and before a single message is sent:
+        # building a board for a guild whose switch is off would post a full
+        # set of tier messages that the hourly loop then never updates, which
+        # is a dead board wearing a working one's clothes.
+        if not guild_registry.leaderboards_enabled(server_id, guild_id):
+            await interaction.followup.send(
+                f"⏸️ Leaderboards are turned off for **{guild_name}**, so a live "
+                f"board would never update. Run `/toggle_leaderboards` with "
+                f"`enabled: True` first.",
+                ephemeral=True,
+            )
+            return
 
         # THE chokepoint (ADR-008 D3). Season discovery needs the key string
         # and nothing else, so it takes `active_key` — sync, storage-only, no
@@ -658,8 +701,16 @@ class AdminCog(commands.Cog):
             await interaction.followup.send(f"❌ Could not determine current season: {e}", ephemeral=True)
             return
 
+        # The same exclusion the hourly refresh applies. Without it the board
+        # this command posts includes guilds that the FIRST hourly pass then
+        # silently drops — an officer would watch a guild vanish from a board
+        # an hour after setting it up, with nothing to connect that to a switch
+        # somebody flipped days earlier.
+        flags  = guild_registry.list_leaderboard_flags(server_id)
         merged = {}
         for gid, gdata in guilds.items():
+            if not flags.get(gid, True):
+                continue
             data = repo.load_battle_hits(server_id, gid, season)
             if not data or not data.get("boss_hits"):
                 continue
@@ -709,6 +760,63 @@ class AdminCog(commands.Cog):
             ephemeral=True,
         )
 
+    # ==========================================
+    # SLASH COMMAND: TOGGLE_LEADERBOARDS
+    # ==========================================
+
+    @app_commands.command(
+        name="toggle_leaderboards",
+        description="Turn a guild's leaderboards on or off without deleting their configuration.",
+    )
+    @require_tier("officer")
+    @app_commands.describe(
+        guild_id="The guild to switch",
+        enabled="True to run leaderboards, False to pause them",
+    )
+    @app_commands.autocomplete(guild_id=guild_autocomplete)
+    async def toggle_leaderboards(
+        self,
+        interaction: discord.Interaction,
+        guild_id: str,
+        enabled: bool,
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        server_id  = interaction.guild_id
+        guild_data = load_guilds(server_id).get(guild_id)
+        if not guild_data:
+            await interaction.followup.send(f"❌ Guild `{guild_id}` not found.", ephemeral=True)
+            return
+
+        # Through the module for the late binding this cog's import comment
+        # explains, and via the targeted single-column write rather than
+        # `save_guilds` — flipping a boolean must not rewrite a key column or
+        # put a CASCADE within reach.
+        guild_registry.set_guild_leaderboards_enabled(server_id, guild_id, enabled)
+
+        name = guild_data["name"]
+        if enabled:
+            await interaction.followup.send(
+                f"✅ Leaderboards are back on for **{name}**. Existing live boards "
+                f"resume in place on the next hourly update, and the gap fills in "
+                f"from data collected while they were off. No new messages are "
+                f"posted unless the season rolled over during the pause — a "
+                f"rollover starts a fresh set either way, and the old messages "
+                f"stay as the archive of the season that ended.",
+                ephemeral=True,
+            )
+        else:
+            # Say what does NOT stop. An officer who reads this as "the bot has
+            # stopped tracking us" has been given a reason to re-register the
+            # guild, and `/register_guild` overwrites the roster.
+            await interaction.followup.send(
+                f"⏸️ Leaderboards are off for **{name}**. Existing live boards stop "
+                f"updating and are left in place, the guild drops out of the cluster "
+                f"board, and `/view_leaderboard` declines for it.\n"
+                f"Hit ingestion, token-cap pings and key checks all continue — run "
+                f"`/toggle_leaderboards` with `enabled: True` to turn them back on.",
+                ephemeral=True,
+            )
 
     # ==========================================
     # SLASH COMMAND: SET_CLUSTER_ROLE

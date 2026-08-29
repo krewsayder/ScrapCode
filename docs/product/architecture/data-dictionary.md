@@ -88,7 +88,8 @@ One entry per in-game guild. `guild_id` is a short slug produced by
   "api_key":                 "<tacticus api key>",
   "role_id":                 123456789,
   "notification_channel_id": 987654321,
-  "member_role_ids":         [111, 222]
+  "member_role_ids":         [111, 222],
+  "leaderboards_enabled":    true
 }
 ```
 
@@ -99,6 +100,7 @@ One entry per in-game guild. `guild_id` is a short slug produced by
 | `role_id` | int | no | `0` | `guilds.get_guild_by_role` | `guilds.save_guilds` | The Discord "leader" role for this guild. `register_guild` rejects a role already linked to another guild. |
 | `notification_channel_id` | int \| null | yes | `null` | `tasks_cog.cap_detect` (ping target) | `admin_cog.set_ping_channel`, `register_guild` (init `null`), migration `to_cluster_layout` | Channel for token-cap pings. `null`/0 ⇒ player not pinged. |
 | `member_role_ids` | `list<int>` | no | `[]` | `permissions.check_guild_member` | `guilds.add_guild_member_role`, migration `seed_roles` | Discord roles that count as "member" of this guild. Per-guild scoping key for member-tier checks. |
+| `leaderboards_enabled` | bool | no | `true` | `tasks_cog._refresh_live_leaderboards`, `view_cog.view_leaderboard`/`view_bomb_leaderboard`, `admin_cog._config_leaderboards`/`set_live_cluster_leaderboard` | `admin_cog.toggle_leaderboards` (via `guilds.set_guild_leaderboards_enabled`) | Per-guild leaderboard switch. `false` ⇒ live boards stop updating but are left in place, the guild drops out of the cluster board, and `/view_*` declines. Ingestion, token-cap pings and key checks are unaffected. Absent reads as `true`. Read in bulk via `list_leaderboard_flags` (no key decryption); written single-column, never via `save_guilds`. Deliberately absent from the five-key cog-facing guild dict — `save_guilds_dict` carries it forward from storage. |
 
 **Migration:** `guilds` table, PK `(discord_server_id, guild_id)`, FK
 `discord_server_id → clusters`. `member_role_ids` becomes a child table
@@ -109,6 +111,12 @@ ADR-006 D7). Add an `api_key_hmac` column: deterministic HMAC-SHA256 of `api_key
 guild→api_key binding that Fernet's non-deterministic ciphertext cannot enforce
 directly. `guild_id` is the natural key but is a *human-chosen slug* — keep it as a
 unique natural key, not a surrogate PK, unless you also want a surrogate.
+`leaderboards_enabled` is a `BOOLEAN NOT NULL DEFAULT 1` column added by alembic
+`0005`; the server-side default backfills existing rows in place, so the cutover
+is a no-op until an officer runs `/toggle_leaderboards`. Unlike the guild-key
+binding methods this is *not* an ADR-006 D9 degradation — the JSON adapter
+honours it identically, so the setting survives a rollback to
+`SCRAPCODE_REPO_BACKEND=json`.
 
 ### 2.3 Player registrations — `clusters/{id}/player_registrations.json`
 
