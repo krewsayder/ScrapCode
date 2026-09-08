@@ -574,3 +574,228 @@ DESIGN runs, amending it in place is cleaner than chaining a `0006` that
 rewrites a column nobody has.
 
 ---
+
+## Wave: DESIGN / [REF] Scope and Interaction Mode
+
+**Scope: application / components** (operator selection, 2026-09-08).
+System- and domain-architect scopes are intentionally empty, matching
+every prior wave in this repository — `brief.md` §1 pins ScrapCode as a
+single-process bot, and this feature adds one column and one dataclass.
+
+**Interaction mode: propose** — options with trade-offs presented, the
+operator ruled on each.
+
+Quality-attribute priorities, in order: **pattern conformance >
+correctness > operability > maintainability > time-to-market**.
+Conformance leads because it is the operator's stated reason for the wave
+("make sure it follows the patterns we want"), and because the shipped
+divergence is the defect being corrected. Scalability is not a priority
+(ADR-004: one process, one VM).
+
+---
+
+## Wave: DESIGN / [REF] DDD List
+
+| # | Decision | Verdict |
+|---|---|---|
+| DDD-1 | `board_status TEXT NOT NULL DEFAULT 'active'`, values from a `BoardStatus` enum (`active` / `disabled`) | **LOCKED** — mirrors `KeyStatus`; `DISABLED` not `QUARANTINED`, because a quarantine is system-detected and this is only ever human-set |
+| DDD-2 | `load_live_leaderboards` returns `dict[str, LiveBoardConfig]` — a frozen dataclass, signature changed in place | **LOCKED** — a board config is record-shaped, so `GuildBinding` governs, not `load_battle_hits` |
+| DDD-3 | Both adapters materialise `ACTIVE` for a config with no stored status | **LOCKED** — absence is a default *value*, as `load_guild_binding` returns `GuildBinding()` |
+| DDD-4 | Amend Alembic `0005` in place; do not chain `0006` | **LOCKED** — unpushed and undeployed, so no database is at that revision |
+| DDD-5 | The JSON adapter is **not** degraded for this field | **LOCKED** — unlike `key_status`, live-board configs are stored natively there (ADR-006 D9 asymmetry, recorded deliberately) |
+| DDD-6 | Amend the contract-test literal, not the representation | **LOCKED** — reverses the reasoning that produced the shipped shape |
+| DDD-7 | `is_enabled` is a property on `LiveBoardConfig`, not a free function | **LOCKED** — a predicate beside the data can be forgotten; one on the type cannot |
+| DDD-8 | `_refresh_live_leaderboards` stops mutating configs in place | **LOCKED** — consequence of DDD-2; `dataclasses.replace` + rebuilt mapping |
+
+Full decision text, alternatives and consequences:
+[ADR-009](../../product/architecture/adr-009-live-board-status-representation.md).
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis
+
+Every component with overlapping responsibility, classified. **Default is
+EXTEND**; each CREATE NEW carries evidence that extending is impossible or
+produces unacceptable coupling.
+
+| Existing component | File | Overlap | Decision | Justification |
+|---|---|---|---|---|
+| `LiveLeaderboardRow` | `bot/db/models.py:273` | The row this state belongs on | **EXTEND** | One column. A second table would add a join and a CASCADE for no protection — ADR-008 D4's reason for splitting `key_status` out (a `Guild` dataclass round-trip hazard) has no analogue here |
+| `ClusterRepository.load/save_live_leaderboards` | `bot/repository.py:250-253` | The port carrying board configs | **EXTEND** | Signature change, not a new method. ADR-007 removed `get_guild_data_path` rather than leaving a second way to read the same data; a sibling method would rebuild that footgun |
+| `JsonClusterRepository.load/save_live_leaderboards` | `bot/repository.py:641-647` | JSON-side board config I/O | **EXTEND** | Must implement the changed signature so contract tests stay parametrized across both impls and the rollback path stays real (ADR-007 precedent) |
+| `SqlAlchemyClusterRepository.load/save_live_leaderboards` | `bot/repository_sqlalchemy.py:361-410` | SQL-side board config I/O | **EXTEND** | Same |
+| `_refresh_live_leaderboards` | `bot/cogs/tasks_cog.py:553` | The hourly skip decision | **EXTEND** | The skip already exists and is correct; it changes from a free-function call to a property read, and stops mutating configs (DDD-8) |
+| `_set_cluster_board_state` | `bot/cogs/admin_cog.py:769` | Shared handler for both commands | **EXTEND** | Already the single write path; it changes what it writes, not its structure |
+| `_config_leaderboards` | `bot/cogs/admin_cog.py:434` | Renders board state in `/view_config` | **EXTEND** | Reads the property instead of the free function |
+| `live_board_enabled` / `set_live_board_enabled` | `bot/guilds.py:401-434` | The shipped predicate + writer | **ABSORB** | Deleted, not extended. Both collapse into `LiveBoardConfig.is_enabled` and `dataclasses.replace` — DDD-7 exists so the predicate cannot live beside the data |
+| `bot/db/alembic/versions/0005_*` | — | The migration adding the field | **EXTEND** | Amended in place (DDD-4). The native `DROP COLUMN` finding in its docstring is retained — it holds regardless of column type |
+| `GuildBinding` | `bot/repository.py:77` | A frozen config dataclass with a status field | **CREATE NEW** (`LiveBoardConfig`) | Different aggregate entirely: a guild's key→identity binding vs a Discord message set. No field is shared. Reusing it would mean a live board carrying `tacticus_guild_id` and `quarantine_reason`. The **pattern** is reused; the type cannot be |
+| `KeyStatus` | `bot/services/tacticus/guild_client.py:69` | An on/off status enum | **CREATE NEW** (`BoardStatus`) | Its `QUARANTINED` member names a system-detected fault. A board is switched off by a person. Sharing the enum makes an operator action and a detected drift indistinguishable in a log grep — the exact ambiguity this feature exists to end |
+
+Two CREATE NEW decisions, both because the existing type carries domain
+meaning that would become false if reused. Neither is "it's complex".
+
+---
+
+## Wave: DESIGN / [REF] Component Decomposition
+
+| Component (status) | Responsibility | Depends on (inward only) |
+|---|---|---|
+| `BoardStatus` enum (**NEW**) — `bot/services/.../` or `bot/repository.py` | Two members, `active` / `disabled`. Placement follows `KeyStatus`: declared once, the literal duplicated at the storage layer rather than imported (ADR-008 D3 — policy depends on storage, never the reverse) | — |
+| `LiveBoardConfig` frozen dataclass (**NEW**) — `bot/repository.py` | Port-level shape of one `live_leaderboards` row plus its `live_lb_messages`. Carries `is_enabled` as a property. Default instance is **not** meaningful here (unlike `GuildBinding()`) — a board with no channel is not a state the system has | `dataclasses`, `enum` |
+| `bot/repository.py` (**MODIFIED**) | ABC signature change on two methods; `JsonClusterRepository` materialises the default on load | `bot.models` |
+| `bot/repository_sqlalchemy.py` (**MODIFIED**) | Reads/writes `board_status`; always emits it (NOT NULL column) | `bot/db/models.py` |
+| `bot/db/models.py` (**MODIFIED**) | `LiveLeaderboardRow.board_status` replaces the shipped `enabled` | `sqlalchemy` |
+| `bot/db/alembic/versions/0005_*` (**AMENDED**) | Adds `board_status TEXT NOT NULL DEFAULT 'active'` | — |
+| `bot/db/migrations_json_to_sqlite.py` (**MODIFIED**) | `_populate_live_leaderboards` constructs configs rather than passing raw dicts | `bot/repository.py` |
+| `bot/guilds.py` (**MODIFIED**) | The two helper functions are **removed**; wrappers pass configs through | — |
+| `bot/cogs/tasks_cog.py` (**MODIFIED**) | Skip reads the property; rollover and season adoption use `dataclasses.replace` (DDD-8) | `bot.guilds` |
+| `bot/cogs/admin_cog.py` (**MODIFIED**) | Three command paths + `_config_leaderboards` construct and read configs | `bot.guilds` |
+
+No new external integration, no new container, no new dependency.
+
+---
+
+## Wave: DESIGN / [REF] Driving Ports
+
+Unchanged from DISCUSS — this wave alters no user-facing surface. Listed
+for completeness:
+
+| Surface | Type | Tier | Change |
+|---|---|---|---|
+| `/disable_cluster_leaderboard` | slash command | `officer` | none (behaviour identical) |
+| `/enable_cluster_leaderboard` | slash command | `officer` | none |
+| `/view_config config:leaderboards` | slash command | `officer` | none |
+| `/set_live_cluster_leaderboard` | slash command | `officer` | none |
+| `auto_update` hourly loop | background task | — | internal only (DDD-8) |
+
+**The whole DESIGN wave is behaviour-preserving at every driving port.**
+That is the test DELIVER must satisfy: all 13 existing tests stay green
+without amendment to their *assertions*, only to their construction of
+input fixtures.
+
+---
+
+## Wave: DESIGN / [REF] Driven Ports and Adapters
+
+| Driven port | Adapter(s) | Change |
+|---|---|---|
+| `ClusterRepository.load_live_leaderboards` | `JsonClusterRepository`, `SqlAlchemyClusterRepository` | signature → `dict[str, LiveBoardConfig]`; both materialise the default (DDD-3) |
+| `ClusterRepository.save_live_leaderboards` | both | accepts the same mapping |
+| Discord message edit / send | `discord.py` channel objects | none — the skip prevents the call, as shipped |
+
+---
+
+## Wave: DESIGN / [REF] Technology Choices
+
+**No new technology.** Python 3.11+/3.13, SQLAlchemy 2.0 declarative,
+Alembic, aiosqlite, `discord.py` — all already pinned in
+`requirements.txt`. `dataclasses` and `enum` are stdlib.
+
+**Paradigm: OOP — unchanged.** Already pinned in `CLAUDE.md` and ADR-006
+D13. This feature's additions are a frozen dataclass and an enum, which is
+the same shape as `GuildBinding` + `KeyStatus`. Routes DELIVER to
+`@nw-software-crafter`. No change requested to `CLAUDE.md`.
+
+---
+
+## Wave: DESIGN / [REF] Architecture Enforcement
+
+The existing `import-linter` contracts in `pyproject.toml` cover this
+feature unchanged — `bot/cogs/*` must not import `sqlalchemy`,
+`aiosqlite`, `bot.db.*` or `bot.repository_sqlalchemy`, and the new
+dataclass lives in `bot/repository.py`, which cogs already import through
+`bot.guilds`.
+
+One rule is **added**, and it is the one that makes DDD-7 enforceable
+rather than merely intended:
+
+> No module outside `bot/repository.py` may compare a board's status
+> literal. The comparison exists once, inside `LiveBoardConfig.is_enabled`.
+
+This mirrors ADR-008's "cogs never compare `key_status` themselves"
+constraint. It is stated here as an architectural rule; DISTILL owns
+whether it lands as an AST assertion (the `KeyConsumptionSite` precedent)
+or an import-linter contract.
+
+---
+
+## Wave: DESIGN / [REF] Outcome Collision Check
+
+`nwave-ai outcomes check-delta` reported **"0 outcomes checked, 0
+collisions found across 0 outcomes"** — exit 0, but **vacuous**. The
+registry's own header documents this CLI as broken in the installed
+version (`FileNotFoundError` on its bundled `schema.json`), and a check
+that examines zero of five registered rows is not a pass. Performed by
+hand against `docs/product/outcomes/registry.yaml`:
+
+| Candidate | Nearest existing | Verdict |
+|---|---|---|
+| **OUT-6** (operation) pause/resume a live board's refresh | OUT-4 `/update_guild_key` — both are "a slash command that changes one persisted field" | **Distinct.** Different field, different table, no probe, no external call |
+| **OUT-7** (invariant) a disabled board makes zero Discord calls | OUT-3 "a quarantined guild writes zero rows" — same *shape*: "X in state S produces zero writes" | **False positive.** Tier-1 shape match; Tier-2 disambiguates — different subject (Discord API calls vs database rows), different trigger (operator vs detected drift), different artifact. Keywords made distinctive |
+| **OUT-7** | OUT-5 — both constrain `bot/cogs/tasks_cog.py` | **Related, not duplicate.** OUT-5 governs season-discovery blast radius; OUT-7 governs the refresh loop's skip. Linked via `related: [OUT-5]` |
+
+Both rows added to the registry by hand, matching how
+`guild-key-integrity` populated OUT-1…OUT-5 for the same CLI reason.
+
+**Re-run after the registry was populated: `6 outcomes checked, 0
+collisions found`, exit 0.** Non-vacuous this time — the first invocation
+examined zero rows because the delta carried no DESIGN section for the CLI
+to extract candidates from, not because the registry was empty. The CLI
+and the hand-check agree. Recorded because the gate is only meaningful
+when the number it reports is greater than zero, and the first reading of
+this ADR should not have to rediscover that.
+
+A keyword-distinctness check was also run across all seven rows: the two
+new keyword sets share **no** term with any of OUT-1…OUT-5, so the Tier-1
+shape match that OUT-3 triggered by hand will not re-fire for the next
+feature.
+
+---
+
+## Wave: DESIGN / [REF] C4 Diagrams
+
+**System Context (§1) and Container (§4): unchanged.** No new external
+system, no new container, no new dependency — the same disposition
+`guild-key-integrity` recorded.
+
+**Component diagram added** at [c4-diagrams.md §7](../../product/architecture/c4-diagrams.md):
+the live-board control path, showing the two commands and the hourly loop
+converging on one port and one predicate.
+
+---
+
+## Wave: DESIGN / [REF] Open Questions (deferred to DISTILL/DELIVER)
+
+| # | Question | Owner |
+|---|---|---|
+| Q1 | Does the status-comparison rule land as an AST assertion (`KeyConsumptionSite` precedent) or an import-linter contract? | DISTILL |
+| Q2 | Where does `BoardStatus` live — beside `KeyStatus` in the vendor adapter, or in `bot/repository.py` with the dataclass? `KeyStatus` sits in the vendor module because Tacticus owns key lifecycle; nothing external owns board lifecycle, which argues for `bot/repository.py` | DELIVER |
+| Q3 | The 10 ACs with no executable coverage (AC-001.8, AC-002.2/.3/.5, AC-003.1/.2/.3, AC-004.1/.2/.5) — which become scenarios, which become properties? | DISTILL |
+| Q4 | `_refresh_live_leaderboards` currently mutates and relies on a `dirty` flag. With frozen configs, is the flag still the right mechanism or does the rebuilt mapping make it redundant? | DELIVER |
+
+---
+
+## Wave: DESIGN / [REF] Changed Assumptions
+
+### Changed — DISCUSS Shared Artifacts named the field `board_status` as a recommendation
+
+**Original** (`feature-delta.md` § Shared Artifacts, this wave's DISCUSS):
+
+> Column and enum names are a DISCUSS **recommendation**; DESIGN owns the
+> final schema.
+
+**New assumption:** DESIGN confirms `board_status` with `BoardStatus.ACTIVE`
+/ `.DISABLED`. The DISCUSS journey's `open_to_design` entry for this is now
+closed. `docs/product/journeys/cluster-board-control.yaml` is left
+unmodified — its `open_to_design` section is an accurate record of what was
+open *at DISCUSS time*, and rewriting it would erase that.
+
+### No upstream story changes
+
+No user story or acceptance criterion changes as a result of this wave. The
+port change is invisible at every driving port, so
+`docs/feature/cluster-board-control/design/upstream-changes.md` is **not**
+created — there is nothing for the product owner to review.
+
+---

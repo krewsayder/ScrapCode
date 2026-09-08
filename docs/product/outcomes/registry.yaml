@@ -97,3 +97,58 @@ outcomes:
     keywords: [season, spof, blast-radius, auto_update, fall-through]
     artifact: bot/cogs/tasks_cog.py
     related: [OUT-3]
+
+  # ---------------------------------------------------------------------------
+  # Feature `cluster-board-control` (DESIGN 2026-09-08). Added BY HAND for the
+  # same reason OUT-1..OUT-5 were: `nwave-ai outcomes register` fails in the
+  # installed version. `check-delta` additionally reported "0 outcomes checked,
+  # 0 collisions found across 0 outcomes" — exit 0, but it examined none of the
+  # five rows above, so it was treated as a vacuous pass and the collision check
+  # was performed by hand. Findings recorded on each row below.
+  # ---------------------------------------------------------------------------
+
+  - id: OUT-6
+    kind: operation
+    summary: >-
+      Pause and resume a live leaderboard's hourly refresh from Discord. The
+      pause is persisted, survives a restart, and leaves the posted messages,
+      the channel, the message ids and the season entirely untouched — it stops
+      publication, not the board.
+    feature: cluster-board-control
+    inputs:
+      - shape: "no parameters; one cluster board per discord_server_id"
+      - shape: "stored LiveBoardConfig, or absent"
+    output:
+      shape: "ephemeral reply; board_status persisted, or refused when no board is configured"
+    # Deliberately distinct from OUT-4's vocabulary (key-rotation, admin,
+    # update_guild_key). Both are "a slash command that changes one persisted
+    # field", which is a Tier-1 shape match; the contracts differ in field,
+    # table, tier and the absence of any probe or external call here.
+    keywords: [live-leaderboard, board, pause, resume, publication, officer, board_status]
+    artifact: bot/cogs/admin_cog.py
+    related: []
+
+  - id: OUT-7
+    kind: invariant
+    summary: >-
+      A live board whose board_status is `disabled` produces ZERO Discord API
+      calls per refresh cycle — no edit and no send — and its config is not
+      removed, its channel, messages and season unchanged. Holds for every
+      scope key, `cluster` and `guild:{id}` alike.
+    feature: cluster-board-control
+    inputs:
+      - shape: "LiveBoardConfig with board_status, for any scope_key"
+      - shape: "one hourly _refresh_live_leaderboards pass"
+    output:
+      shape: "count of Discord edit+send calls against that board == 0; config present and unchanged"
+    # COLLISION CHECKED against OUT-3 ("a quarantined guild writes zero rows").
+    # Same Tier-1 shape — "X in state S produces zero writes" — resolved as a
+    # false positive at Tier-2: different subject (Discord API calls vs database
+    # rows), different trigger (operator-set vs system-detected drift), different
+    # artifact. Keywords below avoid quarantine/ingestion/contamination entirely
+    # so the shape match does not re-fire for the next feature.
+    keywords: [live-leaderboard, refresh-loop, skip, discord-calls, publication, frozen-messages]
+    artifact: bot/cogs/tasks_cog.py
+    # OUT-5 constrains the same loop (season-discovery blast radius). Related,
+    # not duplicate — they govern different decisions inside it.
+    related: [OUT-5]
