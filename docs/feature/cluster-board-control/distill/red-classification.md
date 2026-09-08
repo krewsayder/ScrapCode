@@ -4,12 +4,13 @@ Output of the pre-DELIVER fail-for-the-right-reason gate, run 2026-09-08.
 DELIVER reads this at PREPARE phase to confirm the RED is genuine.
 
 ```
-45 tests   40 failed   5 passed   0 errors
+57 tests   52 failed   5 passed   0 errors
 ```
 
-*(Was 43/38 before the Final Wave Review Gate. The gate's cross-wave check
-found an untested driving port; the regression scenario for it is the
-2 added tests.)*
+*(43/38 at first run. The Final Wave Review Gate's cross-wave check added a
+regression for an untested driving port (+2), then the operator's two
+decisions added the state-change record and the end-to-end setup coverage
+(+12).)*
 
 **Every failure is an `AssertionError`. Zero `ImportError`, zero
 `ModuleNotFoundError`, zero setup errors.** The suite is RED, not BROKEN, and
@@ -166,16 +167,20 @@ DISCUSS recorded 10 of 22 ACs with no executable coverage. All 22 now have it.
 | AC-004.6 | partially | parametrized over `ScopeKind` |
 | KPI-4 (upgrade pauses nothing) | none | `test_upgrading_the_database_pauses_nothing` — real alembic, raw-SQL seed at revision `0004` |
 
-### Known gap — AC-002.5 has no Tier A scenario
+### Closed — AC-002.5 now has a Tier A scenario
 
-`/set_live_cluster_leaderboard` re-enabling a paused board is asserted only in
-the Tier B model. A Tier A scenario would have to drive the full setup
-command, which issues a live season lookup and posts a full tier set — a
-harness the shipped unit tests also declined to build.
+Was a recorded gap. `/set_live_cluster_leaderboard` re-enabling a paused board
+was asserted only in the Tier B model, on the grounds that driving the full
+setup command needed a season lookup and a complete tier post.
 
-Recorded rather than quietly dropped. DELIVER should either add it or state
-why the Tier B coverage suffices. The behaviour today rests on a comment in
-`admin_cog` and a Tier B rule, which is thinner than the other 21 ACs.
+That harness now exists — it was built for the `/set_live_leaderboard`
+regression the review gate turned up — so the reason to skip stopped applying.
+`test_setting_a_board_up_again_brings_it_back_on` drives the real command
+against both adapters.
+
+The trap it guards is a silent one: setup rebuilds the config from scratch, so
+a stale pause surviving would hand the officer a freshly-posted board that
+never updates — a no-op wearing a success message.
 
 ---
 

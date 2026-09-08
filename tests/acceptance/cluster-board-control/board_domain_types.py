@@ -133,6 +133,18 @@ class DiscordCalls:
 # compares a board's status literal — every other site reads `is_enabled`.
 STATUS_COMPARISON_OWNER = "bot/repository.py"
 
+# The structured record a board's state change must leave behind.
+#
+# Dotted, like every other event this bot emits (`auto_update.cycle`,
+# `guild.key.quarantined`). The name is asserted rather than described because
+# the operator's grep and this test have to break together — a renamed event
+# that only breaks the grep is a dashboard that silently stops returning rows.
+#
+# Emitted on CHANGE, never per cycle: an hourly record would be ~720 entries a
+# month for a single paused board, and a log nobody can skim is a log nobody
+# reads. Operator decision, 2026-09-08.
+BOARD_STATUS_CHANGED_EVENT = "live_board.status.changed"
+
 # Modules that READ whether a board publishes, but must never COMPARE the
 # literal themselves.
 STATUS_READER_MODULES: tuple[str, ...] = (

@@ -24,6 +24,7 @@ import asyncio
 import pytest
 
 from board_domain_types import (
+    BOARD_STATUS_CHANGED_EVENT,
     CHANNEL_ID,
     EARLIER_SEASON,
     SEASON,
@@ -360,6 +361,57 @@ def test_resuming_within_the_same_season_edits_the_board_already_there(
     )
 
 
+@pytest.mark.driving_port
+@pytest.mark.real_io
+def test_setting_a_board_up_again_brings_it_back_on(
+    typed_port, admin_cog, officer, board_channel
+):
+    """AC-002.5, end-to-end. Previously covered only by the Tier B model.
+
+    The gap was recorded rather than closed because driving the full setup
+    command needs a season lookup and a complete tier post. That harness now
+    exists — it was built for the `/set_live_leaderboard` regression the
+    review gate turned up — so the reason to skip this stopped applying.
+
+    The trap it guards is a silent one. Setup rebuilds the config from
+    scratch, so a paused board must come back ON; if a stale pause survived,
+    the officer would get a freshly-posted set of messages that then never
+    update — a no-op wearing a success message, which is this feature's own
+    failure mode arriving from the opposite direction.
+    """
+    import httpx
+
+    from bot import guild_keys
+
+    _seed(typed_port, status=BoardStatus.DISABLED)
+    guilds = {"neuro": {"name": "Neuro", "api_key": "key-for-neuro"}}
+
+    originals = {
+        (admin_cog, "load_guilds"): lambda sid: dict(guilds),
+        (admin_cog, "load_live_leaderboards"): lambda sid: typed_port.load_live_leaderboards(sid),
+        (admin_cog, "save_live_leaderboards"): lambda sid, data: typed_port.save_live_leaderboards(sid, data),
+        (admin_cog, "repo"): _NoRaidRows(),
+        (admin_cog, "get_player_list"): lambda sid, gid: {},
+        (guild_keys, "active_key"): lambda sid, gid: "key-for-neuro",
+        (httpx, "AsyncClient"): lambda *a, **k: _FakeSeasonLookup(),
+    }
+    previous = {(m, t): getattr(m, t) for m, t in originals}
+    try:
+        for (module, target), replacement in originals.items():
+            setattr(module, target, replacement)
+        callback = _find_command(admin_cog, "set_live_cluster_leaderboard")
+        cog = admin_cog.AdminCog.__new__(admin_cog.AdminCog)
+        asyncio.run(callback(cog, officer, channel=board_channel))
+    finally:
+        for (module, target), original in previous.items():
+            setattr(module, target, original)
+
+    assert _stored(typed_port).board_status is BoardStatus.ACTIVE, (
+        "setting the board up again left it paused — the officer would get a "
+        "freshly-posted board that never updates"
+    )
+
+
 @pytest.mark.real_io
 def test_resuming_after_a_rollover_starts_a_fresh_board(
     typed_port, admin_cog, officer, tasks_cog, board_channel
@@ -375,6 +427,97 @@ def test_resuming_after_a_rollover_starts_a_fresh_board(
     assert calls.sent, "a rolled-over resume did not post a fresh set"
     assert not calls.edited, (
         f"a rolled-over resume edited the frozen archive: {calls.edited!r}"
+    )
+
+
+# ===========================================================================
+# US-005 — a pause leaves a trace an operator can find later
+# ===========================================================================
+
+@pytest.mark.kpi
+@pytest.mark.real_io
+@pytest.mark.parametrize(
+    "starting,command,went_from,went_to",
+    [
+        (BoardStatus.ACTIVE, BoardCommand.TURN_OFF, BoardStatus.ACTIVE, BoardStatus.DISABLED),
+        (BoardStatus.DISABLED, BoardCommand.TURN_ON, BoardStatus.DISABLED, BoardStatus.ACTIVE),
+    ],
+    ids=["turned-off", "turned-on"],
+)
+def test_a_state_change_is_recorded_where_an_operator_can_find_it(
+    typed_port, admin_cog, officer, board_events,
+    starting: BoardStatus, command: BoardCommand,
+    went_from: BoardStatus, went_to: BoardStatus,
+):
+    """`/view_config` answers "is it paused NOW". Nothing answers "since when".
+
+    A board paused months ago is exactly the one nobody remembers pausing, and
+    the status line is a point-in-time query a human has to think to run. This
+    record is the only thing that makes the pause reconstructable afterwards.
+
+    Asserted on `record.event` rather than on the rendered line, because
+    `emit_structured` attaches fields via `extra=` so readers need not re-parse
+    JSON. The event NAME is pinned because the operator's grep and this test
+    have to break together.
+    """
+    _seed(typed_port, status=starting)
+    board_events.clear()
+
+    _run_command(admin_cog, command, officer, typed_port)
+
+    records = board_events.named(BOARD_STATUS_CHANGED_EVENT)
+    assert len(records) == 1, (
+        f"expected exactly one {BOARD_STATUS_CHANGED_EVENT} record for a real "
+        f"state change, got {len(records)}"
+    )
+    record = records[0]
+    assert getattr(record, "scope_key", None) == "cluster"
+    assert getattr(record, "from_status", None) == went_from.value
+    assert getattr(record, "to_status", None) == went_to.value
+
+
+@pytest.mark.error
+@pytest.mark.real_io
+@pytest.mark.parametrize("command", list(BoardCommand), ids=lambda c: c.command_name)
+def test_a_no_op_flip_records_nothing(
+    typed_port, admin_cog, officer, board_events, command: BoardCommand
+):
+    """The record follows the CHANGE, not the command.
+
+    A command that changed nothing is not a state change, and recording it
+    would make the log answer "who ran a command" instead of "when did this
+    board's state actually move" — which is the question the record exists for.
+    """
+    _seed(typed_port, status=command.no_op_when)
+    board_events.clear()
+
+    _run_command(admin_cog, command, officer, typed_port)
+
+    assert board_events.named(BOARD_STATUS_CHANGED_EVENT) == [], (
+        "a no-op flip left a state-change record"
+    )
+
+
+@pytest.mark.error
+@pytest.mark.real_io
+def test_an_hour_passing_on_a_paused_board_records_nothing(
+    typed_port, tasks_cog, board_channel, board_events
+):
+    """On change, never per cycle — the operator's explicit call (2026-09-08).
+
+    An hourly record would be roughly 720 entries a month for ONE paused
+    board. A log nobody can skim is a log nobody reads, and this feature
+    already has one failure mode built on a signal nobody looks at.
+    """
+    _seed(typed_port, status=BoardStatus.DISABLED)
+    board_events.clear()
+
+    for _ in range(24):
+        _run_cycle(tasks_cog, typed_port, board_channel)
+
+    assert board_events.named(BOARD_STATUS_CHANGED_EVENT) == [], (
+        "the hourly cycle recorded a state change for a board whose state did "
+        "not change"
     )
 
 

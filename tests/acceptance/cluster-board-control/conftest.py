@@ -150,6 +150,32 @@ def non_officer() -> FakeInteraction:
     return FakeInteraction(is_officer=False)
 
 
+@pytest.fixture
+def board_events(caplog):
+    """Reader over `live_board.*` structured records.
+
+    Asserts on `record.event`, not on the rendered line: `emit_structured`
+    attaches the fields via `extra=` precisely so a reader does not re-parse
+    JSON out of a log message. Same shape as `guild-key-integrity`'s
+    `key_events` fixture, and for the same reason — the operator's grep and
+    these tests have to break together.
+    """
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+
+    class Reader:
+        @staticmethod
+        def named(event: str) -> list:
+            return [r for r in caplog.records if getattr(r, "event", None) == event]
+
+        @staticmethod
+        def clear() -> None:
+            caplog.clear()
+
+    return Reader()
+
+
 # ---------------------------------------------------------------------------
 # Cog access — imported LATE, never at module scope
 # ---------------------------------------------------------------------------

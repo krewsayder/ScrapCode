@@ -483,10 +483,22 @@ features:
           No query answers "which boards are paused, and since when?" A board
           paused months ago leaves no trace outside /view_config, so KPI-3 is
           satisfied for the OFFICER and unsatisfied for the OPERATOR.
-        open_decision: |
-          Emit once per cycle per paused board (720 records/month for one
-          board — noise), or only on state CHANGE (quiet, but a pause that
-          predates the log window is invisible)? State-change is the likely
-          answer, since the pause is an operator action and actions are what
-          this codebase records. DELIVER owns the call.
-        status: open
+        decision: |
+          RESOLVED 2026-09-08 by the operator: emit on state CHANGE, not per
+          cycle. Hourly would be ~720 records a month for one paused board,
+          and a log nobody can skim is a log nobody reads — which is the
+          failure mode this feature already has one of.
+
+          Event name `live_board.status.changed`, dotted like every other
+          event this bot emits. Fields: scope_key, from_status, to_status.
+          Specified by three scenarios under US-005 and pinned by
+          `BOARD_STATUS_CHANGED_EVENT` in the suite's domain types, so the
+          operator's grep and the tests break together.
+        specified_by:
+          - "slice-01-operator-off-switch.feature :: Turning a board off is recorded where an operator can find it"
+          - "slice-01-operator-off-switch.feature :: Turning a board back on is recorded the same way"
+          - "slice-01-operator-off-switch.feature :: Asking for the state a board is already in records nothing"
+          - "slice-01-operator-off-switch.feature :: An hour passing on a paused board records nothing"
+        operator_query: |
+          grep live_board.status.changed discord.log
+        status: specified — implementation is DELIVER's

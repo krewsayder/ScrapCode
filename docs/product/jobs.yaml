@@ -197,4 +197,4 @@ jobs:
         data-corruption incident; it clears the >10 bar on the satisfaction
         term alone.
     traces_to_feature: cluster-board-control
-    traces_to_stories: [US-001, US-002, US-003, US-004]
+    traces_to_stories: [US-001, US-002, US-003, US-004, US-005]

@@ -397,6 +397,36 @@ done (see the slice brief).
 
 ---
 
+### US-005 — Find out when a board was paused, long after the fact
+
+`job_id: control-what-the-cluster-board-publishes` · Slice 01
+
+**Added 2026-09-08, after the Final Wave Review Gate.** Two reviewers found
+the same gap from opposite ends — one that a paused board is invisible in the
+channel, one that it is invisible in the logs — and neither could see the
+other. Together they showed that `/view_config` was the only signal at *both*
+altitudes, which is thinner than D2 assumed when it accepted the in-channel
+invisibility. Operator decision to close it: record on state change.
+
+As a **cluster-admin**, I want a board's pause and resume written to the
+operator log, so that I can find out when a board stopped publishing without
+having been in the room when it happened.
+
+**Elevator Pitch**
+Before: `/view_config` says a board is paused right now; nothing says since when, or by whom. A board paused two months ago is exactly the one nobody remembers pausing, and there is no record to reconstruct it from.
+After: run `grep live_board.status.changed discord.log` → sees one JSON record per change, naming the board, the state it left and the state it entered.
+Decision enabled: The operator can tell whether a board that looks stale was deliberately paused or has failed some other way — which are the same symptom and opposite responses.
+
+**Acceptance criteria**
+- AC-005.1 — Given a real state change, when either command completes, then exactly one `live_board.status.changed` record is emitted naming the scope key and both statuses.
+- AC-005.2 — Given a no-op flip, when the command completes, then **no** record is emitted. The record follows the change, not the command — otherwise the log answers "who ran a command", not "when did the state move".
+- AC-005.3 — Given a paused board, when the hourly cycle runs repeatedly, then **no** record is emitted. On change, never per cycle: ~720 entries a month for one board is how a log stops being read.
+
+*Not in the KPI set.* The record is a means to KPI-3 (a pause is
+discoverable), not a target of its own.
+
+---
+
 ## Wave: DISCUSS / [REF] Story Map
 
 **Backbone:** Configure a live board → **Control whether it publishes** →

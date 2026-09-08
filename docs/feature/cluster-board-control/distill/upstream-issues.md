@@ -105,11 +105,19 @@ command — is the only run that proves a new suite is safe.**
 
 ---
 
-## UI-2 — AC-002.5 has no Tier A scenario
+## UI-2 — AC-002.5 has no Tier A scenario — RESOLVED 2026-09-08
 
-**Severity: low** — one AC of twenty-two rests on Tier B alone.
-**Action needed:** DELIVER either adds the Tier A scenario or records why the
-model-level coverage suffices.
+**Severity: low. CLOSED** — the operator ruled, and the end-to-end scenario
+was added rather than the gap being justified.
+
+The stated reason to skip was harness cost. That reason evaporated when the
+review gate's cross-wave check forced a sibling harness into existence for
+`/set_live_leaderboard`; reusing it made the scenario cheap.
+`test_setting_a_board_up_again_brings_it_back_on` now drives the real command
+against both adapters.
+
+Original entry follows, kept because the reasoning is what changed, not the
+facts.
 
 `/set_live_cluster_leaderboard` bringing a paused board back on is asserted in
 the Tier B state machine (`officer_sets_it_up_again`) and nowhere else. A Tier

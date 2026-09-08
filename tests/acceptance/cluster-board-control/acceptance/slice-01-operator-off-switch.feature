@@ -120,6 +120,48 @@ Feature: An officer can stop the cluster leaderboard publishing, and start it ag
       And the hourly cycle updates it
 
   # -------------------------------------------------------------------
+  # US-005 — a pause leaves a trace an operator can find later
+  #
+  # /view_config answers "is this board paused right now". It cannot answer
+  # "when was it paused, and by whom" — and a board paused months ago is
+  # exactly the one nobody remembers. Recorded when the state CHANGES, not
+  # every hour: an hourly record would be seven hundred entries a month for
+  # one board, which is how a log stops being read.
+  # -------------------------------------------------------------------
+
+  @us-005 @kpi @real-io
+  Scenario: Turning a board off is recorded where an operator can find it
+    Given a configured cluster leaderboard
+    When an officer turns the cluster leaderboard off
+    Then the change is recorded in the operator's log
+      And the record names the board
+      And the record says it went from running to turned off
+
+  @us-005 @kpi @real-io
+  Scenario: Turning a board back on is recorded the same way
+    Given a cluster leaderboard that is turned off
+    When an officer turns the cluster leaderboard on
+    Then the change is recorded in the operator's log
+      And the record says it went from turned off to running
+
+  @us-005 @error @real-io
+  Scenario Outline: Asking for the state a board is already in records nothing
+    Given a cluster leaderboard that is <starting state>
+    When an officer <command> the cluster leaderboard
+    Then nothing is recorded in the operator's log
+
+    Examples:
+      | starting state | command   |
+      | turned off     | turns off |
+      | running        | turns on  |
+
+  @us-005 @error @real-io
+  Scenario: An hour passing on a paused board records nothing
+    Given a cluster leaderboard that is turned off
+    When the hourly cycle runs repeatedly over the following day
+    Then nothing is recorded in the operator's log for that board
+
+  # -------------------------------------------------------------------
   # US-003 — see which boards are off
   #
   # Load-bearing, not cosmetic. Because a pause leaves the posted messages
