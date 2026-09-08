@@ -133,3 +133,68 @@ jobs:
         destroys history.
     traces_to_feature: guild-key-integrity
     traces_to_stories: [US-003, US-005]
+
+  # -------------------------------------------------------------------------
+  # Feature `cluster-board-control` (DISCUSS 2026-09-08). Retrofitted onto a
+  # shipped implementation: the operator asked a diagnostic question about
+  # leaderboard on/off state, the agent answered it by writing code, and this
+  # wave was run afterwards to establish the intent the code should have been
+  # built to. Forces below are taken from that 2026-09-08 exchange, which is
+  # contemporaneous evidence rather than recollection.
+  # -------------------------------------------------------------------------
+
+  - id: control-what-the-cluster-board-publishes
+    type: user-facing
+    statement: >
+      When the cluster leaderboard is showing something I do not want
+      published, I want to stop it updating without tearing it down, so I can
+      control the server's most-read artifact without losing the board or its
+      history.
+    primary_persona: guild-officer
+    secondary_personas: [cluster-admin]
+    jtbd_skipped: false
+    dimensions:
+      functional: >
+        Pause and resume the hourly refresh of a live board as a deliberate,
+        persisted action that survives a restart — without deleting the config
+        and without touching the messages already posted.
+      emotional: >
+        Agency over the bot's most public output. The officer currently has no
+        vocabulary for "stop", only for "replace", and replacing is worse than
+        doing nothing.
+      social: >
+        The cluster board is the one artifact the entire server reads. An
+        officer who cannot stop it publishing something wrong is visibly not in
+        control of the tool they are supposed to own.
+    four_forces:
+      push: >
+        The board has exactly two states today and neither is chosen: it
+        refreshes hourly, or it freezes silently because no key in the cluster
+        could answer the season. The only lever that exists — re-running
+        /set_live_cluster_leaderboard — overwrites the board with a whole new
+        set of messages, so the cheapest way to stop it publishing is also the
+        one that destroys the season's posted history.
+      pull: >
+        One command that stops the board exactly where it is, and one that
+        starts it again — with the posted messages untouched in between.
+      anxiety: >
+        A pause that outlives the memory of setting it: a board that never
+        comes back and nobody remembers why. A pause lost on restart. A pause
+        that turns out to be indistinguishable from a live board, so someone
+        reads stale numbers and acts on them.
+      habit: >
+        Today the officer either leaves the board running or deletes and
+        recreates it. There is no established way to say "off", so nobody
+        reaches for one.
+    opportunity:
+      importance: 7
+      satisfaction: 0
+      score: 14
+      note: >
+        Satisfaction is zero, not low — there is no mechanism of any kind.
+        Importance is 7 rather than the 9 carried by
+        trust-guild-data-provenance because this is a control gap, not a
+        data-corruption incident; it clears the >10 bar on the satisfaction
+        term alone.
+    traces_to_feature: cluster-board-control
+    traces_to_stories: [US-001, US-002, US-003, US-004]

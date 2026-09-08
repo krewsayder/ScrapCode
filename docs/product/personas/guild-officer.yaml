@@ -1,0 +1,97 @@
+# Persona SSOT — created by feature `cluster-board-control` (DISCUSS 2026-09-08).
+#
+# BACKFILL. This persona has been referenced as a secondary since 2026-07-31 by
+# docs/product/jobs.yaml (trust-guild-data-provenance) and by
+# docs/product/journeys/guild-key-integrity.yaml, with no backing file. The
+# dangling reference was found during this feature's Prior Wave Consultation.
+#
+# Grounded in the officer-tier surface area actually present in the codebase
+# and in the permission model (ADR-005), NOT in a research interview. Sections
+# that would require interview evidence are marked `unvalidated` rather than
+# invented — an unvalidated field is a question for the next DISCOVER wave; a
+# fabricated one is a wrong answer that looks like a right one.
+
+id: guild-officer
+name: Guild officer
+type: secondary
+count: unvalidated  # several per cluster; exact number never measured
+created_by_feature: cluster-board-control
+promoted_to_primary_by: cluster-board-control
+
+summary: >
+  Holds the officer permission tier. Runs and reads the leaderboards day to
+  day, owns the live boards, and is the audience for most of what the bot
+  posts. Cannot fix anything about a guild's API key and has no VM access.
+
+context:
+  access: Discord officer tier only — no SSH, no database, no logs
+  surface: >
+    Officer tier gates most of the bot: /view_leaderboard,
+    /view_bomb_leaderboard, /view_cluster_leaderboard, /update_leaderboard,
+    /update_all, /view_config, /set_ping_channel, /set_live_leaderboard,
+    /set_live_cluster_leaderboard, and now the cluster board on/off switch.
+  cadence: >
+    Reads the boards continuously (they are pinned in a channel); acts on them
+    around raid-season boundaries and when something looks wrong.
+
+goals:
+  - Keep the live boards showing numbers the guild can act on
+  - Recognise when a board is not telling the truth, without needing logs
+  - Control what gets published without asking the cluster admin
+
+frustrations:
+  - >
+    Cannot distinguish a live board from a frozen one. Both are just messages
+    sitting in a channel; nothing in Discord says which is which.
+  - >
+    Has no lever between "leave it running" and "replace the whole board".
+    Re-running setup posts a fresh set of messages and abandons the old ones.
+  - >
+    When a guild's key breaks, the officer sees the consequences (a board that
+    stops moving) but can do nothing about the cause — key repair is admin-only.
+
+mental_model:
+  - >
+    "If the board is there, it is current." False whenever the board is paused
+    or frozen. This is the assumption `cluster-board-control` D2 deliberately
+    leaves standing in the channel and answers in /view_config instead.
+  - >
+    "Turning something off means deleting it." Why the disable confirmation
+    states what was NOT done — that the messages remain — as prominently as
+    what was.
+  - >
+    "The cluster board is the whole cluster." Held firmly, and the operator
+    confirmed it on 2026-09-08 when rejecting the option to exclude
+    quarantined guilds' data from the merge.
+
+vocabulary:
+  board: >
+    A live leaderboard — the pinned, auto-updating set of messages. Distinct
+    from a one-shot /view_leaderboard response, which the officer does not
+    call a board.
+  cluster board: the cross-guild merged board, as opposed to a per-guild one
+  # Inherited from cluster-admin.yaml — the same ambiguity applies at this tier
+  guild: >
+    Ambiguous by default. A *Discord* guild (server) and a *Tacticus* guild
+    (in-game) are different things; the codebase distinguishes them as
+    `discord_server_id` vs `guild_id` and user-facing strings should too.
+  season: a Tacticus guild-raid season number (e.g. 106)
+
+decision_rights:
+  - Creates, pauses, resumes and replaces live leaderboards
+  - Sets a guild's token-cap ping channel
+  - Triggers manual leaderboard updates
+  - Reads cluster configuration via /view_config
+
+anti_goals:
+  - >
+    Does not want to be told every hour that a board they deliberately paused
+    is still paused. The hourly summary stays silent about it by design.
+  - unvalidated — no interview evidence for further anti-goals
+
+open_questions:
+  - How many officers exist per cluster, and do they coordinate before pausing
+    a shared board?
+  - Does the officer want a reason recorded against a pause, or is the absence
+    of a reason field correct? DISCUSS 2026-09-08 assumed the latter, on the
+    grounds that an optional reason field is an always-empty one.

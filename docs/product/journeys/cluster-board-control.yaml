@@ -1,0 +1,184 @@
+# Journey SSOT — created by feature `cluster-board-control` (DISCUSS 2026-09-08).
+# Research depth: lightweight (operator selection, matching the precedent set
+# by guild-key-integrity). Happy path + error paths; emotional arc recorded as
+# one label per step rather than a full arc map.
+#
+# Retrofit note: this journey was written AFTER the implementation shipped. It
+# records intended behaviour, not merely observed behaviour — where the two
+# differ, the journey wins and the code is brought to it (feature-delta D3).
+
+id: cluster-board-control
+name: Pause and resume the live cluster leaderboard
+persona: guild-officer
+secondary_personas: [cluster-admin]
+jobs:
+  - control-what-the-cluster-board-publishes
+created_by_feature: cluster-board-control
+
+happy_path:
+  - step: 1
+    actor: guild-officer
+    action: Decides the cluster board should stop publishing
+    output: none
+    emotion: decisive
+    note: >
+      The trigger is deliberately unconstrained. The officer may be repairing a
+      guild key, closing out a season, or simply not wanting new numbers posted
+      yet. The feature does not ask why, and stores no reason — a reason field
+      nobody is required to fill in is a field that is always empty.
+
+  - step: 2
+    actor: guild-officer
+    action: Runs `/disable_cluster_leaderboard`
+    output: >
+      ephemeral: "⛔ The live Cluster leaderboard in #leaderboards has been
+      turned off. The posted messages are left exactly as they are and will
+      stop updating. Run /enable_cluster_leaderboard to resume."
+    emotion: in control
+    artifacts_written: [board_status]
+    note: >
+      The reply states what was NOT done as prominently as what was. An officer
+      who has just turned something off needs to know the board still exists.
+
+  - step: 3
+    actor: bot
+    action: The next hourly cycle reaches the board and skips it
+    output: "update channel: 🔄 Auto-update complete — Season 106 (unchanged)"
+    emotion: unremarkable
+    artifacts_read: [board_status]
+    note: >
+      Ingestion is unaffected — only publication stops. The hourly summary is
+      deliberately identical to a cycle with no paused board; a line announcing
+      the skip every hour is alert fatigue for a state the officer chose.
+
+  - step: 4
+    actor: guild-officer
+    action: Confirms the state later with `/view_config config:leaderboards`
+    output: "Cluster · Status: ⛔ Turned off — messages frozen at the last update"
+    emotion: reassured
+    artifacts_read: [board_status, channel_id, messages]
+    note: >
+      THE PIVOT. Because step 2 left the messages untouched (D2), the channel
+      gives no signal whatsoever — a paused board looks exactly like a live
+      one. This step is the only place the difference is observable, which is
+      why it is a user story and not a nicety.
+
+  - step: 5
+    actor: guild-officer
+    action: Runs `/enable_cluster_leaderboard`
+    output: >
+      ephemeral: "✅ The live Cluster leaderboard in #leaderboards will update
+      again on the next hourly cycle."
+    emotion: in control
+    artifacts_written: [board_status]
+
+  - step: 6
+    actor: bot
+    action: Next cycle refreshes the board in place
+    output: the existing messages update; no new messages are posted
+    emotion: unremarkable
+    note: >
+      Same-season resume edits rather than re-posts. A resume that posted a
+      duplicate set beneath the frozen one would make pausing more destructive
+      than never pausing.
+
+emotional_arc: [decisive, in-control, unremarkable, reassured, in-control, unremarkable]
+arc_check: >
+  monotonically non-decreasing. The two `unremarkable` steps are troughs by
+  design, not dips — a healthy cycle should look exactly as it always has.
+
+error_paths:
+  - id: no-board-configured
+    trigger: either command run when no `cluster` config exists
+    detection: absent scope key
+    recovery: >
+      refuse, naming `/set_live_cluster_leaderboard` as the way to create one,
+      and write nothing
+    note: >
+      A status stored against a board that does not exist would be silently
+      discarded by the next setup, which rebuilds the config from scratch. The
+      refusal says so instead of appearing to work.
+
+  - id: already-in-requested-state
+    trigger: disable on a paused board, or enable on a running one
+    detection: stored status equals the request
+    recovery: report the existing state; do NOT write
+    note: >
+      The write matters as much as the words. `save_live_leaderboards` rewrites
+      every board on the server, so a no-op that saved anyway would be a
+      whole-table rewrite triggered by a command that changed nothing.
+
+  - id: season-rollover-while-paused
+    trigger: the raid season advances between pause and resume
+    detection: stored season != current season on the first cycle after resume
+    recovery: >
+      post a fresh message set; leave the paused season's messages as a frozen
+      archive
+    note: >
+      `season` is deliberately NOT advanced while paused, so the rollover is
+      still detectable on resume. Advancing it would make the resume edit last
+      season's messages with this season's numbers.
+
+  - id: setup-run-on-a-paused-board
+    trigger: "`/set_live_cluster_leaderboard` while the board is disabled"
+    detection: n/a — setup rebuilds the config
+    recovery: the new board is ACTIVE
+    note: >
+      Setting a board up is an unambiguous "I want this board". Carrying a
+      stale pause across it would hand the officer a freshly-posted set of
+      messages that then never update — a silent no-op wearing a success
+      message.
+
+  - id: json-backend-rollback
+    trigger: SCRAPCODE_REPO_BACKEND=json
+    detection: startup probe
+    recovery: >
+      none needed — the status round-trips normally on this path
+    note: >
+      Stated explicitly because the guild-level analogue is DIFFERENT and the
+      asymmetry is otherwise surprising. `key_status` is inert under the JSON
+      adapter (ADR-006 D9 / ADR-008 DDD-4 — that adapter has no binding store).
+      Live board configs, by contrast, are stored natively by the JSON adapter,
+      so this switch is NOT degraded there.
+
+  - id: migration-against-existing-boards
+    trigger: alembic upgrade on a database with configured boards
+    detection: n/a
+    recovery: every pre-existing board upgrades to `active`
+    note: >
+      A schema change that pauses every live board on the cluster is the
+      outage this feature exists to prevent. Non-negotiable, and it is KPI-4.
+
+shared_artifacts:
+  - name: board_status
+    source: live_leaderboards.board_status
+    consumers: [refresh-loop skip decision, /view_config, both new commands]
+    note: >
+      Enum-valued (`active` / `disabled`), always present, materialised to the
+      default on load by BOTH adapters. Modelled on `guilds.key_status` and
+      `GuildBinding` — absence is a default VALUE, never a per-read inference.
+      Scope-agnostic: serves `guild:{id}` rows as readily as `cluster`.
+  - name: channel_id
+    source: live_leaderboards.channel_id
+    consumers: [refresh loop, command confirmations]
+  - name: messages
+    source: live_lb_messages rows
+    consumers: [refresh loop]
+    note: never rewritten by a pause — that is the whole of D2
+  - name: season
+    source: live_leaderboards.season
+    consumers: [rollover detection]
+    note: frozen while paused, so the rollover stays detectable on resume
+
+open_to_design:
+  - >
+    Column and enum member names are a DISCUSS recommendation. DESIGN owns the
+    final schema; the constraint that matters is that the status is an explicit
+    enum-valued field, not an inferred default.
+  - >
+    Whether `load_live_leaderboards` changes signature to return the config
+    dataclass, or gains a sibling method alongside the dict-returning one.
+  - >
+    Whether alembic `0005` (already in the working tree, shipping `enabled
+    BOOLEAN`) is amended in place or superseded by `0006`. Amending is cleaner
+    while it remains undeployed.
