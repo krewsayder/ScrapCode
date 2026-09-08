@@ -57,24 +57,48 @@ That fixes the symptom for this suite and does nothing for the next one.
 
 ### Recommended permanent fix
 
-Pick one, project-wide:
+**CORRECTED 2026-09-08.** This section first recommended option 1 below as
+"the smallest change with the largest effect". That was asserted, not tested.
+It was then tested and it is **wrong** — option 1 does not work on its own.
 
-1. **`--import-mode=importlib` with `consider_namespace_packages`** in
-   `pyproject.toml`. Removes the `sys.path` prepending that causes this
-   entirely. Cheapest, but changes import semantics for every existing test
-   module and needs its own full run to verify.
+1. **`--import-mode=importlib`** in `pyproject.toml`. **DOES NOT WORK ALONE.**
+   Measured: `pytest tests/unit tests/acceptance --import-mode=importlib`
+   fails collection in BOTH existing suites with `ModuleNotFoundError`.
+   importlib mode is precisely the mode that does NOT prepend the test
+   directory to `sys.path` — which is what removes the collision, and also
+   what breaks every bare intra-suite import. There are **24** of them
+   (`from domain_types import`, `from conftest import`,
+   `from tier_b.in_memory_composition import`). It is only viable on top of
+   option 2.
+
 2. **Rename the suite directories to valid identifiers**
-   (`guild_key_integrity`, `sqlite_backend`, `cluster_board_control`) and add
-   `__init__.py`. Makes every module properly namespaced. Touches every
-   `pytest.ini` `pythonpath` and every intra-suite import.
-3. **Mandate unique prefixes per suite** — what this wave did, applied as a
-   convention. Zero infrastructure change, but relies on every future author
-   remembering, and the failure mode is a broken gate rather than an error
-   message.
+   (`guild_key_integrity`, `sqlite_backend`, `cluster_board_control`), add
+   `__init__.py`, and convert the 24 bare imports to fully-qualified ones.
+   Structurally correct — the collision becomes impossible rather than
+   avoided. Cost is real: 4 directories, 24 imports, every `pytest.ini`
+   `pythonpath`, and **21 documentation files** that reference the hyphenated
+   paths (`kpi-contracts.yaml` scenario paths, ADRs, feature-deltas).
 
-Option 1 is the smallest change with the largest effect and is the
-recommendation. It should be its own change with its own test run, exactly as
-UD-10 said.
+3. **Mandate unique module names per suite** — what this wave did. Zero
+   infrastructure change. Its weakness is that it is a convention, and a
+   convention is exactly what failed here: UD-10 wrote one down and the next
+   author (this one) did not know it existed.
+
+4. **Option 3, made executable.** Keep the current structure and add a guard
+   test that scans the test tree for duplicate module basenames across suite
+   directories and fails naming both files. ~20 lines, no churn, and it
+   converts the failure from "a mysterious collection error in code you never
+   touched" into "you added a file whose name already exists over there".
+   Fires in the offending author's own run, at the moment they introduce it.
+
+**Recommendation: option 4 now, option 2 only if the test tree is
+restructured for some other reason.** Option 2 is the better end state and is
+not worth its cost on its own; option 4 removes the trap's teeth for the price
+of a small test, and this codebase already uses guard tests of exactly this
+shape (`test_the_key_consumption_inventory_matches_production`).
+
+Option 1 stays recorded so the next person does not re-derive it and lose the
+same afternoon.
 
 **Until it lands, `pytest tests/unit tests/acceptance` — not the per-suite
 command — is the only run that proves a new suite is safe.**
