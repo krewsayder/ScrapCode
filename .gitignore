@@ -30,3 +30,9 @@ logs/
 # Local review scratch — untracked by design. Reading guides for GitHub PR
 # review, generated per-wave. Not a deliverable; regenerate rather than share.
 review-notes/
+
+# Claude Code session state — agent worktrees, transcripts and local settings.
+# `.claude/worktrees/` holds full checkouts of this repository, so an
+# unignored `.claude/` turns any `git add -A` into a commit containing a
+# second copy of the tree.
+.claude/
