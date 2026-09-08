@@ -370,3 +370,123 @@ features:
       crash-safety, cutover duration) are documented at
       docs/feature/sqlite-backend/devops/kpi-instrumentation.md and are not
       re-derived here. Recorded so this file reads as the complete index.
+
+  cluster-board-control:
+    wave: DISTILL
+    dated: 2026-09-08
+    delta: docs/feature/cluster-board-control/feature-delta.md
+    note: |
+      wave: DISTILL, not DEVOPS — the DEVOPS wave did not run for this feature.
+      The entry is recorded here anyway because this file is the index of what
+      the system promises, and a feature declaring five HARD gates while absent
+      from the index makes the index wrong rather than the feature exempt.
+
+      Added after the Final Wave Review Gate (2026-09-08). Forge's review
+      caught that five HARD KPIs were declared in feature-delta.md with named
+      executable assertions but never registered here — a real violation of
+      this file's own convention, found only because the gate ran.
+
+      NO event_family. This feature emits no structured record. That is itself
+      a finding rather than an omission — see `observability_debt` below.
+
+    kpis:
+      - id: KPI-1
+        statement: Discord calls made against a paused board, per cycle
+        target: 0 edits and 0 sends
+        gate: HARD
+        collection: test-assertion
+        scenario:
+          - "slice-01-operator-off-switch.feature :: A board that is off is never touched by the hourly cycle"
+          - "slice-01-operator-off-switch.feature :: Any board can be turned off, not only the cluster one (2 scopes)"
+        measurement_note: |
+          BOTH counts, never `edited` alone. A pass that deleted the messages
+          and re-sent them satisfies "nothing was edited" while doing exactly
+          what DISCUSS D2 forbids, so `FakeChannel.calls` carries `sent`
+          beside `edited` and `is_silent` requires both empty.
+
+          Also quantified over interleavings by the Tier B state machine
+          (`tier_b_board_status/test_board_status_state_machine.py`), whose
+          `a_disabled_board_is_never_touched` invariant compares the counters
+          against their value when the board last entered the disabled state.
+
+      - id: KPI-2
+        statement: Paused boards that survive a process restart
+        target: 100%
+        gate: HARD
+        collection: test-assertion
+        scenario:
+          - "slice-01-operator-off-switch.feature :: A pause outlives the process"
+        measurement_note: |
+          The restart is modelled as a re-read through the port: the
+          process-wide repository singleton is rebuilt from storage on boot and
+          nothing else survives, so a status that round-trips has survived a
+          restart by construction.
+
+      - id: KPI-3
+        statement: Paused boards distinguishable from running ones without reading logs
+        target: 100% — a status line renders for BOTH states
+        gate: HARD
+        collection: test-assertion
+        scenario:
+          - "slice-01-operator-off-switch.feature :: The configuration view says a board is turned off"
+          - "slice-01-operator-off-switch.feature :: The configuration view says a running board is running"
+        measurement_note: |
+          Load-bearing, not cosmetic. DISCUSS D2 leaves a paused board's posted
+          messages untouched, so a frozen board and a live one are identical in
+          the channel. /view_config is the ONLY surface where they differ.
+
+          The line renders for both states deliberately: absence of a warning
+          must not be the only signal that a board is healthy.
+
+      - id: KPI-4
+        statement: Boards paused as a side effect of the schema migration
+        target: 0
+        gate: HARD
+        collection: test-assertion
+        scenario:
+          - "slice-01-operator-off-switch.feature :: Upgrading the database pauses nothing"
+        measurement_note: |
+          Real alembic against a real database seeded through raw SQL at
+          revision 0004 — setup must not go through the code under test, or a
+          migration under construction would silently reshape its own
+          precondition.
+
+          Operator verification on the VM after deploying this feature:
+            SELECT COUNT(*), COUNT(CASE WHEN board_status IS NULL THEN 1 END)
+            FROM live_leaderboards;
+          must return (N, 0). Note there is no sqlite3 CLI on the deploy host,
+          so run it through the venv python.
+
+      - id: KPI-5
+        statement: Adapter pairs disagreeing on a round-tripped config
+        target: 0
+        gate: HARD
+        collection: test-assertion
+        scenario:
+          - "slice-01-operator-off-switch.feature :: Both ways of storing a board agree about its state (2 states)"
+        measurement_note: |
+          Real JSON tree vs real SQLite, both in tmp_path. This is the KPI that
+          drove ADR-009 DDD-3: the shipped representation omitted the field
+          when true PURELY to keep an exact-equality assertion passing, and
+          DDD-3 holds parity by normalising the default in both adapters
+          instead.
+
+    observability_debt:
+      - id: OD-1
+        raised_by: Final Wave Review Gate, Forge, 2026-09-08
+        finding: |
+          A paused board emits only `print("[live_leaderboard] {key} is turned
+          off, skipping")`. Every other operationally-interesting event in this
+          codebase emits structured JSON via `bot/obs.py::emit_structured` with
+          a dotted event name the KPI queries grep.
+        consequence: |
+          No query answers "which boards are paused, and since when?" A board
+          paused months ago leaves no trace outside /view_config, so KPI-3 is
+          satisfied for the OFFICER and unsatisfied for the OPERATOR.
+        open_decision: |
+          Emit once per cycle per paused board (720 records/month for one
+          board — noise), or only on state CHANGE (quiet, but a pause that
+          predates the log window is invisible)? State-change is the likely
+          answer, since the pause is an operator action and actions are what
+          this codebase records. DELIVER owns the call.
+        status: open

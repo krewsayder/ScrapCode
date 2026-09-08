@@ -117,3 +117,69 @@ The scenario count in the `.feature` file (21 scenarios) and the collected test
 count (43, after backend and parameter expansion) therefore differ by design.
 The `.feature` file stays the human-readable SSOT; the executable spec is free
 to express the same claim with fewer functions.
+---
+
+## UI-4 — DESIGN undercounted the port blast radius, and it hid a driving port
+
+**Severity: high** — found by the Final Wave Review Gate's cross-wave check,
+2026-09-08. Already fixed; recorded because of how it was missed.
+
+DESIGN and the slice brief both stated the DDD-2 blast radius as "4
+config-read sites and 2 write sites". That number counted config-FIELD reads
+(`cfg.get("channel_id")` and friends) and reported them as CALL sites — two
+different measurements. The verified inventory is **5 `load_live_leaderboards`
+call sites and 5 `save_live_leaderboards` call sites**.
+
+The undercount hid a whole driving port. `/set_live_leaderboard` — the
+GUILD-scoped setup command — writes a raw dict literal into the mapping at
+`admin_cog.py:589-596` and saves it, so DDD-2 breaks it. It appeared in no
+component table, no reuse-analysis row and no scenario.
+
+**Why nothing else would have caught it.** The command IS exercised by
+`guild-key-integrity` slices 03 and 05 and by
+`tests/unit/test_leaderboard_season_fall_through.py` — but every one of those
+uses a repository DOUBLE. The write never reaches an adapter, so a type error
+at the port would not surface. Those suites would have stayed green while
+production broke.
+
+**Fixed:** the counts are corrected in ADR-009 and the slice brief, and
+`test_setting_up_a_guild_board_still_stores_something_readable` now drives the
+command against both real adapters. It fails RED with the offending dict in
+the message.
+
+**The transferable lesson:** "measured, not estimated" was written in the
+slice brief beside a number that was measured — just not the thing it claimed
+to measure. A blast-radius figure should name the grep that produced it.
+
+---
+
+## UI-5 — D2's residual risk is larger than DISCUSS assessed (cross-wave)
+
+**Severity: medium** — neither reviewer could see this alone.
+**Action needed:** DELIVER should treat the Slice 01 dogfood as a hard gate.
+
+Two reviewers found the same risk at different altitudes and neither saw the
+other:
+
+- **Eclipse (DISCUSS):** a paused board is visually identical to a live one in
+  the channel. Both mitigations — the ephemeral reply and `/view_config` —
+  require the officer to REMEMBER. It raised the multi-officer case DISCUSS
+  did not consider: Officer A pauses, Officer B reads stale numbers, having
+  never seen the reply.
+- **Forge (DEVOPS):** the skip emits only a `print(...)`, so no query answers
+  "which boards are paused, and since when?"
+
+Together they say something neither says alone: **`/view_config` is the only
+signal at BOTH altitudes.** DISCUSS D2 accepted the in-channel invisibility on
+the grounds that the status line covers it, but the status line is a
+point-in-time query a human must think to run. There is no ambient signal for
+the officer and no queryable record for the operator.
+
+This does not reopen D2 — the operator chose "leave the messages untouched"
+against the banner alternative, twice. It does mean the Slice 01 learning
+hypothesis carries more weight than DISCUSS gave it, and that OD-1 in
+`kpi-contracts.yaml` (structured record on pause) is the cheaper of the two
+available mitigations.
+
+**Recommendation:** treat the dogfood moment as a gate rather than an
+observation, and resolve OD-1 in the same slice.

@@ -4,8 +4,12 @@ Output of the pre-DELIVER fail-for-the-right-reason gate, run 2026-09-08.
 DELIVER reads this at PREPARE phase to confirm the RED is genuine.
 
 ```
-43 tests   38 failed   5 passed   0 errors
+45 tests   40 failed   5 passed   0 errors
 ```
+
+*(Was 43/38 before the Final Wave Review Gate. The gate's cross-wave check
+found an untested driving port; the regression scenario for it is the
+2 added tests.)*
 
 **Every failure is an `AssertionError`. Zero `ImportError`, zero
 `ModuleNotFoundError`, zero setup errors.** The suite is RED, not BROKEN, and
@@ -23,6 +27,7 @@ instead of `LiveBoardConfig` carrying a `BoardStatus`.
 | Count | Failure | Classification |
 |---|---|---|
 | 34 | `the live-board port does not accept/RETURN LiveBoardConfig yet (ADR-009 DDD-2, Slice-01 precursor)` | `MISSING_FUNCTIONALITY` |
+| 2 | `/set_live_leaderboard wrote something the port cannot hand back as a LiveBoardConfig — got dict` | `MISSING_FUNCTIONALITY` |
 | 3 | `alembic head does not add live_leaderboards.board_status yet (ADR-009 DDD-1/DDD-4)` | `MISSING_FUNCTIONALITY` |
 | 1 | Tier B — `Not yet implemented -- RED scaffold` from `LiveBoardConfig.is_enabled` | `MISSING_FUNCTIONALITY` |
 

@@ -200,6 +200,19 @@ Feature: An officer can stop the cluster leaderboard publishing, and start it ag
     Then the decision is read from the board's own configuration
       And no other part of the bot compares the state itself
 
+  # Added 2026-09-08 after the Final Wave Review Gate. The guild-scoped setup
+  # command writes a board into the same store the cluster commands use, so the
+  # representation change reaches it — but it appeared in no component table
+  # and no scenario until the cross-wave check found it. Every test that
+  # touches it elsewhere uses a storage double, so none of them would notice.
+  @us-004 @regression @driving_port @real-io
+  Scenario: Setting up a guild board still stores something the bot can read back
+    Given a registered guild with a usable key
+    When an officer sets up a live leaderboard for that guild
+    Then the stored board can be read back
+      And it reads as running
+      And it names the guild it was set up for
+
   @us-004 @kpi @real-io
   Scenario Outline: Any board can be turned off, not only the cluster one
     Given a <kind> leaderboard that is turned off

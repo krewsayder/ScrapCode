@@ -538,6 +538,85 @@ def _existing(path, label: str):
 
 
 @pytest.mark.infrastructure
+@pytest.mark.driving_port
+@pytest.mark.real_io
+def test_setting_up_a_guild_board_still_stores_something_readable(
+    typed_port, admin_cog, officer, board_channel
+):
+    """Regression guard for a driving port DESIGN undercounted.
+
+    `/set_live_leaderboard` — the GUILD-scoped setup command — writes a raw
+    dict literal into the same mapping the cluster commands use
+    (`admin_cog.py:589-596`) and saves it. DDD-2 changes that mapping to hold
+    `LiveBoardConfig`, so this command breaks, and it appeared in no component
+    table and no scenario.
+
+    Found by the Final Wave Review Gate's cross-wave check on 2026-09-08:
+    DESIGN's blast-radius figure counted config-FIELD reads and reported them
+    as CALL sites, which hid this port entirely.
+
+    NOTHING ELSE WOULD CATCH IT. The command IS exercised by
+    `guild-key-integrity` slices 03 and 05 and by
+    `tests/unit/test_leaderboard_season_fall_through.py` — but every one of
+    those uses a repository double, so the write never reaches an adapter and
+    a type error at the port would not surface. This test drives it against
+    the real store, which is the whole point.
+    """
+    import httpx
+
+    from bot import guild_keys
+
+    guild_id = "neuro"
+    guilds = {guild_id: {"name": "Neuro", "api_key": "key-for-neuro"}}
+
+    originals = {
+        (admin_cog, "load_guilds"): lambda sid: dict(guilds),
+        (admin_cog, "load_live_leaderboards"): lambda sid: typed_port.load_live_leaderboards(sid),
+        (admin_cog, "save_live_leaderboards"): lambda sid, data: typed_port.save_live_leaderboards(sid, data),
+        (admin_cog, "repo"): _NoRaidRows(),
+        (guild_keys, "active_key"): lambda sid, gid: "key-for-neuro",
+        (httpx, "AsyncClient"): lambda *a, **k: _FakeSeasonLookup(),
+    }
+    previous = {(m, t): getattr(m, t) for m, t in originals}
+    try:
+        for (module, target), replacement in originals.items():
+            setattr(module, target, replacement)
+        callback = _find_command(admin_cog, "set_live_leaderboard")
+        cog = admin_cog.AdminCog.__new__(admin_cog.AdminCog)
+        asyncio.run(callback(cog, officer, guild_id=guild_id, channel=board_channel))
+    finally:
+        for (module, target), original in previous.items():
+            setattr(module, target, original)
+
+    stored = typed_port.load_live_leaderboards(SERVER_ID).get(f"guild:{guild_id}")
+
+    assert isinstance(stored, LiveBoardConfig), (
+        "/set_live_leaderboard wrote something the port cannot hand back as a "
+        f"LiveBoardConfig — got {type(stored).__name__}. The guild-scoped setup "
+        "command is in the DDD-2 blast radius."
+    )
+    assert stored.board_status is BoardStatus.ACTIVE
+    assert stored.guild_id == guild_id
+
+
+class _FakeSeasonLookup:
+    """The current-season endpoint `/set_live_leaderboard` calls before writing."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def get(self, url: str, headers: dict | None = None, **kwargs):
+        import httpx
+
+        return httpx.Response(
+            200, json={"season": SEASON}, request=httpx.Request("GET", url)
+        )
+
+
+@pytest.mark.infrastructure
 @pytest.mark.kpi
 @pytest.mark.real_io
 @pytest.mark.parametrize("scope", list(ScopeKind), ids=lambda s: s.name.lower())

@@ -164,11 +164,24 @@ shipped shape.
   been "fixed" into a parity break by the next person who found it surprising.
 - **Positive:** the predicate cannot be bypassed — it is a property on a frozen
   type, not a free function beside the data.
-- **Negative:** the port change touches 4 config-read sites and 2 write sites
-  across `admin_cog` and `tasks_cog`, both adapters, and
+- **Negative:** the port change touches **5 `load_live_leaderboards` call sites
+  and 5 `save_live_leaderboards` call sites**, both adapters, and
   `bot/db/migrations_json_to_sqlite.py`. This is real DELIVER work created by a
   DESIGN decision, and it exists only because the code was written before the
   design.
+
+  **Corrected 2026-09-08, after the Final Wave Review Gate.** This read "4
+  config-read sites and 2 write sites". That number was measured wrong: it
+  counted config-FIELD reads (`cfg.get("channel_id")` and friends) and reported
+  them as CALL sites — two different things. Verified inventory: loads at
+  `admin_cog` 437/589/713/776 and `tasks_cog` 556; saves at `admin_cog`
+  596/723/799, `tasks_cog` 723, and `migrations_json_to_sqlite` 511.
+
+  The undercount hid a whole driving port. `/set_live_leaderboard` — the
+  GUILD-scoped setup command at `admin_cog:589-596` — writes a raw dict literal
+  into the mapping and saves it, so DDD-2 breaks it, and it appeared in no
+  component table and no scenario. DISTILL has since added a regression
+  scenario driving it against the real port.
 - **Negative:** `_refresh_live_leaderboards` must stop mutating configs in
   place. Contained, but it is the loop this feature is most afraid of breaking.
 - **Trade-off:** a sibling ABC method (`load_live_board_configs` alongside the

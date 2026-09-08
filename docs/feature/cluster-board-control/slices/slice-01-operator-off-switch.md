@@ -68,9 +68,17 @@ the representation should be settled before commands are built on it.
 5. Decide `0005`'s fate: amend in place if still undeployed, else chain
    `0006`. DESIGN owns this (feature-delta § Handoff).
 
-**Blast radius** (measured, not estimated): 4 config-field read sites and
-2 write sites across `admin_cog` and `tasks_cog`; both repository
-adapters; `bot/db/migrations_json_to_sqlite.py`.
+**Blast radius** (corrected 2026-09-08 after the Final Wave Review Gate):
+**5 `load_live_leaderboards` call sites** — `admin_cog` 437/589/713/776,
+`tasks_cog` 556 — and **5 `save_live_leaderboards` call sites** —
+`admin_cog` 596/723/799, `tasks_cog` 723,
+`migrations_json_to_sqlite` 511; plus both repository adapters.
+
+The first figure here read "4 config-field read sites and 2 write sites",
+which counted config-FIELD reads and reported them as CALL sites. The
+undercount hid `/set_live_leaderboard` — the guild-scoped setup command,
+which writes a raw dict literal into the mapping at `admin_cog:589-596`
+and will break on the signature change. It now has a regression scenario.
 
 ---
 
