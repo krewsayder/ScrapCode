@@ -1,11 +1,81 @@
 import json
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import NotRequired, Optional, Protocol, TypedDict, runtime_checkable
 
 from bot.models import Cluster, Guild
 from bot.migrations.player_list_migrations import PlayerListMigrator
+
+
+# ---------------------------------------------------------------------------
+# RED SCAFFOLD (created by DISTILL, feature `cluster-board-control`).
+#
+# `BoardStatus` and `LiveBoardConfig` are the ADR-009 target shape. They exist
+# here so the acceptance suite IMPORTS cleanly and fails RED (AssertionError)
+# rather than BROKEN (ImportError) — Mandate 7. DELIVER replaces the scaffold
+# body with the real implementation and removes the marker.
+#
+# `BoardStatus` is declared in full rather than stubbed: it is two constants,
+# and a scaffold that raised on reading a constant would test nothing. The
+# behaviour under construction is `LiveBoardConfig.is_enabled`, and that is
+# what raises.
+# ---------------------------------------------------------------------------
+
+__SCAFFOLD__ = True
+
+
+class BoardStatus(Enum):
+    """Whether a live leaderboard still publishes (ADR-009 DDD-1).
+
+    Mirrors `KeyStatus` — a TEXT column holding these string values, with the
+    literal duplicated at the storage layer rather than imported, because
+    policy depends on storage and never the reverse (ADR-008 D3).
+
+    `DISABLED`, not `QUARANTINED`: a quarantine is a system-detected fault, a
+    disabled board is a person's decision. Collapsing the two would make an
+    operator action and a real fault indistinguishable in a log grep, which is
+    the ambiguity this feature exists to end.
+    """
+
+    ACTIVE = "active"
+    DISABLED = "disabled"
+
+
+@dataclass(frozen=True)
+class LiveBoardConfig:
+    """Port-level shape of one `live_leaderboards` row and its messages.
+
+    Frozen and value-compared, for the reason `GuildBinding` is: the parity
+    contract asserts a config is byte-identical after a save/load round trip
+    through either adapter, and `==` on a frozen dataclass says exactly that.
+
+    UNLIKE `GuildBinding`, the default instance is NOT a meaningful state. A
+    guild with no binding is normal (trust-on-first-use writes it later); a
+    board with no channel is not a state the system has, so `channel_id` is
+    required and there is no `LiveBoardConfig()` sentinel.
+
+    `board_status` defaults to ACTIVE so a config built from storage that
+    predates the column — every board that exists today — is running rather
+    than paused (ADR-009 DDD-3).
+    """
+
+    channel_id: int
+    messages: dict[str, int] = field(default_factory=dict)
+    season: int | None = None
+    guild_id: str | None = None
+    board_status: BoardStatus = BoardStatus.ACTIVE
+
+    @property
+    def is_enabled(self) -> bool:
+        """Whether the hourly cycle should refresh this board.
+
+        THE one comparison (ADR-009 DDD-7). A predicate that sits beside the
+        data can be forgotten by the next call site; one that sits on the type
+        cannot. No module outside this one may compare the status literal.
+        """
+        raise AssertionError("Not yet implemented -- RED scaffold")
 
 
 # ---------------------------------------------------------------------------

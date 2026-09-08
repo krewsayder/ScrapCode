@@ -799,3 +799,210 @@ port change is invisible at every driving port, so
 created — there is nothing for the product owner to review.
 
 ---
+
+## Wave: DISTILL / [REF] Reconciliation
+
+**Reconciliation passed — 0 contradictions.** All five DISCUSS decisions
+checked against all eight DESIGN DDDs. D3 (match the guild-level pattern) is
+*implemented by* DDD-1/2/3 rather than contradicted; DDD-1 confirming
+`board_status` was already recorded as a Changed Assumption in DESIGN.
+
+DEVOPS did not run for this feature. Per the graceful-degradation matrix that
+is a **WARN**, not a block: the project Infrastructure Policy covers every
+port this feature touches, so no default environment matrix was improvised.
+
+**Deliverable type: `application`** — absent from both `.nwave/des-config.json`
+and the global config, no plugin manifest, no root `SKILL.md`. No
+`@nw-plugin-validator`, no `@nw-skill-reviewer`.
+
+---
+
+## Wave: DISTILL / [REF] Test Placement
+
+`tests/acceptance/cluster-board-control/`, matching `sqlite-backend` and
+`guild-key-integrity`.
+
+```
+acceptance/slice-01-operator-off-switch.feature   scenario SSOT (human-readable)
+board_domain_types.py                             Mandate-12 vocabulary + doubles
+conftest.py                                       fixtures ONLY
+pytest.ini                                        suite config + markers
+test_slice_01_operator_off_switch.py              executable spec (Tier A)
+tier_b_board_status/                              Tier B state machine
+```
+
+**Project convention, inherited:** this repository does not use `pytest-bdd`
+(recorded in `docs/architecture/atdd-infrastructure-policy.md`). The
+`.feature` file is the human-readable SSOT; the `test_*.py` module beside it
+is the executable spec, plain pytest + `pytest-asyncio`.
+
+**Deliberate deviation from the skill's suggested layout:** `domain_types.py`
+became `board_domain_types.py`, `tier_b/` became `tier_b_board_status/`, and
+constants + doubles moved out of `conftest.py`. Not preference — the canonical
+names collide across suites and broke the repository's declared gate. See
+[`distill/upstream-issues.md`](distill/upstream-issues.md) UI-1.
+
+---
+
+## Wave: DISTILL / [REF] Infrastructure Policy
+
+`--policy=inherit`. **Zero rows appended, zero soft prompts** — every port
+this feature touches was already recorded:
+
+| Port | Mechanism (inherited) |
+|---|---|
+| Discord slash command | direct callback invocation + interaction double |
+| `@tasks.loop` background task | direct await of the loop body, decorator bypassed |
+| `ClusterRepository` | real adapter, constructed by the test |
+| Alembic CLI | real `upgrade`/`downgrade` against a `tmp_path` DB |
+| `SqlAlchemyClusterRepository` | real SQLite file in `tmp_path` |
+| `JsonClusterRepository` | real JSON tree in `tmp_path` |
+| Discord channel send | `FakeChannel`, capturing text |
+
+---
+
+## Wave: DISTILL / [REF] Scenario List
+
+`acceptance/slice-01-operator-off-switch.feature` — 21 scenarios. Collected
+test count is 43 after backend and parameter expansion; the difference is by
+design (UI-3).
+
+| Scenario | Tags |
+|---|---|
+| An officer turns the cluster board off and is told what survived | `@us-001 @driving_port @real-io` |
+| A board that is off is never touched by the hourly cycle | `@us-001 @kpi @real-io` |
+| Turning a board off changes nothing except the switch | `@us-001 @kpi @real-io` |
+| A pause outlives the process | `@us-001 @kpi @real-io` |
+| Turning off a board that was never set up is refused | `@us-001 @error @driving_port` |
+| Asking for the state a board is already in writes nothing (x2) | `@us-001 @error @driving_port` |
+| Only an officer may change whether the board publishes (x2) | `@us-001 @error @driving_port` |
+| An officer turns the cluster board back on | `@us-002 @driving_port @real-io` |
+| Resuming within the same season edits the board already there | `@us-002 @kpi @real-io` |
+| Resuming after the season rolled over starts a fresh board | `@us-002 @real-io` |
+| Setting a board up again brings it back on | `@us-002 @driving_port @real-io` |
+| The configuration view says a board is turned off | `@us-003 @driving_port @kpi` |
+| The configuration view says a running board is running | `@us-003 @driving_port @kpi` |
+| A board's state is always stated, never left to be inferred (x2) | `@us-003 @driving_port @kpi` |
+| A board's state arrives as a described value, not a bare record | `@us-004 @real-io` |
+| A board's state is one of the named states | `@us-004 @real-io` |
+| A board stored before the switch existed reads as running | `@us-004 @kpi @real-io` |
+| Both ways of storing a board agree about its state (x2) | `@us-004 @kpi @adapter-integration @real-io` |
+| There is exactly one place that decides whether a board publishes | `@us-004 @real-io` |
+| Any board can be turned off, not only the cluster one (x2) | `@us-004 @kpi @real-io` |
+| Upgrading the database pauses nothing | `@us-004 @kpi @real-io @adapter-integration` |
+
+**No `@walking_skeleton` scenario.** DISCUSS locked WS Strategy C (brownfield,
+path already established); Mandate 5's obligation is discharged by
+`docs/feature/sqlite-backend/distill/walking-skeleton.md`. Same disposition as
+`guild-key-integrity`.
+
+---
+
+## Wave: DISTILL / [REF] Adapter Coverage
+
+Mandate 6 — every driven adapter has at least one `@real-io` scenario.
+
+| Adapter | `@real-io` scenario | Covered by |
+|---|---|---|
+| `SqlAlchemyClusterRepository` | YES | every `either_repo[sqlite]` scenario, real SQLite in `tmp_path` |
+| `JsonClusterRepository` | YES | every `either_repo[json]` scenario, real JSON tree in `tmp_path` |
+| Alembic migration | YES | "Upgrading the database pauses nothing" — real `upgrade`, raw-SQL seed at revision `0004` |
+| Discord channel (send/edit) | YES | `FakeChannel` per the Infrastructure Policy — Discord is a driven *external* port, so a double is the recorded default, not a shortcut |
+
+Zero `NO — MISSING` rows.
+
+---
+
+## Wave: DISTILL / [REF] Driving Adapter Coverage
+
+| Entry point (from DESIGN) | Exercised by |
+|---|---|
+| `/disable_cluster_leaderboard` | 5 scenarios, via the real app-command callback |
+| `/enable_cluster_leaderboard` | 5 scenarios, same |
+| `/view_config config:leaderboards` | 2 scenarios, via `_config_leaderboards` |
+| `/set_live_cluster_leaderboard` | Tier B only — **gap, recorded as UI-2** |
+| `auto_update` hourly loop | 6 scenarios, via direct await of `_refresh_live_leaderboards` |
+
+`_find_command` resolves each command off `AdminCog.__cog_app_commands__`
+rather than calling the method directly: delete the command decorator and the
+harness errors, which is the port-to-port litmus test.
+
+---
+
+## Wave: DISTILL / [REF] Two-Tier Composition
+
+**Tier A + Tier B.**
+
+Tier B is included on the **state-machine trigger**, not the strict Mandate-10
+test — and the deviation is deliberate. Mandate 10 wants a 3-or-more-scenario
+journey AND a domain-rich input space; this feature has the first and not the
+second (two commands, two scope kinds, a season number). The state-machine
+trigger is a different question — "can the SUT be described by a state-machine
+model with command/postcondition pairs" — and board status plainly can:
+`{active, disabled}` x `{turn off, turn on, set up, hourly cycle}`.
+
+What decided it is what the property buys. AC-001.2 is a HARD KPI gate and the
+whole feature rests on it. An example proves it for one interleaving; the
+machine proves it for all of them, including interleavings nobody enumerated —
+turning a board off in the same cycle as a season rollover, for one.
+
+`tier_b_board_status/in_memory_composition.py` documents what it **cannot**
+model: storage (no adapter, so parity and the migration are Tier A's ground),
+Discord transport (counters, not API calls), and concurrency (one cycle at a
+time; the two hourly loops firing together is modelled nowhere in this
+feature).
+
+Shared vocabulary: every `@rule` invokes a `Given_`/`When_`/`Then_` method
+that exists on `InMemoryComposition` with the same name the Tier A spec uses.
+
+---
+
+## Wave: DISTILL / [REF] Scaffolds
+
+Mandate 7 — RED, not BROKEN.
+
+| Scaffold | Location | Marker |
+|---|---|---|
+| `BoardStatus` | `bot/repository.py` | `__SCAFFOLD__ = True` |
+| `LiveBoardConfig` | `bot/repository.py` | same |
+
+`BoardStatus` is declared in full rather than stubbed: it is two constants,
+and a scaffold that raised on reading a constant would test nothing. The
+behaviour under construction is `LiveBoardConfig.is_enabled`, and that is what
+raises `AssertionError`.
+
+Placement follows DESIGN open question Q2's leaning — beside `GuildBinding` in
+`bot/repository.py`, since nothing external owns board lifecycle the way
+Tacticus owns key lifecycle. DELIVER may still move it.
+
+Verified additive: the pre-existing suites remain at **exactly 353 passed**.
+
+---
+
+## Wave: DISTILL / [REF] Pre-DELIVER Gate
+
+```
+43 tests   38 failed   5 passed   0 errors
+```
+
+**Every failure is an `AssertionError`.** Zero import errors, zero setup
+failures. Full classification, the 5 legitimate `GREEN_BY_DESIGN` passes, and
+the three test bugs the gate caught:
+[`distill/red-classification.md`](distill/red-classification.md).
+
+**Verdict: PASS — cleared for DELIVER.**
+
+All 22 ACs now have executable coverage; DISCUSS recorded 10 with none.
+
+---
+
+## Wave: DISTILL / [REF] Pre-requisites
+
+| Dependency | Why |
+|---|---|
+| DESIGN driving ports | the five surfaces the scenarios enter through |
+| `docs/architecture/atdd-infrastructure-policy.md` | every port mechanism, inherited unchanged |
+| Alembic revision `0004` | `db_before_the_switch` pins it absolutely, never as a distance from head |
+| `hypothesis` | Tier B; `importorskip`-guarded, as `guild-key-integrity` does |
+
+---
