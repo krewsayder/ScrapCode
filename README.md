@@ -90,6 +90,8 @@ Discord `Administrator` permission always bypasses tier checks and is used to bo
 | `/set_ping_channel` | Set the channel where token cap notifications are posted for a guild | `guild_id` (autocomplete), `channel` |
 | `/set_live_leaderboard` | Set up a Battle leaderboard in a channel that auto-updates every hour | `guild_id` (autocomplete), `channel` |
 | `/set_live_cluster_leaderboard` | Set up a cluster-wide leaderboard in a channel that auto-updates every hour | `channel` |
+| `/disable_cluster_leaderboard` | Stop the live cluster leaderboard updating. The posted messages are left in place, frozen at the last update | — |
+| `/enable_cluster_leaderboard` | Resume hourly updates of the live cluster leaderboard | — |
 | `/update_leaderboard` | Fetch raid data from Tacticus API and update local records for one guild | `guild_id` (autocomplete), `season` |
 | `/update_all` | Fetch raid data for all registered guilds and update local records | `season` |
 | `/view_leaderboard` | View top Battle damage leaderboard for a guild and tier | `guild_id` (autocomplete), `season`, `tier` |

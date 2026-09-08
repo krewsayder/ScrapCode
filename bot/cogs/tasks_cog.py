@@ -16,6 +16,7 @@ from bot.guilds import (
     save_capped_state,
     load_live_leaderboards,
     save_live_leaderboards,
+    live_board_enabled,
     repo,
 )
 from bot.obs import emit_structured
@@ -560,6 +561,16 @@ class TasksCog(commands.Cog):
         dirty     = False  # config changed (rollover, season adoption, removals)
 
         for key, config in live.items():
+            if not live_board_enabled(config):
+                # Turned off by an operator. Nothing is edited, nothing is
+                # sent, and the config is NOT removed — the posted messages
+                # stay in the channel exactly as they were, and `season` is
+                # deliberately left at the value it had when the board was
+                # paused so a re-enable after a rollover posts a fresh set
+                # rather than editing last season's archive.
+                print(f"[live_leaderboard] {key} is turned off, skipping")
+                continue
+
             channel_id  = config.get("channel_id")
             message_ids = config.get("messages", {})
             channel     = self.bot.get_channel(channel_id)

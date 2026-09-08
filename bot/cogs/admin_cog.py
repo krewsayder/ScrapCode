@@ -17,6 +17,8 @@ from bot.guilds import (
     load_guild_binding,
     load_live_leaderboards,
     save_live_leaderboards,
+    live_board_enabled,
+    set_live_board_enabled,
     load_player_list,
     add_cluster_role,
     add_guild_member_role,
@@ -444,9 +446,22 @@ class AdminCog(commands.Cog):
             channel_str = f"<#{channel_id}>" if channel_id else "❌ No channel"
             tier_count  = len(cfg.get("messages", {}))
             label       = "Cluster" if key == "cluster" else key.replace("guild:", "")
+            # A board that is off looks identical to a running one in the
+            # channel — the messages are still there, holding the last
+            # refresh. This line is the only place an officer can tell the
+            # difference, so it is never omitted.
+            state = (
+                "✅ Updating hourly"
+                if live_board_enabled(cfg)
+                else "⛔ Turned off — messages frozen at the last update"
+            )
             embed.add_field(
                 name=label,
-                value=f"**Channel:** {channel_str}\n**Tiers tracked:** {tier_count}",
+                value=(
+                    f"**Status:** {state}\n"
+                    f"**Channel:** {channel_str}\n"
+                    f"**Tiers tracked:** {tier_count}"
+                ),
                 inline=False,
             )
         return embed
@@ -696,6 +711,10 @@ class AdminCog(commands.Cog):
             message_ids[tier.value] = msg.id
 
         live = load_live_leaderboards(server_id)
+        # Rebuilt from scratch, so no `enabled` key survives and a board that
+        # was turned off comes back ON. Setting one up is an unambiguous "I
+        # want this board": carrying a stale pause across it would hand the
+        # officer a freshly-posted set of messages that then never update.
         live["cluster"] = {
             "channel_id": channel.id,
             "messages":   message_ids,
@@ -709,6 +728,92 @@ class AdminCog(commands.Cog):
             ephemeral=True,
         )
 
+    # ==========================================
+    # SLASH COMMANDS: DISABLE / ENABLE_CLUSTER_LEADERBOARD
+    #
+    # The operator's off switch, and the one thing the cluster board had no
+    # way to express. A guild board stops on its own when the guild's key is
+    # quarantined; the cluster board has no such state — it either refreshes
+    # every hour or it silently stops because no key in the cluster could
+    # answer the season, which reads as healthy and is exactly the failure
+    # the guild-key feature exists to remove.
+    #
+    # Turning it off does NOT touch the posted messages. They stay in the
+    # channel with the content of the last refresh, which is what makes this
+    # a pause rather than a teardown: the season's board remains readable,
+    # and re-enabling picks it back up without re-posting.
+    # ==========================================
+
+    @app_commands.command(
+        name="disable_cluster_leaderboard",
+        description="Stop the live Cluster leaderboard updating. Posted messages are left in place.",
+    )
+    @require_tier("officer")
+    async def disable_cluster_leaderboard(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        await self._set_cluster_board_state(interaction, enabled=False)
+
+    @app_commands.command(
+        name="enable_cluster_leaderboard",
+        description="Resume hourly updates of the live Cluster leaderboard.",
+    )
+    @require_tier("officer")
+    async def enable_cluster_leaderboard(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        await self._set_cluster_board_state(interaction, enabled=True)
+
+    async def _set_cluster_board_state(
+        self, interaction: discord.Interaction, *, enabled: bool
+    ) -> None:
+        """Flip the cluster board's switch, or explain why there is none.
+
+        Both commands enter here so the "no board configured" refusal and the
+        already-in-that-state reply cannot drift apart — and so the state is
+        written through `set_live_board_enabled`, the only function that knows
+        how an enabled board is represented.
+        """
+        server_id = interaction.guild_id
+        live      = load_live_leaderboards(server_id)
+        config    = live.get("cluster")
+
+        if config is None:
+            # Refusing rather than storing a switch for a board that does not
+            # exist: a pause recorded against nothing would be silently
+            # discarded by the next `/set_live_cluster_leaderboard`, which
+            # rebuilds the config from scratch.
+            await interaction.followup.send(
+                "❌ No live Cluster leaderboard is configured. "
+                "Set one up with `/set_live_cluster_leaderboard` first.",
+                ephemeral=True,
+            )
+            return
+
+        if live_board_enabled(config) == enabled:
+            state = "already running" if enabled else "already turned off"
+            await interaction.followup.send(
+                f"ℹ️ The live Cluster leaderboard is {state}.", ephemeral=True
+            )
+            return
+
+        set_live_board_enabled(config, enabled)
+        save_live_leaderboards(server_id, live)
+
+        channel_id = config.get("channel_id")
+        where      = f"<#{channel_id}>" if channel_id else "its channel"
+
+        if enabled:
+            await interaction.followup.send(
+                f"✅ The live Cluster leaderboard in {where} will update again "
+                f"on the next hourly cycle.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                f"⛔ The live Cluster leaderboard in {where} has been turned off.\n"
+                f"The posted messages are left exactly as they are and will "
+                f"stop updating. Run `/enable_cluster_leaderboard` to resume.",
+                ephemeral=True,
+            )
 
     # ==========================================
     # SLASH COMMAND: SET_CLUSTER_ROLE

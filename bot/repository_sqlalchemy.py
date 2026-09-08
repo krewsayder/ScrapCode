@@ -378,6 +378,15 @@ class SqlAlchemyClusterRepository(ClusterRepository):
                     entry["season"] = row.season
                 if row.guild_id is not None:
                     entry["guild_id"] = row.guild_id
+                # Emitted ONLY when the board is off, exactly as `season` and
+                # `guild_id` above are emitted only when set. An enabled board
+                # is the absence of the key in BOTH backends, so a config
+                # round-trips identically through JSON and SQLite and the
+                # parity contract holds without a backfill of every legacy
+                # `live_leaderboards.json`. `bot.guilds.live_board_enabled`
+                # is the one reader of that convention.
+                if not row.enabled:
+                    entry["enabled"] = False
                 result[row.scope_key] = entry
             return result
 
@@ -398,6 +407,10 @@ class SqlAlchemyClusterRepository(ClusterRepository):
                     guild_id=entry.get("guild_id"),
                     channel_id=entry["channel_id"],
                     season=entry.get("season"),
+                    # Absent means enabled — a legacy config, or one written
+                    # before the switch existed, must not migrate into a
+                    # paused board.
+                    enabled=entry.get("enabled", True),
                 )
                 session.add(row)
                 session.flush()

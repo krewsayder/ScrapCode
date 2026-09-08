@@ -43,6 +43,8 @@ HELP_DATA = {
             ("/set_ping_channel",            "Set the channel where token cap notifications are posted for a guild."),
             ("/set_live_leaderboard",        "Pin a Battle leaderboard in a channel — it auto-updates every hour."),
             ("/set_live_cluster_leaderboard","Pin a cluster-wide leaderboard in a channel — it auto-updates every hour."),
+            ("/disable_cluster_leaderboard", "Stop the cluster leaderboard updating. Posted messages stay put, frozen at the last update."),
+            ("/enable_cluster_leaderboard",  "Resume hourly updates of the cluster leaderboard."),
             ("/update_leaderboard",          "Fetch raid data from Tacticus API and update local records for one guild."),
             ("/update_all",                  "Fetch raid data for all registered guilds and update local records."),
             ("/view_leaderboard",            "View top Battle damage leaderboard for a guild and tier."),

@@ -283,6 +283,12 @@ class LiveLeaderboardRow(Base):
     guild_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     channel_id: Mapped[int] = mapped_column(Integer, nullable=False)
     season: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The operator's off switch. NOT NULL with a default of true so an
+    # existing board keeps updating across the upgrade — a schema change that
+    # silently pauses every live board is the outage it is meant to prevent.
+    # Scope-agnostic on purpose: the column serves `guild:{id}` rows too, even
+    # though only the cluster board has commands to drive it today.
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     __table_args__ = (
         UniqueConstraint(
