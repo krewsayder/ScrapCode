@@ -71,6 +71,15 @@ _GUILD_KEY_UNIQUENESS_MARKERS = ("guilds.api_key_hmac", "uq_guilds_api_key_hmac"
 # un-disclose it.
 _HOLDER_VANISHED = ""
 
+# The two states `live_leaderboards.board_status` stores (ADR-009 DDD-1),
+# duplicated here for the same reason the column duplicates them rather than
+# importing `BoardStatus`: storage must not depend on the layer whose policy
+# it holds (ADR-008 D3). The port still hands out the shipped dict shape, so
+# this adapter translates in both directions — scaffolding that 01-02 removes
+# when the port itself starts speaking `BoardStatus`.
+_BOARD_ACTIVE = "active"
+_BOARD_DISABLED = "disabled"
+
 
 def _violates_guild_key_uniqueness(violation: IntegrityError) -> bool:
     """True only for a UNIQUE violation on the guild key fingerprint.
@@ -378,6 +387,12 @@ class SqlAlchemyClusterRepository(ClusterRepository):
                     entry["season"] = row.season
                 if row.guild_id is not None:
                     entry["guild_id"] = row.guild_id
+                # The column is a named status (ADR-009 DDD-1) but the port
+                # still speaks the shipped dict shape, so the status is
+                # translated back here. That translation is scaffolding for
+                # exactly one step: 01-02 moves the port to `LiveBoardConfig`
+                # and deletes it.
+                #
                 # Emitted ONLY when the board is off, exactly as `season` and
                 # `guild_id` above are emitted only when set. An enabled board
                 # is the absence of the key in BOTH backends, so a config
@@ -385,7 +400,7 @@ class SqlAlchemyClusterRepository(ClusterRepository):
                 # parity contract holds without a backfill of every legacy
                 # `live_leaderboards.json`. `bot.guilds.live_board_enabled`
                 # is the one reader of that convention.
-                if not row.enabled:
+                if row.board_status == _BOARD_DISABLED:
                     entry["enabled"] = False
                 result[row.scope_key] = entry
             return result
@@ -409,8 +424,14 @@ class SqlAlchemyClusterRepository(ClusterRepository):
                     season=entry.get("season"),
                     # Absent means enabled — a legacy config, or one written
                     # before the switch existed, must not migrate into a
-                    # paused board.
-                    enabled=entry.get("enabled", True),
+                    # paused board. The port's boolean is translated into the
+                    # stored status here until 01-02 makes the port speak
+                    # `BoardStatus` itself.
+                    board_status=(
+                        _BOARD_DISABLED
+                        if entry.get("enabled", True) is False
+                        else _BOARD_ACTIVE
+                    ),
                 )
                 session.add(row)
                 session.flush()

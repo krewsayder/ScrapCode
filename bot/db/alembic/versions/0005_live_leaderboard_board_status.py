@@ -1,14 +1,21 @@
-"""add live_leaderboards.enabled (the operator's off switch for a live board).
+"""add live_leaderboards.board_status (the operator's off switch for a board).
 
 Adds ONE column to an existing table. `live_lb_messages` is not touched: the
 whole point of the switch is that a paused board's already-posted messages
 stay exactly where they are, so the rows that address them must survive
 untouched too.
 
-`server_default="1"` and NOT NULL, so every board that exists at upgrade time
-keeps updating. A nullable column, or one defaulting to false, would pause
-every live board on the cluster the moment the migration ran — the silent
-freeze this feature exists to make impossible.
+A named status rather than a boolean (ADR-009 DDD-1), mirroring the
+`key_status` column `0003` added: `'active'` / `'disabled'`, the string values
+of the `BoardStatus` enum. The literals are duplicated here rather than
+imported because policy depends on storage and never the reverse (ADR-008 D3).
+A boolean says only which of two states a board is in; a status column names
+the state it is in, and leaves room for a third without another migration.
+
+`server_default="active"` and NOT NULL, so every board that exists at upgrade
+time keeps updating. A nullable column, or one defaulting to disabled, would
+pause every live board on the cluster the moment the migration ran — the
+silent freeze this feature exists to make impossible (KPI-4).
 
 The switch is scope-agnostic (it applies to `guild:{id}` rows as readily as to
 `cluster`) even though only the cluster board has commands driving it today.
@@ -47,10 +54,10 @@ def upgrade() -> None:
     op.add_column(
         "live_leaderboards",
         sa.Column(
-            "enabled",
-            sa.Boolean(),
+            "board_status",
+            sa.String(length=32),
             nullable=False,
-            server_default="1",
+            server_default="active",
         ),
     )
 
@@ -59,7 +66,7 @@ def downgrade() -> None:
     # Downgrading discards which boards were paused. That is acceptable and
     # deliberate: without the column there is no code left that honours the
     # pause, so a board that came back on is the accurate post-downgrade
-    # state rather than a board frozen by a flag nothing reads.
+    # state rather than a board frozen by a status nothing reads.
     #
     # Native DROP COLUMN, NOT batch mode — see the module docstring.
-    op.drop_column("live_leaderboards", "enabled")
+    op.drop_column("live_leaderboards", "board_status")
