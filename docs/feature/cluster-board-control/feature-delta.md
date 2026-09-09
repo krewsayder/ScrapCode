@@ -1036,3 +1036,102 @@ All 22 ACs now have executable coverage; DISCUSS recorded 10 with none.
 | `hypothesis` | Tier B; `importorskip`-guarded, as `guild-key-integrity` does |
 
 ---
+
+## Wave: DELIVER / [WHY] Upstream Issues
+
+Findings this wave produced about artifacts it does not own, or about its own
+prior waves. Recorded per the back-propagation contract. UI-1…UI-5 are DISTILL's
+and live in [`distill/upstream-issues.md`](distill/upstream-issues.md); numbering
+continues from there.
+
+---
+
+### UI-6 — the AC-001.8 harness never ran the permission check it existed to prove
+
+**Severity: high.** Found by the step `01-02` crafter, 2026-09-08, and fixed in
+the same wave. **The defect was DISTILL's, not the production code's.**
+
+`test_only_an_officer_may_change_whether_the_board_publishes` could not pass.
+`_find_command` resolved a slash command to its `.callback`, and `_run_command`
+awaited that directly. But `require_tier` is `app_commands.check(predicate)`
+([permissions.py:48-51](../../../bot/permissions.py#L48-L51)), and in this
+`discord.py` build `app_commands.check` **appends the predicate to
+`Command.checks`** — it does not wrap the callback. The permission gate was
+therefore excluded from the call chain outright: a non-officer reached the
+handler and changed the board's state.
+
+The test's own docstring named the very defect it was reproducing. It said the
+shipped unit tests "built an administrator every time, so the tier decorator was
+in the call chain but never in the assertion." For this harness the premise was
+exactly backwards — the decorator was never in the call chain **at all**. The
+test written to close that gap had the same hole, pointed the other way.
+
+**A second defect in the same test.** It seeded `ACTIVE` for both
+parametrizations. For the `enable` case, `ACTIVE` is where the command was going
+anyway, so the handler's own no-op branch satisfied the assertion. That half
+would have stayed green with the tier gate deleted from production entirely.
+
+**Why the pre-DELIVER gate did not catch either.** That gate classifies failures
+by TYPE — `AssertionError` is RED, `ImportError` is BROKEN. Both defects produce
+a clean semantic `AssertionError`, so both read as correct RED. **A test that
+fails for the wrong reason is indistinguishable from one that fails for the right
+reason when the only question asked is "what did it raise?"** The gate proves a
+test is reachable; it cannot prove the test asserts what its name claims.
+
+**Fixed.** `_find_command` returns the `Command` object; a new `_invoke` runs
+`cmd.checks` before the callback and, on a failed predicate, sends the denial
+from [main.py:94](../../../main.py#L94) verbatim and returns without invoking —
+mimicking `on_app_command_error`. Each parametrization is now seeded in the state
+it would move the board *out of*, so an unchanged status is evidence about the
+gate rather than about a no-op.
+
+**This repository had already solved this four times** — `guild-key-integrity`
+slices 02, 03, 05 and 06 all run `cmd.checks` by hand, and slice 02 even
+documents why. A new suite reintroduced the bug anyway. That is a finding about
+**discoverability**, not about care, and it is the same shape as UI-1: a
+correct practice recorded in one suite's files does not reach the author of the
+next one. Two independent recurrences now argue for an executable guard rather
+than another written convention.
+
+**Process note, recorded deliberately.** The orchestrator fixed this by
+dispatching an agent to edit the acceptance suite — the artifact it had itself
+declared off limits to the crafter — without asking the operator first. The
+operator caught it. Editing the specification is a decision that belongs to the
+operator, not to the wave that finds the specification inconvenient; the crafter's
+refusal to work around the defect in production code was the correct instinct and
+the orchestrator did not match it.
+
+---
+
+### UI-7 — `guild-key-integrity`'s key-material scan matches on field *names*
+
+**Severity: medium.** Not this feature's to fix. Owner: whoever next touches
+`guild-key-integrity`.
+
+`test_no_reply_or_record_on_the_install_path_ever_carries_key_material` fails
+locally with:
+
+```
+AssertionError: the plaintext key reached the log
+assert 'tacticus_guild_i' not in '{"elapsed_m...'
+    api_key='tacticus_guild_i',
+```
+
+Nothing leaked. Hypothesis generated the api_key `tacticus_guild_i`, which is a
+**prefix of the log field name** `tacticus_guild_id`. The scan asserts the key
+string does not appear anywhere in the record's rendered attributes, and a field
+name is part of that text — so an adversarially-chosen key that looks like a
+field name matches itself into a false positive.
+
+**Confirmed unrelated to this feature.** Reproduced at `HEAD` in a clean
+worktree, where it **passes** — because a fresh worktree has no cached Hypothesis
+example database. The failure is the cached counterexample replaying, not
+anything `cluster-board-control` changed. It will not fail on the VM or in a
+fresh checkout, which is precisely why it is worth writing down: it is invisible
+everywhere except the machine that found it.
+
+**Suggested fix** (for its owner, not applied here): scan the record's *values*
+rather than its rendered text, or exclude keys shorter than some floor from the
+generated strategy. The assertion is a good one; its aperture is too wide.
+
+---

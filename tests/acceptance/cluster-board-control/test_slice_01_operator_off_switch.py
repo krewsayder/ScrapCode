@@ -108,8 +108,8 @@ def _stored(repo, scope=ScopeKind.CLUSTER) -> LiveBoardConfig | None:
 def _run_command(admin_cog, command: BoardCommand, interaction, repo):
     """`When an officer <command> the cluster leaderboard`.
 
-    Direct invocation of the app-command callback with an interaction double —
-    the mechanism the Infrastructure Policy records for Discord slash commands
+    Direct invocation of the app command with an interaction double — the
+    mechanism the Infrastructure Policy records for Discord slash commands
     (`discord.py` app-commands cannot be driven over the wire in a test).
     """
     originals = {
@@ -119,18 +119,60 @@ def _run_command(admin_cog, command: BoardCommand, interaction, repo):
     admin_cog.load_live_leaderboards = lambda sid: repo.load_live_leaderboards(sid)
     admin_cog.save_live_leaderboards = lambda sid, data: repo.save_live_leaderboards(sid, data)
     try:
-        callback = _find_command(admin_cog, command.command_name)
-        cog = admin_cog.AdminCog.__new__(admin_cog.AdminCog)
-        asyncio.run(callback(cog, interaction))
+        asyncio.run(_invoke(admin_cog, command.command_name, interaction))
     finally:
         for name, original in originals.items():
             setattr(admin_cog, name, original)
 
 
+async def _invoke(admin_cog, name: str, interaction, **kwargs):
+    """Drive the REAL `app_commands.Command`: its `checks` FIRST, then its callback.
+
+    THE CHECKS ARE THE POINT, and skipping them is the defect this helper
+    exists to remove. `require_tier` is `app_commands.check(predicate)`
+    (`bot/permissions.py:48-51`), and in this `discord.py` build
+    `app_commands.check` APPENDS the predicate to `Command.checks` — it does
+    not wrap the callback. So a harness that resolves a command to its
+    `.callback` and awaits that runs the handler with the permission gate
+    excluded from the call chain outright, and every scenario about who may
+    drive the board asserts against a system that has no gate in it.
+
+    Running the checks by hand mimics `main.py::on_app_command_error`: a failed
+    predicate sends the ephemeral denial and returns WITHOUT reaching the
+    callback. The denial text is copied verbatim from `main.py:94` — no
+    assertion in this suite reads it (the interaction double discards
+    `response.send_message` content), but a paraphrase here would be a second
+    and wrong statement of what a denied officer is told, and the day that
+    message changes a grep has to find this line with the other four.
+
+    Same shape, for the same reason, as `guild-key-integrity`'s
+    `test_slice_02_update_guild_key.py::_invoke_update_guild_key` and its
+    siblings in slices 03, 05 and 06 — where this repository solved this four
+    times before this suite reintroduced it.
+    """
+    cmd = _find_command(admin_cog, name)
+    for chk in cmd.checks:
+        # This build stores the predicate coroutine directly in `checks`;
+        # others wrap it in a `Check` carrying `.predicate`. Accept either.
+        predicate = chk.predicate if hasattr(chk, "predicate") else chk
+        if not await predicate(interaction):
+            await interaction.response.send_message(
+                "❌ You don't have permission to use this command.", ephemeral=True
+            )
+            return
+    cog = admin_cog.AdminCog.__new__(admin_cog.AdminCog)
+    await cmd.callback(cog, interaction, **kwargs)
+
+
 def _find_command(admin_cog, name: str):
+    """The `Command` OBJECT — never its `.callback`.
+
+    Returning `.callback` discards `Command.checks`, which is where
+    `@require_tier` actually lives. See `_invoke`.
+    """
     for command in admin_cog.AdminCog.__cog_app_commands__:
         if command.name == name:
-            return command.callback
+            return command
     raise AssertionError(
         f"no `{name}` command is registered on AdminCog — delete the command "
         "method and this harness errors, which is the port-to-port litmus test"
@@ -313,16 +355,36 @@ def test_only_an_officer_may_change_whether_the_board_publishes(
 ):
     """AC-001.8.
 
-    The AC the shipped unit tests never exercised: they built an
-    administrator every time, so the tier decorator was in the call chain but
-    never in the assertion.
+    The AC the shipped unit tests never exercised: they built an administrator
+    every time, so the tier decorator was in the call chain but never in the
+    assertion.
+
+    THIS TEST THEN SHIPPED THE MIRROR IMAGE OF THAT BUG. Its premise was
+    exactly backwards: the decorator was not merely absent from the assertion,
+    it was never in the call chain at all, because the harness resolved the
+    command to its `.callback` and `@require_tier` lives on `Command.checks`.
+    The test written to close the gap had the same hole, pointed the other way.
+    `_invoke` is the fix; this docstring is the record.
+
+    The second, quieter hole: seeding ACTIVE for BOTH commands made the
+    `enable` case vacuous, because ACTIVE is where `enable` was going anyway.
+    The callback's own no-op branch satisfied the assertion, so that
+    parametrization would have stayed green with the tier gate deleted. Each
+    command is now seeded in the state it WOULD move the board out of, so the
+    unchanged status is evidence about the gate rather than about the no-op.
     """
-    _seed(typed_port, status=BoardStatus.ACTIVE)
+    # Any status that is not this command's destination is one it would change.
+    starts_from = next(s for s in BoardStatus if s is not command.drives_to)
+    _seed(typed_port, status=starts_from)
 
     _run_command(admin_cog, command, non_officer, typed_port)
 
-    assert _stored(typed_port).board_status is BoardStatus.ACTIVE, (
-        "a member below the officer tier changed the board's state"
+    assert _stored(typed_port).board_status is starts_from, (
+        f"a member below the officer tier drove the board to {command.drives_to.value}"
+    )
+    assert non_officer.reply == "", (
+        "the callback ran far enough to answer a member the tier gate should "
+        f"have stopped: {non_officer.reply!r}"
     )
 
 
@@ -399,9 +461,10 @@ def test_setting_a_board_up_again_brings_it_back_on(
     try:
         for (module, target), replacement in originals.items():
             setattr(module, target, replacement)
-        callback = _find_command(admin_cog, "set_live_cluster_leaderboard")
-        cog = admin_cog.AdminCog.__new__(admin_cog.AdminCog)
-        asyncio.run(callback(cog, officer, channel=board_channel))
+        asyncio.run(_invoke(
+            admin_cog, "set_live_cluster_leaderboard", officer,
+            channel=board_channel,
+        ))
     finally:
         for (module, target), original in previous.items():
             setattr(module, target, original)
@@ -724,9 +787,10 @@ def test_setting_up_a_guild_board_still_stores_something_readable(
     try:
         for (module, target), replacement in originals.items():
             setattr(module, target, replacement)
-        callback = _find_command(admin_cog, "set_live_leaderboard")
-        cog = admin_cog.AdminCog.__new__(admin_cog.AdminCog)
-        asyncio.run(callback(cog, officer, guild_id=guild_id, channel=board_channel))
+        asyncio.run(_invoke(
+            admin_cog, "set_live_leaderboard", officer,
+            guild_id=guild_id, channel=board_channel,
+        ))
     finally:
         for (module, target), original in previous.items():
             setattr(module, target, original)
