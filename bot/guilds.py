@@ -7,6 +7,7 @@ from bot.repository import (
     ClusterRepository,
     GuildBinding,
     JsonClusterRepository,
+    LiveBoardConfig,
     SupportsProbe,
 )
 from bot.migrations.player_list_migrations import PlayerListMigrator
@@ -392,43 +393,26 @@ def save_capped_state(discord_server_id: int, data: dict) -> None:
 # LIVE LEADERBOARDS
 # ==========================================
 
-def load_live_leaderboards(discord_server_id: int) -> dict:
+def load_live_leaderboards(discord_server_id: int) -> dict[str, LiveBoardConfig]:
+    """Return `{scope_key: config}` for every live board on this server.
+
+    `live_board_enabled` and `set_live_board_enabled` used to sit beside this
+    wrapper, holding the convention that an enabled board was the ABSENCE of
+    an `enabled` key. Both are gone (ADR-009 DDD-7). The state is a named
+    `BoardStatus` on a frozen `LiveBoardConfig`, and the predicate is
+    `config.is_enabled` — a property on the type, which the next call site
+    cannot forget to call and cannot re-derive differently.
+    """
     return repo.load_live_leaderboards(discord_server_id)
 
 
-def save_live_leaderboards(discord_server_id: int, data: dict) -> None:
+def save_live_leaderboards(discord_server_id: int,
+                           data: dict[str, LiveBoardConfig]) -> None:
+    """Persist every live board on this server.
+
+    The configs are frozen, so a caller changing one hands back the mapping it
+    loaded with that entry REBUILT via `dataclasses.replace` (DDD-8). There is
+    no in-place edit to forget to save, and no edit that silently lands on a
+    config a sibling caller is still holding.
+    """
     repo.save_live_leaderboards(discord_server_id, data)
-
-
-# The `enabled` flag has ONE canonical representation: absent when the board
-# is on, present and false when it is off. Both readers and both writers go
-# through the two functions below rather than touching the key, because the
-# convention is what keeps a config byte-identical across the JSON and SQLite
-# backends — `save` then `load` must return what went in, and an explicit
-# `enabled: True` would survive the JSON round trip and be dropped by the SQL
-# one. Every caller that hand-rolls `cfg["enabled"]` is a parity break waiting
-# to happen.
-
-def live_board_enabled(config: dict) -> bool:
-    """Whether this live-leaderboard config should still be refreshed.
-
-    A config with no `enabled` key is ON. That covers every board configured
-    before the switch existed, which is the majority of them and all of the
-    ones in production today — defaulting the other way would pause the whole
-    cluster on deploy.
-    """
-    return config.get("enabled", True) is not False
-
-
-def set_live_board_enabled(config: dict, enabled: bool) -> None:
-    """Turn a live-leaderboard config on or off, in place.
-
-    Enabling DELETES the key rather than writing `True`: an enabled board is
-    represented by absence, and two representations of "on" is how the JSON
-    and SQLite backends start disagreeing about a config neither of them
-    changed.
-    """
-    if enabled:
-        config.pop("enabled", None)
-    else:
-        config["enabled"] = False

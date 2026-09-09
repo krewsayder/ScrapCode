@@ -31,13 +31,25 @@ Two claims carry the risk, and they are opposite halves of one iff:
      perfectly and pauses every board in production on deploy. That is why the
      enabled case is asserted through the same harness rather than assumed.
 
-THE REPRESENTATION IS A THIRD CLAIM, and a quiet one. An enabled board is the
-ABSENCE of the `enabled` key, in both backends. Writing `enabled: True` would
-round-trip through the JSON repository and be dropped by the SQLite one, so
-the two adapters would disagree about a config neither of them changed and
-`test_every_abc_method_round_trips_through_both_impls` would start failing for
-a reason nowhere near this feature. `test_enabling_never_writes_a_true_flag`
-pins the invariant at the writer, which is the only place it can be broken.
+THE REPRESENTATION IS A THIRD CLAIM, and a quiet one. A board's state is a
+named `BoardStatus` carried by a frozen `LiveBoardConfig`, always present in
+both backends (ADR-009 DDD-1/DDD-3/DDD-6). It used to be a bool omitted from
+the config when true, and `test_enabling_never_writes_a_true_flag` pinned that
+omission at the writer.
+
+THAT TEST IS GONE, deliberately, in step 01-02. It asserted the very
+convention ADR-009 reverses — a hidden absent-means-on invariant with no
+type-level expression, invented to keep one exact-equality assertion passing.
+It has no replacement here because it has no claim left to make: parity is now
+held by both adapters ALWAYS carrying the field, which is asserted against the
+two REAL adapters and both statuses by
+`tests/acceptance/cluster-board-control/...::test_both_adapters_agree_about_a_board`.
+Restating it here against a dict would be a weaker copy of a stronger test.
+
+What survives at this level is the half no adapter can answer:
+`test_a_config_with_no_flag_is_on` keeps its claim — a board stored before the
+column existed reads as running — and changes its mechanism from the deleted
+`live_board_enabled` free function to the port's own materialisation.
 """
 from __future__ import annotations
 
@@ -65,60 +77,50 @@ CHANNEL_ID = 7
 # The representation — absent means on, in both backends
 # ===========================================================================
 
-def test_enabling_never_writes_a_true_flag():
-    """`enabled` appears in a config only when the board is OFF.
-
-    The invariant that keeps a config byte-identical across the JSON and
-    SQLite adapters. Asserted on the dict rather than through a repository
-    because the writer is the only place it can be violated — both adapters
-    faithfully store whatever they are handed, which is the problem.
-    """
-    from bot.guilds import live_board_enabled, set_live_board_enabled
-
-    config: dict = {"channel_id": CHANNEL_ID, "messages": {}}
-
-    set_live_board_enabled(config, False)
-    assert config["enabled"] is False, "turning a board off must record it"
-    assert not live_board_enabled(config)
-
-    set_live_board_enabled(config, True)
-    assert "enabled" not in config, (
-        "enabling wrote a key instead of removing one. An enabled board is "
-        "the ABSENCE of `enabled`; writing True survives the JSON round trip "
-        "and is dropped by the SQLite one, which breaks repository parity."
-    )
-    assert live_board_enabled(config)
-
-
 def test_a_config_with_no_flag_is_on():
     """Every board configured before the switch existed keeps updating.
 
     Defaulting the other way would pause the entire cluster on deploy — the
     exact silent freeze the switch exists to make impossible.
+
+    SAME CLAIM (AC-004.3), new mechanism. It used to read `live_board_enabled`
+    on a bare dict; that free function is deleted. Absence is now materialised
+    as a default VALUE by the port itself, so the assertion is that a stored
+    entry with no status key comes back ACTIVE rather than that a reader
+    infers it.
     """
-    from bot.guilds import live_board_enabled
+    from bot.repository import BoardStatus, LiveBoardConfig
 
-    assert live_board_enabled({"channel_id": CHANNEL_ID, "messages": {}})
+    legacy = LiveBoardConfig.from_stored({"channel_id": CHANNEL_ID, "messages": {}})
+
+    assert legacy.board_status is BoardStatus.ACTIVE
+    assert legacy.is_enabled
 
 
-@pytest.mark.parametrize("enabled", [True, False])
-def test_the_switch_survives_the_sqlite_round_trip(tmp_path, enabled: bool):
+@pytest.mark.parametrize("status", ["active", "disabled"])
+def test_the_switch_survives_the_sqlite_round_trip(tmp_path, status: str):
     """The state is persisted, not just held in memory.
 
-    A switch that lives only in the loaded dict comes back ON at the next bot
+    A switch that lives only in the loaded config comes back ON at the next bot
     restart, which for a board an operator deliberately paused is the same as
     not having the feature.
     """
+    from bot.repository import BoardStatus, LiveBoardConfig
+
     repo = _sqlite_repo(tmp_path)
-    config = {"channel_id": CHANNEL_ID, "messages": {"Legendary_0": 999}, "season": SEASON}
-    _set_enabled(config, enabled)
+    config = LiveBoardConfig(
+        channel_id=CHANNEL_ID,
+        messages={"Legendary_0": 999},
+        season=SEASON,
+        board_status=BoardStatus(status),
+    )
 
     repo.save_live_leaderboards(SERVER_ID, {"cluster": config})
     reloaded = repo.load_live_leaderboards(SERVER_ID)
 
     assert reloaded == {"cluster": config}, (
-        "the config did not survive the round trip unchanged — an extra or "
-        "missing `enabled` key here is a JSON/SQLite parity break"
+        "the config did not survive the round trip unchanged — a status that "
+        "does not come back as it went in is the whole feature failing"
     )
 
 
@@ -139,7 +141,7 @@ def test_a_board_that_is_off_is_left_completely_alone():
     loop already removes configs whose channel has vanished, and a skip
     written into that branch would delete the board it was asked to pause.
     """
-    surface = _refresh_with(enabled=False)
+    surface = _refresh_with(status=_DISABLED())
 
     assert surface == {
         "messages_edited": [],
@@ -153,11 +155,11 @@ def test_a_board_that_is_off_is_left_completely_alone():
 def test_a_board_that_is_on_is_still_refreshed():
     """Claim 2. The other half of the iff, and the one a bad default breaks.
 
-    Without this, an unconditional skip — or a default that reads a missing
-    `enabled` as off — passes claim 1 and silently pauses every live board on
+    Without this, an unconditional skip — or a default that reads an absent
+    status as off — passes claim 1 and silently pauses every live board on
     every server.
     """
-    surface = _refresh_with(enabled=True)
+    surface = _refresh_with(status=_ACTIVE())
 
     assert surface["messages_edited"], (
         "an ENABLED board was not refreshed. The switch is inverted, or the "
@@ -174,7 +176,7 @@ def test_the_switch_is_scope_agnostic():
     what stops the guild-scoped commands, when they arrive, from finding a
     switch that silently only ever worked for one key.
     """
-    surface = _refresh_with(enabled=False, scope_key="guild:neuro")
+    surface = _refresh_with(status=_DISABLED(), scope_key="guild:neuro")
 
     assert surface["messages_edited"] == [] and surface["config_survived"], (
         f"a guild-scoped board ignored the off switch: {surface!r}"
@@ -188,13 +190,14 @@ def test_the_switch_is_scope_agnostic():
 def test_disabling_then_enabling_flips_the_stored_state():
     """The round trip an operator actually performs."""
     world = _run_command("disable_cluster_leaderboard", board={"season": SEASON})
-    assert world.saved["cluster"]["enabled"] is False
+    assert world.saved["cluster"].board_status is _DISABLED()
     assert "turned off" in world.reply and "/enable_cluster_leaderboard" in world.reply
 
     world = _run_command(
-        "enable_cluster_leaderboard", board={"season": SEASON, "enabled": False}
+        "enable_cluster_leaderboard",
+        board={"season": SEASON, "board_status": _DISABLED()},
     )
-    assert "enabled" not in world.saved["cluster"]
+    assert world.saved["cluster"].board_status is _ACTIVE()
     assert "update again" in world.reply
 
 
@@ -205,17 +208,19 @@ def test_turning_off_preserves_the_channel_the_messages_and_the_season():
     re-enable would have no message ids to edit and would post a second set
     beneath the first.
     """
+    from bot.repository import LiveBoardConfig
+
     world = _run_command(
         "disable_cluster_leaderboard",
         board={"season": SEASON, "messages": {"Legendary_0": 999}},
     )
 
-    assert world.saved["cluster"] == {
-        "channel_id": CHANNEL_ID,
-        "messages": {"Legendary_0": 999},
-        "season": SEASON,
-        "enabled": False,
-    }, f"turning the board off rewrote more than the switch: {world.saved!r}"
+    assert world.saved["cluster"] == LiveBoardConfig(
+        channel_id=CHANNEL_ID,
+        messages={"Legendary_0": 999},
+        season=SEASON,
+        board_status=_DISABLED(),
+    ), f"turning the board off rewrote more than the switch: {world.saved!r}"
 
 
 @pytest.mark.parametrize(
@@ -231,7 +236,7 @@ def test_a_no_op_flip_says_so_and_writes_nothing(command: str, already: bool):
     """
     board = {"season": SEASON}
     if not already:
-        board["enabled"] = False
+        board["board_status"] = _DISABLED()
 
     world = _run_command(command, board=board)
 
@@ -261,10 +266,22 @@ def test_both_commands_refuse_when_no_cluster_board_exists(command: str):
 # Harness
 # ===========================================================================
 
-def _set_enabled(config: dict, enabled: bool) -> None:
-    from bot.guilds import set_live_board_enabled
+def _ACTIVE():
+    """`BoardStatus.ACTIVE`, resolved late.
 
-    set_live_board_enabled(config, enabled)
+    Every `bot.*` import in this module is function-local, because
+    `bot.guilds` builds the process-wide repository at import time and the
+    environment pins above have to be in place first.
+    """
+    from bot.repository import BoardStatus
+
+    return BoardStatus.ACTIVE
+
+
+def _DISABLED():
+    from bot.repository import BoardStatus
+
+    return BoardStatus.DISABLED
 
 
 def _sqlite_repo(tmp_path):
@@ -308,18 +325,19 @@ def _bare_cluster():
     )
 
 
-def _refresh_with(*, enabled: bool, scope_key: str = "cluster") -> dict:
+def _refresh_with(*, status, scope_key: str = "cluster") -> dict:
     """Run the real `_refresh_live_leaderboards` over one board."""
+    from bot.repository import LiveBoardConfig
+
     tasks_cog = _tasks_cog()
 
-    config: dict = {
-        "channel_id": CHANNEL_ID,
-        "messages": {"Legendary_0": 999},
-        "season": SEASON,
-    }
-    if scope_key.startswith("guild:"):
-        config["guild_id"] = scope_key.split(":", 1)[1]
-    _set_enabled(config, enabled)
+    config = LiveBoardConfig(
+        channel_id=CHANNEL_ID,
+        messages={"Legendary_0": 999},
+        season=SEASON,
+        guild_id=scope_key.split(":", 1)[1] if scope_key.startswith("guild:") else None,
+        board_status=status,
+    )
 
     channel = _FakeChannel()
     world = _World()
@@ -334,24 +352,28 @@ def _refresh_with(*, enabled: bool, scope_key: str = "cluster") -> dict:
 
     # The config the loop worked on, as it stands after the pass. A save is
     # only made when something changed, so an unsaved board is read back from
-    # the dict the loop was handed.
+    # the mapping the loop was handed.
     final = (world.saved or {scope_key: config}).get(scope_key)
     return {
         "messages_edited": list(channel.edited),
         "messages_sent": list(channel.sent),
         "config_survived": final is not None,
-        "config_still_off": final is not None and final.get("enabled") is False,
-        "season_recorded": final and final.get("season"),
+        "config_still_off": final is not None and not final.is_enabled,
+        "season_recorded": final and final.season,
     }
 
 
 def _run_command(name: str, *, board: dict | None) -> "_CommandWorld":
     """Invoke a real slash command callback against one stored cluster board."""
+    from bot.repository import LiveBoardConfig
+
     admin_cog = _admin_cog()
 
     live: dict = {}
     if board is not None:
-        live["cluster"] = {"channel_id": CHANNEL_ID, "messages": {}, **board}
+        live["cluster"] = LiveBoardConfig(
+            **{"channel_id": CHANNEL_ID, "messages": {}, **board}
+        )
 
     world = _CommandWorld()
     interaction = _FakeInteraction()

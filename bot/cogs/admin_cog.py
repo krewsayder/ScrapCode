@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import httpx
 import discord
 from discord import app_commands
@@ -17,14 +19,13 @@ from bot.guilds import (
     load_guild_binding,
     load_live_leaderboards,
     save_live_leaderboards,
-    live_board_enabled,
-    set_live_board_enabled,
+    get_player_list,
     load_player_list,
     add_cluster_role,
     add_guild_member_role,
     repo,
 )
-from bot.repository import QuarantineTombstone
+from bot.repository import BoardStatus, LiveBoardConfig, QuarantineTombstone
 from bot.embeds import guild_autocomplete, encounter_limit
 from bot.permissions import require_tier, check_tier
 from bot.services.chronicl3r.player_service import PlayerService
@@ -442,9 +443,8 @@ class AdminCog(commands.Cog):
             return embed
 
         for key, cfg in live.items():
-            channel_id  = cfg.get("channel_id")
-            channel_str = f"<#{channel_id}>" if channel_id else "❌ No channel"
-            tier_count  = len(cfg.get("messages", {}))
+            channel_str = f"<#{cfg.channel_id}>" if cfg.channel_id else "❌ No channel"
+            tier_count  = len(cfg.messages)
             label       = "Cluster" if key == "cluster" else key.replace("guild:", "")
             # A board that is off looks identical to a running one in the
             # channel — the messages are still there, holding the last
@@ -452,7 +452,7 @@ class AdminCog(commands.Cog):
             # difference, so it is never omitted.
             state = (
                 "✅ Updating hourly"
-                if live_board_enabled(cfg)
+                if cfg.is_enabled
                 else "⛔ Turned off — messages frozen at the last update"
             )
             embed.add_field(
@@ -587,12 +587,15 @@ class AdminCog(commands.Cog):
                 return
 
         live = load_live_leaderboards(server_id)
-        live[f"guild:{guild_id}"] = {
-            "channel_id": channel.id,
-            "guild_id":   guild_id,
-            "messages":   message_ids,
-            "season":     season,
-        }
+        # A described configuration, not a raw dict literal (ADR-009 DDD-2).
+        # `board_status` defaults to ACTIVE, so setting a guild board up
+        # brings it back on for free — same as the cluster command below.
+        live[f"guild:{guild_id}"] = LiveBoardConfig(
+            channel_id=channel.id,
+            guild_id=guild_id,
+            messages=message_ids,
+            season=season,
+        )
         save_live_leaderboards(server_id, live)
 
         await interaction.followup.send(
@@ -620,7 +623,6 @@ class AdminCog(commands.Cog):
 
         from config import TIER_CHOICES
         from bot.embeds import build_cluster_messages
-        from bot.guilds import get_player_list
 
         server_id = interaction.guild_id
         guilds    = load_guilds(server_id)
@@ -711,15 +713,17 @@ class AdminCog(commands.Cog):
             message_ids[tier.value] = msg.id
 
         live = load_live_leaderboards(server_id)
-        # Rebuilt from scratch, so no `enabled` key survives and a board that
-        # was turned off comes back ON. Setting one up is an unambiguous "I
-        # want this board": carrying a stale pause across it would hand the
-        # officer a freshly-posted set of messages that then never update.
-        live["cluster"] = {
-            "channel_id": channel.id,
-            "messages":   message_ids,
-            "season":     season,
-        }
+        # Rebuilt from scratch, so a board that was turned off comes back ON —
+        # `board_status` defaults to ACTIVE (AC-002.5), which is why building a
+        # fresh config is the whole implementation. Setting one up is an
+        # unambiguous "I want this board": carrying a stale pause across it
+        # would hand the officer a freshly-posted set of messages that then
+        # never update.
+        live["cluster"] = LiveBoardConfig(
+            channel_id=channel.id,
+            messages=message_ids,
+            season=season,
+        )
         save_live_leaderboards(server_id, live)
 
         await interaction.followup.send(
@@ -751,7 +755,7 @@ class AdminCog(commands.Cog):
     @require_tier("officer")
     async def disable_cluster_leaderboard(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        await self._set_cluster_board_state(interaction, enabled=False)
+        await self._set_cluster_board_state(interaction, status=BoardStatus.DISABLED)
 
     @app_commands.command(
         name="enable_cluster_leaderboard",
@@ -760,17 +764,21 @@ class AdminCog(commands.Cog):
     @require_tier("officer")
     async def enable_cluster_leaderboard(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        await self._set_cluster_board_state(interaction, enabled=True)
+        await self._set_cluster_board_state(interaction, status=BoardStatus.ACTIVE)
 
     async def _set_cluster_board_state(
-        self, interaction: discord.Interaction, *, enabled: bool
+        self, interaction: discord.Interaction, *, status: BoardStatus
     ) -> None:
-        """Flip the cluster board's switch, or explain why there is none.
+        """Drive the cluster board to a named state, or explain why there is none.
 
         Both commands enter here so the "no board configured" refusal and the
-        already-in-that-state reply cannot drift apart — and so the state is
-        written through `set_live_board_enabled`, the only function that knows
-        how an enabled board is represented.
+        already-in-that-state reply cannot drift apart.
+
+        Takes a `BoardStatus`, not a boolean. The boolean was the shipped
+        shape's last foothold in the cog: it forced this method to know how
+        "on" is represented in order to translate. Naming the destination
+        state removes the translation, and the command that asks for a state
+        is the command that names it.
         """
         server_id = interaction.guild_id
         live      = load_live_leaderboards(server_id)
@@ -788,18 +796,23 @@ class AdminCog(commands.Cog):
             )
             return
 
-        if live_board_enabled(config) == enabled:
+        enabled = status is BoardStatus.ACTIVE
+
+        if config.board_status is status:
             state = "already running" if enabled else "already turned off"
             await interaction.followup.send(
                 f"ℹ️ The live Cluster leaderboard is {state}.", ephemeral=True
             )
             return
 
-        set_live_board_enabled(config, enabled)
+        # REBUILT, not mutated: the config is frozen, so the changed board goes
+        # back into the mapping explicitly and the save cannot be forgotten.
+        # Everything but the switch is carried across by `replace`, which is
+        # AC-001.4 held by construction rather than by remembering to copy.
+        live["cluster"] = replace(config, board_status=status)
         save_live_leaderboards(server_id, live)
 
-        channel_id = config.get("channel_id")
-        where      = f"<#{channel_id}>" if channel_id else "its channel"
+        where = f"<#{config.channel_id}>" if config.channel_id else "its channel"
 
         if enabled:
             await interaction.followup.send(

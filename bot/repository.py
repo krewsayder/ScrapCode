@@ -9,23 +9,6 @@ from bot.models import Cluster, Guild
 from bot.migrations.player_list_migrations import PlayerListMigrator
 
 
-# ---------------------------------------------------------------------------
-# RED SCAFFOLD (created by DISTILL, feature `cluster-board-control`).
-#
-# `BoardStatus` and `LiveBoardConfig` are the ADR-009 target shape. They exist
-# here so the acceptance suite IMPORTS cleanly and fails RED (AssertionError)
-# rather than BROKEN (ImportError) — Mandate 7. DELIVER replaces the scaffold
-# body with the real implementation and removes the marker.
-#
-# `BoardStatus` is declared in full rather than stubbed: it is two constants,
-# and a scaffold that raised on reading a constant would test nothing. The
-# behaviour under construction is `LiveBoardConfig.is_enabled`, and that is
-# what raises.
-# ---------------------------------------------------------------------------
-
-__SCAFFOLD__ = True
-
-
 class BoardStatus(Enum):
     """Whether a live leaderboard still publishes (ADR-009 DDD-1).
 
@@ -75,7 +58,58 @@ class LiveBoardConfig:
         data can be forgotten by the next call site; one that sits on the type
         cannot. No module outside this one may compare the status literal.
         """
-        raise AssertionError("Not yet implemented -- RED scaffold")
+        return self.board_status is BoardStatus.ACTIVE
+
+    @classmethod
+    def from_stored(cls, stored: dict) -> "LiveBoardConfig":
+        """Materialise one entry of the `live_leaderboards.json` shape.
+
+        The on-disk form stays a plain dict (brief §C), so exactly one place
+        knows its key names: this method and its inverse. Both the JSON
+        adapter and the JSON-to-SQLite migration read through here rather than
+        each spelling the keys out, because a second speller is how the two
+        start disagreeing about a file neither of them changed.
+
+        A missing `board_status` — every board written before the column
+        existed — materialises ACTIVE (ADR-009 DDD-3). Absence is a default
+        VALUE, exactly as `load_guild_binding` returns `GuildBinding()` rather
+        than None, so no reader infers it and no reader needs a
+        `.get(key, default)`. A PRESENT but unrecognised value raises rather
+        than defaulting: that is a corrupt file, not a legacy one, and
+        silently running a board whose recorded state is unreadable is the
+        confident-wrong-answer this feature exists to remove.
+        """
+        return cls(
+            channel_id=stored["channel_id"],
+            messages=dict(stored.get("messages") or {}),
+            season=stored.get("season"),
+            guild_id=stored.get("guild_id"),
+            board_status=(
+                BoardStatus(stored["board_status"])
+                if stored.get("board_status") is not None
+                else BoardStatus.ACTIVE
+            ),
+        )
+
+    def as_stored(self) -> dict:
+        """The `live_leaderboards.json` shape for this config.
+
+        EVERY field is written, including `board_status` and including the
+        Nones. The shipped adapter emitted its status key only when the board
+        was off, so that a config round-tripped byte-identically through both
+        backends without the field ever being stored — a hidden
+        absent-means-on invariant with no type-level expression, invented to
+        avoid amending one test literal. ADR-009 DDD-6 reverses it: parity now
+        holds because both adapters ALWAYS carry the field and both
+        materialise the same default for a file that predates it.
+        """
+        return {
+            "channel_id":   self.channel_id,
+            "guild_id":     self.guild_id,
+            "messages":     dict(self.messages),
+            "season":       self.season,
+            "board_status": self.board_status.value,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -317,10 +351,31 @@ class ClusterRepository(ABC):
     def save_player_list(self, discord_server_id: int, guild_id: str, data: dict) -> None: ...
 
     @abstractmethod
-    def load_live_leaderboards(self, discord_server_id: int) -> dict: ...
+    def load_live_leaderboards(self, discord_server_id: int) -> dict[str, LiveBoardConfig]:
+        """Return `{scope_key: config}` for every live board on this server.
+
+        Signature CHANGED IN PLACE rather than joined by a dict-returning
+        sibling (ADR-009 DDD-2). ADR-007 removed `get_guild_data_path` instead
+        of leaving it deprecated, on the reasoning that two ways to read the
+        same table is a footgun nothing stops a new call site picking up; a
+        sibling here would keep carrying the absent-means-on invariant this
+        change exists to delete.
+
+        Every config carries a `board_status`. Both adapters materialise
+        ACTIVE for a board stored before the column existed (DDD-3), so no
+        reader ever infers it.
+        """
 
     @abstractmethod
-    def save_live_leaderboards(self, discord_server_id: int, data: dict) -> None: ...
+    def save_live_leaderboards(self, discord_server_id: int,
+                               data: dict[str, LiveBoardConfig]) -> None:
+        """Persist every live board on this server, replacing what is there.
+
+        Whole-mapping, not per-board: the shape both adapters already had. The
+        caller that changes one board hands back the mapping it loaded with
+        that one entry REBUILT — `LiveBoardConfig` is frozen, so there is no
+        in-place edit to forget to save (DDD-8).
+        """
 
     @abstractmethod
     def list_server_ids(self) -> list[int]: ...
@@ -708,13 +763,26 @@ class JsonClusterRepository(ClusterRepository):
         path = self._guild_path(discord_server_id, guild_id) / "player_list.json"
         self._write_json(path, data)
 
-    def load_live_leaderboards(self, discord_server_id: int) -> dict:
-        path = self._server_path(discord_server_id) / "live_leaderboards.json"
-        return self._read_json(path)
+    def load_live_leaderboards(self, discord_server_id: int) -> dict[str, LiveBoardConfig]:
+        """ADR-009 DDD-3: the file is the storage form, the config is the port
+        form, and the translation happens HERE rather than in any reader.
 
-    def save_live_leaderboards(self, discord_server_id: int, data: dict) -> None:
+        NOT degraded on this path, unlike `load_guild_binding` (ADR-006 D9 /
+        ADR-009 DDD-5): live-board configs are stored natively by this
+        adapter, so `board_status` round-trips normally on the rollback path
+        and needs no no-op write and no warning."""
         path = self._server_path(discord_server_id) / "live_leaderboards.json"
-        self._write_json(path, data)
+        return {
+            scope_key: LiveBoardConfig.from_stored(stored)
+            for scope_key, stored in self._read_json(path).items()
+        }
+
+    def save_live_leaderboards(self, discord_server_id: int,
+                               data: dict[str, LiveBoardConfig]) -> None:
+        path = self._server_path(discord_server_id) / "live_leaderboards.json"
+        self._write_json(
+            path, {scope_key: config.as_stored() for scope_key, config in data.items()}
+        )
 
     def list_server_ids(self) -> list[int]:
         if not self._base.exists():

@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from bot.models import Cluster, Guild
-from bot.repository import ClusterRepository, JsonClusterRepository
+from bot.repository import ClusterRepository, JsonClusterRepository, LiveBoardConfig
 from bot.migrations.player_list_migrations import PlayerListMigrator
 from bot.tracker import try_insert, TOP_N
 
@@ -95,7 +95,16 @@ def test_every_abc_method_round_trips_through_the_repository(impl_pair, tmp_clus
     assert repo.load_player_list(server, "neuro") == plist
 
     # live_leaderboards
-    lbs = {"cluster": {"channel_id": 888, "messages": {"Legendary_0": 333333}, "season": 94}}
+    # Carries a `LiveBoardConfig`, not a dict (ADR-009 DDD-2/DDD-6). This
+    # literal is the one the shipped `enabled`-omitted-when-true shape was
+    # invented to keep passing; amending it to match an intended contract
+    # change is a different act from bending the representation to avoid
+    # amending it.
+    lbs = {
+        "cluster": LiveBoardConfig(
+            channel_id=888, messages={"Legendary_0": 333333}, season=94
+        )
+    }
     repo.save_live_leaderboards(server, lbs)
     assert repo.load_live_leaderboards(server) == lbs
 

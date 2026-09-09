@@ -291,7 +291,11 @@ def _surface(interaction, saved: dict, tacticus) -> dict:
         "reply.named_keyless": _guilds_described_as(reply, "no API key"),
         "reply.names_the_exit": "/update_guild_key" in reply,
         "reply.names_deregistration": _THE_DESTRUCTIVE_ROUTE in reply,
-        "leaderboard.season": board.get("season"),
+        # `LiveBoardConfig`, not a dict (ADR-009 DDD-2). The repository double
+        # above insulates this test from the ADAPTER, not from the PORT'S
+        # TYPE: it stores whatever the command saved, and the command now
+        # saves a described configuration.
+        "leaderboard.season": board.season if board else None,
         "tacticus.credentials": list(tacticus.credentials),
     }
 
