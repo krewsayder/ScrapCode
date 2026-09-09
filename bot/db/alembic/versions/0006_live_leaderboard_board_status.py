@@ -34,9 +34,33 @@ native `DROP COLUMN`; that is a hard requirement of the downgrade path, and
 an older runtime fails loudly at the ALTER rather than quietly reshaping the
 schema.
 
-Revision ID: 0005
-Revises: 0004
+Revision ID: 0006
+Revises: 0005
 Create Date: 2026-09-08T00:00:00Z
+
+RENUMBERED FROM 0005 ON 2026-09-08, and the reason is worth keeping.
+
+ADR-009 DDD-4 chose to amend revision `0005` in place rather than chain a new
+one, on the grounds that no database had ever run it. That was true and it was
+the wrong test. `0005` was ALREADY TAKEN on `main` by
+`0005_guild_leaderboards_enabled` (PR #9, merged 2026-08-29) — a different
+column on a different table, added while this branch was being built from a
+base that predated it.
+
+Two revisions sharing a number do NOT produce a merge conflict, because they
+are different FILES. Git merges them silently and alembic then finds two heads
+descending from `0004` and refuses to upgrade at all. On the deploy host that
+surfaces as a failed migration followed by the startup probe refusing to boot
+— at restart, long after the merge looked clean.
+
+"Nobody has run this migration" is a claim about a database. "This revision
+number is free" is a claim about every branch that might reach the same head.
+The second is the one that matters when renumbering, and checking it costs one
+`git fetch`.
+
+The two migrations do not otherwise conflict: `0005` adds
+`guilds.leaderboards_enabled`, this adds `live_leaderboards.board_status`.
+Different tables, orthogonal switches.
 """
 from __future__ import annotations
 
@@ -44,8 +68,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0005"
-down_revision = "0004"
+revision = "0006"
+down_revision = "0005"
 branch_labels = None
 depends_on = None
 

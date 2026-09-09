@@ -250,21 +250,37 @@ class Database:
         emit_structured(logger, logging.INFO, "db.probe.pass", step="fernet_roundtrip")
 
     def _step_write_rollback(self) -> None:
+        # What this step proves is that a write can be opened and undone, so
+        # the residue check must be RELATIVE to the rows already there. An
+        # absolute `count != 0` holds only on an empty database: in production
+        # `clusters` carries one row per registered Discord server, and the
+        # probe read those as its own leaked sentinel and refused every boot
+        # with `rollback_leaked count=1`. That is what took the bot down on
+        # 2026-08-04, once this probe was first wired into startup.
         try:
             conn = sqlite3.connect(self._rw_uri(), uri=True)
+            before = conn.execute("SELECT COUNT(*) FROM clusters").fetchone()[0]
             conn.execute("BEGIN")
             conn.execute(
                 "INSERT INTO clusters (discord_server_id) VALUES (?)",
                 (PROBE_SENTINEL_SERVER_ID,),
             )
             conn.execute("ROLLBACK")
-            count = conn.execute("SELECT COUNT(*) FROM clusters").fetchone()[0]
+            after = conn.execute("SELECT COUNT(*) FROM clusters").fetchone()[0]
+            sentinel = conn.execute(
+                "SELECT COUNT(*) FROM clusters WHERE discord_server_id = ?",
+                (PROBE_SENTINEL_SERVER_ID,),
+            ).fetchone()[0]
             conn.close()
         except sqlite3.DatabaseError as exc:
             self._refuse("write_rollback", "write_failed", detail=str(exc))
             return
-        if count != 0:
-            self._refuse("write_rollback", "rollback_leaked", detail=f"count={count}")
+        if after != before or sentinel:
+            self._refuse(
+                "write_rollback",
+                "rollback_leaked",
+                detail=f"before={before} after={after} sentinel={sentinel}",
+            )
             return
         emit_structured(logger, logging.INFO, "db.probe.pass", step="write_rollback")
 

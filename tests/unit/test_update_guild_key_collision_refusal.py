@@ -104,11 +104,27 @@ SQL_MARKERS = ("INSERT INTO", "UPDATE ", "[parameters:", "sqlite3.IntegrityError
 # 16 characters minimum, and the reason is a trap step 08-01 walked into: a
 # 1-3 character generated key is a coincidental substring of almost any English
 # sentence, so `assert key not in reply` fails for the STRATEGY's reason rather
-# than production's and the property stops saying anything. Nothing the cog
-# renders contains a 16-character run of this alphabet, so a hit is a real leak.
+# than production's and the property stops saying anything.
+#
+# The length floor alone was not enough. It was chosen against the REPLY, which
+# is English prose, and the log is not: it is JSON whose field names are long
+# snake_case runs of exactly this alphabet. Hypothesis eventually drew
+# `tacticus_guild_i` — a legitimate 16-character prefix of the `tacticus_guild_id`
+# field that `guild.key.updated` has always emitted — and the property reported
+# a total key disclosure that had not happened. Raising the floor only moves the
+# collision to the next longer field name, so the fix is structural instead: every
+# generated key carries a sentinel that appears nowhere in this repository, which
+# no field name, message, identifier or uuid can collide with by construction.
+#
+# This does not narrow what the property covers. Production never branches on the
+# CONTENT of the key — it encrypts it, hmacs it and stores it — so a disclosure
+# that would surface an arbitrary key surfaces a sentinel-prefixed one just the
+# same, and now a hit is a real leak rather than a coincidence.
+_KEY_SENTINEL = "Qx7vZq"
+
 _API_KEYS = st.text(
     alphabet=string.ascii_letters + string.digits + "-_", min_size=16, max_size=48
-)
+).map(lambda body: _KEY_SENTINEL + body)
 
 # The three install paths `replace_guild_key` is reached from. Generated rather
 # than fixed because the criterion is that ONE guard covers all three: a fix

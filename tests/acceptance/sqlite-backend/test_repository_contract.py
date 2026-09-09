@@ -336,6 +336,84 @@ def test_guild_with_empty_api_key_round_trips(impl_pair):
     assert loaded.guilds["mech"].api_key == ""
 
 
+# ---------------------------------------------------------------------------
+# Per-guild leaderboard switch. Parametrized over both adapters: this flag is
+# NOT one of the ADR-006 D9 degradations — the JSON rollback path honours it
+# identically, so an officer's decision survives a rollback.
+# ---------------------------------------------------------------------------
+
+def test_leaderboards_default_to_enabled_for_a_guild_that_never_set_the_flag(impl_pair):
+    """A guild registered before the switch existed keeps running.
+
+    The upgrade's `server_default` and the JSON `.get(..., True)` are two
+    different mechanisms for one guarantee, which is why this is asserted
+    through the port rather than against either storage medium.
+    """
+    repo = impl_pair
+    assert repo.list_leaderboard_flags(PROD_SERVER)["neuro"] is True
+
+
+def test_set_guild_leaderboards_enabled_round_trips_false(impl_pair):
+    repo = impl_pair
+    repo.set_guild_leaderboards_enabled(PROD_SERVER, "neuro", False)
+    assert repo.list_leaderboard_flags(PROD_SERVER)["neuro"] is False
+    # The sibling is untouched — a single-column write on one row.
+    assert repo.list_leaderboard_flags(PROD_SERVER)["mech"] is True
+
+
+def test_set_guild_leaderboards_enabled_refuses_an_unregistered_guild(impl_pair):
+    """`KeyError`, never a silent no-op that reports success to an officer —
+    the same refusal `replace_guild_key` owes for the same reason."""
+    repo = impl_pair
+    with pytest.raises(KeyError):
+        repo.set_guild_leaderboards_enabled(PROD_SERVER, "no-such-guild", False)
+
+
+def test_save_guilds_dict_cycle_preserves_a_disabled_flag(impl_pair):
+    """THE regression this design exists to prevent.
+
+    `leaderboards_enabled` is deliberately absent from the five-key cog-facing
+    dict, so an officer disables a guild and then ANY unrelated
+    load-mutate-save command — `/set_ping_channel` is the live example, and it
+    is reproduced verbatim here — runs `save_guilds_dict`. An implementation
+    that rebuilt the `Guild` from the dict alone would take the dataclass
+    default and silently switch leaderboards back ON, which is precisely the
+    clobber ADR-008 DDD-4 moved binding state off `guilds` to avoid.
+
+    Both adapters owe this: the JSON impl rewrites `guilds.json` wholesale
+    from the dataclass and the SQLite impl updates the row field-by-field, so
+    they fail this differently and must be pinned separately.
+    """
+    repo = impl_pair
+    repo.set_guild_leaderboards_enabled(PROD_SERVER, "neuro", False)
+
+    guilds = repo.load_guilds_dict(PROD_SERVER)
+    assert "leaderboards_enabled" not in guilds["neuro"], (
+        "the flag leaked into the five-key cog-facing dict; the carry-forward "
+        "in save_guilds_dict is what keeps it out, and a sixth key would break "
+        "the exact-equality guild-dict assertions across the acceptance suites"
+    )
+    guilds["neuro"]["notification_channel_id"] = 4242   # what /set_ping_channel does
+    repo.save_guilds_dict(PROD_SERVER, guilds)
+
+    assert repo.list_leaderboard_flags(PROD_SERVER)["neuro"] is False, (
+        "an unrelated admin command re-enabled a disabled guild's leaderboards"
+    )
+    assert repo.load_guilds_dict(PROD_SERVER)["neuro"]["notification_channel_id"] == 4242
+
+
+def test_registering_a_new_guild_through_the_dict_defaults_to_enabled(impl_pair):
+    """The carry-forward must not mistake "new guild" for "flag absent"."""
+    repo = impl_pair
+    guilds = repo.load_guilds_dict(PROD_SERVER)
+    guilds["fresh"] = {
+        "name": "Fresh", "api_key": "", "role_id": 1,
+        "notification_channel_id": None, "member_role_ids": [],
+    }
+    repo.save_guilds_dict(PROD_SERVER, guilds)
+    assert repo.list_leaderboard_flags(PROD_SERVER)["fresh"] is True
+
+
 def test_RC13_player_list_migrator_v1_to_v2_inverts_and_v2_is_noop():
     """@property — RC13."""
     v1 = {"Maria Santos": "tacticus-uid-001"}

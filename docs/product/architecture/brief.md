@@ -443,7 +443,12 @@ refresh, so a returning player is un-flagged).
 `bot/tracker.py` `process_api_response(api_data, season, data_dir)` reads three
 files from `data_dir`, merges Tacticus raid entries into top-N lists, and writes
 them back. Top-N constant `TOP_N = 5`. Tracked rarities: `Legendary`, `Mythic`.
-Tier keys (`get_tier_key`): `Legendary_0..Legendary_4`, `Mythic`, `Mythic_1`.
+Tier keys (`get_tier_key`) are an **open** set, derived not enumerated: `Mythic`
+for Mythic index 0 (bare — a frozen historical skew), otherwise
+`<rarity>_<n>` for any tracked rarity and any `n >= 0`. Negative and
+unparseable `set` values are rejected. Rendering is gated separately by
+`config.TIER_CHOICES`, which currently offers `Legendary 1..5` and
+`Mythic 1..3`.
 
 Common shape: `{ "boss_hits": { <boss_id>: { <encounter_index>: { <tier_key>: [entries] } } } }`.
 

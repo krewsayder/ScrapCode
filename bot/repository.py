@@ -546,6 +546,41 @@ class ClusterRepository(ABC):
         path for a key replacement.
         """
 
+    # --- Per-guild leaderboard switch ---
+    # A targeted write in the same shape as `replace_guild_key`, and for the
+    # same reason: `save`/`save_guilds_dict` rewrite every guild row and
+    # CASCADE-delete absent ones, which is the wrong tool for flipping one
+    # boolean on one row. The read is bulk because its one caller
+    # (`auto_update._refresh_live_leaderboards`) needs every guild's answer
+    # per cycle.
+
+    @abstractmethod
+    def set_guild_leaderboards_enabled(self, discord_server_id: int,
+                                       guild_id: str, enabled: bool) -> None:
+        """UPDATE only `leaderboards_enabled` on the single named guild row.
+
+        Raises `KeyError` when the guild row is absent — flipping a switch on
+        an unregistered guild is a caller-side refusal, never a silent no-op
+        that reports success to an officer, exactly as `replace_guild_key`'s
+        first refusal has it.
+
+        Touches one column, so no dependent player or hit row is reachable
+        from this write even by accident.
+        """
+
+    @abstractmethod
+    def list_leaderboard_flags(self, discord_server_id: int) -> dict[str, bool]:
+        """Return `{guild_id: leaderboards_enabled}` for every registered guild.
+
+        Bulk, and deliberately NOT `load()`: the hourly refresh needs this for
+        every guild on every cycle, and `load()` would decrypt every `api_key`
+        into cog scope to answer a question about a boolean. Keeping key
+        material out of the caller is the point (AC-010.6 widened chokepoint
+        scan), not an optimisation.
+
+        A guild with no row is simply absent; callers default it to enabled.
+        """
+
     # --- Quarantine history (08-03; ADR-008 DDD-4, UI-11) ---
     # Separate from the binding methods above because the two have opposite
     # lifetimes: a binding is 1:1 with a guild and CASCADEs away with it, a
@@ -664,6 +699,9 @@ class JsonClusterRepository(ClusterRepository):
                 api_key=data.get("api_key", ""),
                 role_id=data.get("role_id", 0),
                 notification_channel_id=data.get("notification_channel_id"),
+                # Absent for every guild registered before the flag existed,
+                # and `True` is the behaviour those guilds already had.
+                leaderboards_enabled=data.get("leaderboards_enabled", True),
                 member_role_ids=data.get("member_role_ids", []),
             )
             for guild_id, data in raw.get("guilds", {}).items()
@@ -687,6 +725,7 @@ class JsonClusterRepository(ClusterRepository):
                     "api_key":                 g.api_key,
                     "role_id":                 g.role_id,
                     "notification_channel_id": g.notification_channel_id,
+                    "leaderboards_enabled":    g.leaderboards_enabled,
                     "member_role_ids":         g.member_role_ids,
                 }
                 for guild_id, g in cluster.guilds.items()
@@ -717,6 +756,12 @@ class JsonClusterRepository(ClusterRepository):
 
     def save_guilds_dict(self, discord_server_id: int, guilds: dict) -> None:
         cluster = self.load(discord_server_id)
+        # `leaderboards_enabled` is NOT in the five-key dict and is therefore
+        # carried forward from storage rather than rebuilt from the caller's
+        # dict. Taking the dataclass default here instead would silently
+        # re-enable a disabled guild on the next `/set_ping_channel` — the
+        # exact clobber DDD-4 moved binding state off `guilds` to avoid.
+        stored = cluster.guilds
         cluster.guilds = {
             gid: Guild(
                 id=gid,
@@ -724,6 +769,9 @@ class JsonClusterRepository(ClusterRepository):
                 api_key=data.get("api_key", ""),
                 role_id=data.get("role_id", 0),
                 notification_channel_id=data.get("notification_channel_id"),
+                leaderboards_enabled=(
+                    stored[gid].leaderboards_enabled if gid in stored else True
+                ),
                 member_role_ids=data.get("member_role_ids", []),
             )
             for gid, data in guilds.items()
@@ -1061,3 +1109,29 @@ class JsonClusterRepository(ClusterRepository):
             raise KeyError(guild_id)
         guilds[guild_id]["api_key"] = api_key
         self._write_json(guilds_file, data)
+
+    def set_guild_leaderboards_enabled(self, discord_server_id: int,
+                                       guild_id: str, enabled: bool) -> None:
+        """Edit the one guild's entry in `guilds.json`, touching nothing else.
+
+        Unlike the binding methods, this is NOT degraded on the JSON path:
+        the flag is a plain field in the same file this adapter already owns,
+        so the rollback backend honours the switch exactly as SQLite does. An
+        officer who disables a guild's leaderboards keeps that decision across
+        a `SCRAPCODE_REPO_BACKEND=json` rollback.
+        """
+        guilds_file = self._server_path(discord_server_id) / "guilds.json"
+        data = self._read_json(guilds_file)
+        guilds = data.get("guilds", {})
+        if guild_id not in guilds:
+            raise KeyError(guild_id)
+        guilds[guild_id]["leaderboards_enabled"] = bool(enabled)
+        self._write_json(guilds_file, data)
+
+    def list_leaderboard_flags(self, discord_server_id: int) -> dict[str, bool]:
+        guilds_file = self._server_path(discord_server_id) / "guilds.json"
+        raw = self._read_json(guilds_file)
+        return {
+            gid: bool(data.get("leaderboards_enabled", True))
+            for gid, data in raw.get("guilds", {}).items()
+        }

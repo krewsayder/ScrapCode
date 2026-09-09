@@ -88,7 +88,8 @@ One entry per in-game guild. `guild_id` is a short slug produced by
   "api_key":                 "<tacticus api key>",
   "role_id":                 123456789,
   "notification_channel_id": 987654321,
-  "member_role_ids":         [111, 222]
+  "member_role_ids":         [111, 222],
+  "leaderboards_enabled":    true
 }
 ```
 
@@ -99,6 +100,7 @@ One entry per in-game guild. `guild_id` is a short slug produced by
 | `role_id` | int | no | `0` | `guilds.get_guild_by_role` | `guilds.save_guilds` | The Discord "leader" role for this guild. `register_guild` rejects a role already linked to another guild. |
 | `notification_channel_id` | int \| null | yes | `null` | `tasks_cog.cap_detect` (ping target) | `admin_cog.set_ping_channel`, `register_guild` (init `null`), migration `to_cluster_layout` | Channel for token-cap pings. `null`/0 ⇒ player not pinged. |
 | `member_role_ids` | `list<int>` | no | `[]` | `permissions.check_guild_member` | `guilds.add_guild_member_role`, migration `seed_roles` | Discord roles that count as "member" of this guild. Per-guild scoping key for member-tier checks. |
+| `leaderboards_enabled` | bool | no | `true` | `tasks_cog._refresh_live_leaderboards`, `view_cog.view_leaderboard`/`view_bomb_leaderboard`, `admin_cog._config_leaderboards`/`set_live_cluster_leaderboard` | `admin_cog.toggle_leaderboards` (via `guilds.set_guild_leaderboards_enabled`) | Per-guild leaderboard switch. `false` ⇒ live boards stop updating but are left in place, the guild drops out of the cluster board, and `/view_*` declines. Ingestion, token-cap pings and key checks are unaffected. Absent reads as `true`. Read in bulk via `list_leaderboard_flags` (no key decryption); written single-column, never via `save_guilds`. Deliberately absent from the five-key cog-facing guild dict — `save_guilds_dict` carries it forward from storage. |
 
 **Migration:** `guilds` table, PK `(discord_server_id, guild_id)`, FK
 `discord_server_id → clusters`. `member_role_ids` becomes a child table
@@ -109,6 +111,12 @@ ADR-006 D7). Add an `api_key_hmac` column: deterministic HMAC-SHA256 of `api_key
 guild→api_key binding that Fernet's non-deterministic ciphertext cannot enforce
 directly. `guild_id` is the natural key but is a *human-chosen slug* — keep it as a
 unique natural key, not a surrogate PK, unless you also want a surrogate.
+`leaderboards_enabled` is a `BOOLEAN NOT NULL DEFAULT 1` column added by alembic
+`0005`; the server-side default backfills existing rows in place, so the cutover
+is a no-op until an officer runs `/toggle_leaderboards`. Unlike the guild-key
+binding methods this is *not* an ADR-006 D9 degradation — the JSON adapter
+honours it identically, so the setting survives a rollback to
+`SCRAPCODE_REPO_BACKEND=json`.
 
 ### 2.3 Player registrations — `clusters/{id}/player_registrations.json`
 
@@ -176,7 +184,7 @@ Config for pinned leaderboard messages that the bot edits each hour.
 | `<key>` | str | no | — | `_refresh_live_leaderboards`, `admin._config_leaderboards` | `set_live_leaderboard`, `set_live_cluster_leaderboard` | Either `guild:<guild_id>` (per-guild LB) or literal `cluster` (cluster-wide). |
 | `channel_id` | int | no | — | `_refresh_live_leaderboards` | `set_live_leaderboard`/`set_live_cluster_leaderboard` | Discord channel hosting the messages. |
 | `guild_id` | str | yes (cluster has none) | — | `_refresh_live_leaderboards` (per-guild branch) | `set_live_leaderboard` | Present only for `guild:` keys. FK → `guilds.guild_id`. |
-| `messages` | `dict<tier_value, message_id>` | no | `{}` | `_refresh_live_leaderboards` (fetch+edit) | `set_live_*`, `_refresh_live_leaderboards` (rollover rewrites) | Keys are `TIER_CHOICES` values (`Legendary_0..4`, `Mythic`, `Mythic_1`). Values are Discord message IDs. |
+| `messages` | `dict<tier_value, message_id>` | no | `{}` | `_refresh_live_leaderboards` (fetch+edit) | `set_live_*`, `_refresh_live_leaderboards` (rollover rewrites) | Keys are `TIER_CHOICES` values — an **open** set: `Mythic` (index 0, bare) or `<rarity>_<n>` for any tracked rarity and any `n >= 0`. Values are Discord message IDs. A tier added to `TIER_CHOICES` after a board was created has no entry here; `_refresh_live_leaderboards` sends one message for it and adopts the id in place, leaving existing messages untouched. |
 | `season` | int \| null | yes | `null` (legacy) | `_refresh_live_leaderboards` (rollover logic) | `set_live_*`, `_refresh_live_leaderboards` (adopts/rollover) | `null` ⇒ legacy config adopted to current season without spawning new messages. Rollover freezes old messages and writes a fresh set. |
 
 **Migration:** `live_leaderboards` table, PK surrogate, FK `discord_server_id`
@@ -248,7 +256,7 @@ player-per-roster. Written by `bot/tracker.py::process_api_response`.
 | `boss_hits` | dict | no | `{}` | `tracker.load_json`, embeds | `tracker.save_json` | Root. |
 | `<boss_id>` (key) | str | no | — | leaderboard render (`embeds.build_*`), `_refresh_live_leaderboards` | `process_api_response` | Tacticus boss `unitId`. |
 | `<encounter_index>` (key) | str | no | — | render (limit 5 if `"0"` else 1), `LABELS` map | `process_api_response` | `"0"`=Main, `"1"`=Left, `"2"`=Right (config `LABELS`). Determines top-N limit. |
-| `<tier_key>` (key) | str | no | — | render (filtered by chosen tier) | `process_api_response` | `Legendary_0..4`, `Mythic`, `Mythic_1` (`get_tier_key`). |
+| `<tier_key>` (key) | str | no | — | render (filtered by chosen tier) | `process_api_response` | **Open** set (`get_tier_key`): `Mythic` (index 0, bare) or `<rarity>_<n>` for any tracked rarity and any `n >= 0`. The bare-`Mythic` skew is historical and frozen — index 0 of `Legendary` stores as `Legendary_0`. |
 | `damage` | int | no | — | sort key (`-damage`), render | `process_api_response` (from `entry["damageDealt"]`) | Primary sort desc. |
 | `user_id` | str | no | — | display lookup via `get_player_list` | `process_api_response` (from `entry["userId"]`) | FK → `players.tacticus_user_id` (logical). |
 | `completed_on` | str (ISO8601) | no | — | tiebreak sort (earliest first), render | `process_api_response` (from `entry["completedOn"]`) | Secondary sort asc. Pinned by `test_tracker_tiebreak.py`. |

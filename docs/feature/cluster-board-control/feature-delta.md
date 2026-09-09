@@ -1272,8 +1272,24 @@ the orchestrator did not match it.
 
 ### UI-7 — `guild-key-integrity`'s key-material scan matches on field *names*
 
-**Severity: medium.** Not this feature's to fix. Owner: whoever next touches
-`guild-key-integrity`.
+> **CLOSED — ALREADY FIXED ON `main`, and this entry was stale the moment it
+> was written.** Commit `9e99d58`, "test(guild-keys): stop the key-disclosure
+> property colliding with log field names", merged 2026-08-29 as part of PR #9
+> — ten days before this wave recorded it as an open issue.
+>
+> The diagnosis below was reached independently and matches the shipped fix
+> exactly. It was filed as open anyway because **this branch had never fetched
+> from the remote.** Every "is this ours?" check during DELIVER compared
+> against a local `main` that was 18 commits behind, so a fixed defect looked
+> like an unowned one. The fix arrived with the merge and the test is green.
+>
+> Kept rather than deleted: the failure of process is the useful part, and it
+> is the same root cause as the migration renumbering recorded in
+> `0006_live_leaderboard_board_status.py`. One `git fetch` at the start of the
+> wave would have prevented both.
+
+**Severity: medium — as diagnosed. Now moot.** Owner was `guild-key-integrity`;
+it had already discharged it.
 
 `test_no_reply_or_record_on_the_install_path_ever_carries_key_material` fails
 locally with:
@@ -1346,19 +1362,59 @@ reproduced it and read both functions.
 
 ---
 
-### A note on UI-7 and UI-8 together: your local suite now disagrees with a fresh checkout
+### A note on UI-7 and UI-8 together: Hypothesis found both, and one was already fixed
 
-Both were found by Hypothesis **during this DELIVER wave**, on inputs it had
-never generated before, and both are now pinned in the local `.hypothesis`
-example database. They replay on every subsequent run on this machine.
+Both surfaced **during this DELIVER wave**, on inputs Hypothesis had never
+generated before, and both are pinned in the local `.hypothesis` example
+database, so they replay on every subsequent run on this machine.
 
-Consequence worth stating plainly: **`pytest tests/unit tests/acceptance` on this
-machine shows 2 failures that a fresh clone or a CI runner would not show.**
-Neither is caused by `cluster-board-control`; neither is fixed by it. A future
-reader comparing a local run against a clean one should start here rather than
-re-deriving it.
+UI-7 turned out to be already fixed upstream (see above). **UI-8 is real and
+still open** — after merging `main`, it is the only failure in the suite that
+belongs to neither this feature nor the merge.
 
-That the DELIVER baseline (52 failed / 358 passed) did not include them is not an
-error in the baseline — it is when they were discovered.
+That the DELIVER baseline (52 failed / 358 passed) did not include either is not
+an error in the baseline — it is when they were discovered.
+
+---
+
+### UI-9 — DELIVER ran an entire wave against a base 18 commits stale
+
+**Severity: high, and it is a process defect rather than a code one.** Found
+when the pull request reported conflicts, 2026-09-08, after the branch was
+pushed.
+
+**No `git fetch` was run at any point during DISCUSS through DELIVER.** Every
+comparison against `main` — the base-commit check, the "is this failure ours?"
+triage, the decision to amend a migration in place — used a local ref that had
+been stale since before PR #3. `main` had advanced by 18 commits, including
+**PR #9, which shipped a leaderboard on/off switch of its own.**
+
+Three consequences, all avoidable by one command:
+
+1. **A duplicate migration revision.** ADR-009 DDD-4 authorised amending
+   revision `0005` in place because "no database has ever run it" — a true
+   statement about the wrong thing. `0005` was already taken on `main` by
+   `0005_guild_leaderboards_enabled`. Two revisions descending from `0004` do
+   **not** produce a merge conflict, because they are different files; git
+   merges them silently and alembic then refuses to upgrade at all. **This
+   would have surfaced on the deploy host as a failed migration followed by the
+   startup probe refusing to boot** — long after the merge looked clean.
+   Renumbered to `0006`; the full reasoning is in that file's docstring.
+2. **UI-7 filed as open when it was fixed.** Ten days stale.
+3. **Two silent semantic breaks that git auto-merged without conflict** —
+   `admin_cog._config_leaderboards` reading `cfg.get("guild_id")` and
+   `tasks_cog` assigning `config["messages"]`, both dict operations on what is
+   now a frozen dataclass. Neither is a text conflict. Both would have raised at
+   runtime, one of them on the hourly loop.
+
+**The transferable lesson is about what a clean merge proves.** Git reported one
+conflicted file. The three most dangerous problems — a duplicate migration
+number, and two type errors in auto-merged regions — were all invisible to it,
+because a merge conflict is a claim about *text* and every one of these was a
+claim about *meaning*. A green diff across a type change is not evidence; only
+running the suite against the merged tree is.
+
+**Recommendation:** fetch at wave start, and re-run the full suite after any
+merge that crosses a port-signature change, before trusting the result.
 
 ---

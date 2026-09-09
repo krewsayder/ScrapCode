@@ -27,6 +27,7 @@ TIER_CHOICES = [
     app_commands.Choice(name="Legendary 5", value="Legendary_4"),
     app_commands.Choice(name="Mythic 1",    value="Mythic"),
     app_commands.Choice(name="Mythic 2",    value="Mythic_1"),
+    app_commands.Choice(name="Mythic 3",    value="Mythic_2"),
 ]
 
 # Load environment variables from .env file

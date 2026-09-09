@@ -17,6 +17,7 @@ from bot.guilds import (
     save_capped_state,
     load_live_leaderboards,
     save_live_leaderboards,
+    list_leaderboard_flags,
     repo,
 )
 from bot.obs import emit_structured
@@ -557,6 +558,11 @@ class TasksCog(commands.Cog):
         if not live:
             return
 
+        # One bulk read per server per cycle rather than a lookup per board.
+        # Absent guild reads as enabled — the switch defaults ON so a guild
+        # registered before it existed keeps the behaviour it already had.
+        flags = list_leaderboard_flags(server_id)
+
         to_remove = []
         # KEPT, not retired, now that the configs are frozen (ADR-009 DESIGN
         # Q4). `save_live_leaderboards` rewrites EVERY board row on the
@@ -601,6 +607,17 @@ class TasksCog(commands.Cog):
                     to_remove.append(key)
                     continue
 
+                if not flags.get(guild_id, True):
+                    # `continue`, NEVER `to_remove.append(key)`. The config is
+                    # the only record of which messages this board owns, so
+                    # discarding it would make re-enabling send a SECOND set
+                    # of messages beside the ones members are already
+                    # watching, with the originals frozen forever. Skipping
+                    # leaves the existing messages in place, stale, and the
+                    # next enabled cycle edits them back to current.
+                    print(f"[live_leaderboard] {guild_id} is disabled, skipping {key}")
+                    continue
+
                 guild_name = guild_data["name"]
                 data = repo.load_battle_hits(server_id, guild_id, season)
 
@@ -621,6 +638,14 @@ class TasksCog(commands.Cog):
             elif key == "cluster":
                 merged = {}
                 for gid, gdata in guilds.items():
+                    # A guild whose leaderboards are off drops out of the
+                    # cluster board too. "Leaderboards off, except the one
+                    # where you are still ranked against everybody" is the
+                    # surprising reading of the switch; this is the whole
+                    # reason the flag lives on `guilds` rather than on a
+                    # single board's config.
+                    if not flags.get(gid, True):
+                        continue
                     data = repo.load_battle_hits(server_id, gid, season)
                     if not data or not data.get("boss_hits"):
                         continue
@@ -686,6 +711,39 @@ class TasksCog(commands.Cog):
                 for tier in TIER_CHOICES:
                     msg_id = message_ids.get(tier.value)
                     if not msg_id:
+                        # A tier added to TIER_CHOICES after this board was set
+                        # up (Mythic 3) has no message here. This used to
+                        # `continue` forever, so the new tier stayed invisible
+                        # until an officer re-ran /set_live_leaderboard —
+                        # which, mid-season, would abandon the existing
+                        # messages members are already watching. Adopt one
+                        # message instead, in place, on the next hourly pass.
+                        try:
+                            msg = await channel.send(contents[tier.value])
+                        except discord.Forbidden:
+                            print(f"[live_leaderboard] No permission to send new tier message in channel {channel_id} ({key})")
+                            break
+                        except Exception as e:
+                            print(f"[live_leaderboard] Error sending new tier message for {tier.value} ({key}): {e}")
+                            continue
+                        # REBUILT, never mutated. Two separate hazards here,
+                        # and the merge that brought this branch together
+                        # tripped both:
+                        #
+                        # `config` is a frozen `LiveBoardConfig` now, so
+                        # `config["messages"] = ...` raises outright.
+                        #
+                        # More quietly: `message_ids` was bound from
+                        # `config.messages` above and is the SAME dict object
+                        # the config holds. Frozen blocks rebinding an
+                        # attribute, not mutating a dict inside one, so an
+                        # in-place write here would reach through the alias and
+                        # edit the config that other code still holds — legal,
+                        # silent, and wrong. Copy, then replace.
+                        message_ids = {**message_ids, tier.value: msg.id}
+                        config      = replace(config, messages=message_ids)
+                        live[key]   = config
+                        dirty       = True
                         continue
                     try:
                         msg = await channel.fetch_message(msg_id)

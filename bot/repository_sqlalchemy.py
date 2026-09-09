@@ -162,6 +162,11 @@ class SqlAlchemyClusterRepository(ClusterRepository):
 
     def save_guilds_dict(self, discord_server_id: int, guilds: dict) -> None:
         cluster = self.load(discord_server_id)
+        # Carried forward from storage, not rebuilt from the dict — see the
+        # matching comment in `JsonClusterRepository.save_guilds_dict`. Both
+        # adapters owe this identically: the flag is invisible to the five-key
+        # dict, so the caller cannot supply it and the default would clobber.
+        stored = cluster.guilds
         cluster.guilds = {
             gid: Guild(
                 id=gid,
@@ -169,6 +174,9 @@ class SqlAlchemyClusterRepository(ClusterRepository):
                 api_key=data.get("api_key", ""),
                 role_id=data.get("role_id", 0),
                 notification_channel_id=data.get("notification_channel_id"),
+                leaderboards_enabled=(
+                    stored[gid].leaderboards_enabled if gid in stored else True
+                ),
                 member_role_ids=data.get("member_role_ids", []),
             )
             for gid, data in guilds.items()
@@ -204,6 +212,7 @@ class SqlAlchemyClusterRepository(ClusterRepository):
                 api_key=decrypt_api_key(row.api_key, self._fernet_key),
                 role_id=row.role_id,
                 notification_channel_id=row.notification_channel_id,
+                leaderboards_enabled=bool(row.leaderboards_enabled),
                 member_role_ids=member_role_ids,
             )
         return guilds
@@ -259,6 +268,7 @@ class SqlAlchemyClusterRepository(ClusterRepository):
                 api_key_hmac=hmac_val,
                 role_id=g.role_id,
                 notification_channel_id=g.notification_channel_id,
+                leaderboards_enabled=g.leaderboards_enabled,
             ))
         else:
             row.name = g.name
@@ -266,6 +276,7 @@ class SqlAlchemyClusterRepository(ClusterRepository):
             row.api_key_hmac = hmac_val
             row.role_id = g.role_id
             row.notification_channel_id = g.notification_channel_id
+            row.leaderboards_enabled = g.leaderboards_enabled
         # Member roles: full replace per guild (no cascade concerns — pure join-ish).
         session.execute(delete(GuildMemberRoleRow).where(
             GuildMemberRoleRow.discord_server_id == discord_server_id,
@@ -894,6 +905,36 @@ class SqlAlchemyClusterRepository(ClusterRepository):
                     self._guild_id_holding_key(session, new_hmac, row)
                     or _HOLDER_VANISHED
                 ) from None
+
+    def set_guild_leaderboards_enabled(self, discord_server_id: int,
+                                       guild_id: str, enabled: bool) -> None:
+        """UPDATE only `leaderboards_enabled` on the one guild row.
+
+        Does NOT call `_upsert_one_guild`, for the reason `replace_guild_key`
+        gives: that helper rewrites name, api_key, role_id and
+        notification_channel_id from a `Guild` the caller would have to
+        assemble, and a stale one clobbers. Touching a single column makes
+        CASCADE impossible by construction rather than by avoidance.
+        """
+        with self._db.session_scope() as session:
+            row = session.get(GuildRow, (discord_server_id, guild_id))
+            if row is None:
+                raise KeyError(guild_id)
+            row.leaderboards_enabled = bool(enabled)
+
+    def list_leaderboard_flags(self, discord_server_id: int) -> dict[str, bool]:
+        """`{guild_id: leaderboards_enabled}` without decrypting a single key.
+
+        Selects the two columns it needs rather than whole `GuildRow` objects
+        — the point of this method over `load()` is that no `api_key`
+        ciphertext is fetched, let alone decrypted, to answer it.
+        """
+        with self._db.session_scope() as session:
+            rows = session.execute(
+                select(GuildRow.guild_id, GuildRow.leaderboards_enabled)
+                .where(GuildRow.discord_server_id == discord_server_id)
+            ).all()
+            return {guild_id: bool(enabled) for guild_id, enabled in rows}
 
     def _guild_id_holding_key(self, session, key_hmac: str | None,
                               written_row: GuildRow) -> str | None:
