@@ -7,6 +7,7 @@ from bot.repository import (
     ClusterRepository,
     GuildBinding,
     JsonClusterRepository,
+    LiveBoardConfig,
     SupportsProbe,
 )
 from bot.migrations.player_list_migrations import PlayerListMigrator
@@ -428,9 +429,26 @@ def save_capped_state(discord_server_id: int, data: dict) -> None:
 # LIVE LEADERBOARDS
 # ==========================================
 
-def load_live_leaderboards(discord_server_id: int) -> dict:
+def load_live_leaderboards(discord_server_id: int) -> dict[str, LiveBoardConfig]:
+    """Return `{scope_key: config}` for every live board on this server.
+
+    `live_board_enabled` and `set_live_board_enabled` used to sit beside this
+    wrapper, holding the convention that an enabled board was the ABSENCE of
+    an `enabled` key. Both are gone (ADR-009 DDD-7). The state is a named
+    `BoardStatus` on a frozen `LiveBoardConfig`, and the predicate is
+    `config.is_enabled` — a property on the type, which the next call site
+    cannot forget to call and cannot re-derive differently.
+    """
     return repo.load_live_leaderboards(discord_server_id)
 
 
-def save_live_leaderboards(discord_server_id: int, data: dict) -> None:
+def save_live_leaderboards(discord_server_id: int,
+                           data: dict[str, LiveBoardConfig]) -> None:
+    """Persist every live board on this server.
+
+    The configs are frozen, so a caller changing one hands back the mapping it
+    loaded with that entry REBUILT via `dataclasses.replace` (DDD-8). There is
+    no in-place edit to forget to save, and no edit that silently lands on a
+    config a sibling caller is still holding.
+    """
     repo.save_live_leaderboards(discord_server_id, data)

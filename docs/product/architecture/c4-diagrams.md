@@ -299,6 +299,87 @@ flowchart TB
 - **`PlayerService` no longer speaks to Tacticus.** It keeps its Chronicler
   calls for per-player profiles; the Tacticus-direct call has moved out of the
   Chronicler package entirely, resolving the oddity ADR-003 row #2 flags.
+
+---
+
+# Diagrams — `cluster-board-control` (DESIGN wave, target)
+
+> Appended 2026-09-08. **System Context (§1) and Container (§4) are unchanged**
+> — no new external system, no new container, no new dependency. Only a
+> Component diagram is warranted. See
+> [ADR-009](adr-009-live-board-status-representation.md).
+
+## 7. Component diagram — live board control path
+
+```mermaid
+flowchart TB
+    subgraph Driving["Driving ports — all officer tier"]
+        Dis["/disable_cluster_leaderboard"]
+        Ena["/enable_cluster_leaderboard"]
+        Setup["/set_live_cluster_leaderboard<br/>rebuilds config → always ACTIVE"]
+        Cfg["/view_config config:leaderboards<br/>the ONLY place a pause is visible"]
+        Auto["auto_update<br/>@tasks.loop(hours=1)<br/>_refresh_live_leaderboards"]
+    end
+
+    subgraph Handler["Command handler"]
+        SCB["admin_cog._set_cluster_board_state<br/>refuses when no board exists<br/>no-op flip writes nothing"]
+    end
+
+    subgraph Port["Driven port"]
+        Repo["ClusterRepository (ABC)<br/>load_live_leaderboards() → dict[str, LiveBoardConfig]<br/>save_live_leaderboards(mapping)"]
+        LBC["LiveBoardConfig (frozen)<br/>channel_id · messages · season · guild_id<br/>board_status: BoardStatus<br/><b>is_enabled</b> ← the ONE comparison"]
+    end
+
+    subgraph Adapters["Driven adapters — both materialise ACTIVE on load"]
+        Json["JsonClusterRepository<br/>NOT degraded here, unlike key_status"]
+        Sql["SqlAlchemyClusterRepository"]
+    end
+
+    SQLite[("live_leaderboards<br/>board_status TEXT NOT NULL DEFAULT 'active'<br/>+ live_lb_messages")]
+    JsonF[("live_leaderboards.json")]
+    Discord{{"Discord<br/>message edit / send"}}
+
+    Dis --> SCB
+    Ena --> SCB
+    SCB -- "dataclasses.replace(status=…)" --> Repo
+    Setup --> Repo
+    Cfg -- "reads is_enabled for the status line" --> Repo
+    Auto -- "reads is_enabled" --> Repo
+
+    Repo --- LBC
+    Repo --> Json
+    Repo --> Sql
+    Json --> JsonF
+    Sql --> SQLite
+
+    Auto -- "ACTIVE: edit in place, or fresh set on rollover" --> Discord
+    Auto -. "DISABLED → NO Discord call of any kind<br/>messages untouched, config NOT removed" .-> Discord
+```
+
+## Notes — `cluster-board-control` diagram
+
+- **The dotted arrow is the whole feature.** A disabled board makes zero
+  Discord calls — not an edit, not a re-send — and its config survives. The
+  refresh loop already deletes configs whose channel has vanished, so "skip"
+  had to be kept out of that branch: a pause is not a teardown.
+- **`is_enabled` is a property on the frozen config, not a free function.**
+  A predicate that sits *beside* the data can be forgotten by the next call
+  site; one that sits *on the type* cannot. This is ADR-009 DDD-7, and it is
+  the same discipline as ADR-008's "cogs never compare `key_status`
+  themselves".
+- **Both adapters materialise the default.** A config with no stored status —
+  every board that exists today — comes out of either adapter as `ACTIVE`. No
+  reader infers it. This is what makes the JSON/SQLite parity contract hold
+  without a conditionally-emitted field, and it mirrors `load_guild_binding`
+  returning `GuildBinding()` rather than `None`.
+- **The JSON adapter is not degraded here**, unlike `key_status` (ADR-006 D9).
+  It stores live-board configs natively, so the status round-trips on the
+  rollback path. The asymmetry is deliberate and is recorded so it does not
+  read as an oversight.
+- **`/view_config` carries load-bearing weight.** Because a pause leaves the
+  posted messages untouched (DISCUSS D2), a frozen board and a live one look
+  identical in the channel. The status line is the only surface where they
+  differ, which is why it renders for *both* states and is never omitted.
 - **`active_key` (sync, no probe) exists solely for season discovery**, which
   must skip quarantined guilds and fall through to the next usable key —
   otherwise quarantining one guild halts every guild in the server

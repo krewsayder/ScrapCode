@@ -1,9 +1,13 @@
+import logging
+from dataclasses import replace
+
 import httpx
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from bot import guild_keys
+from bot.obs import emit_structured
 # The MODULE, not `repo` by value. `bot/guilds.py` binds `repo = build_repo()`
 # at import time; a test (or a rollback that rebuilds it) swaps that attribute,
 # and a `from bot.guilds import repo` in this module would keep pointing at the
@@ -17,16 +21,36 @@ from bot.guilds import (
     load_guild_binding,
     load_live_leaderboards,
     save_live_leaderboards,
+    get_player_list,
     load_player_list,
     add_cluster_role,
     add_guild_member_role,
     repo,
 )
-from bot.repository import QuarantineTombstone
+from bot.repository import BoardStatus, LiveBoardConfig, QuarantineTombstone
 from bot.embeds import guild_autocomplete, encounter_limit
 from bot.permissions import require_tier, check_tier
 from bot.services.chronicl3r.player_service import PlayerService
 from bot.services.tacticus.guild_client import GuildSnapshot, KeyStatus
+
+# This module's OWN logger, not a shared one: `emit_structured` takes the
+# caller's logger so the record lands under `bot.cogs.admin_cog` and the
+# operator reading `discord.log` can see which module moved the board.
+logger = logging.getLogger(__name__)
+
+# The structured record a board's state change leaves behind — the only thing
+# that answers "since when" about a paused board (`/view_config` answers "is it
+# paused NOW"). Dotted like every other event this bot emits
+# (`guild.key.quarantined`, `health.startup.refused`), and pinned in the
+# acceptance suite's vocabulary because the operator's
+# `grep live_board.status.changed discord.log` and the test have to break
+# together.
+BOARD_STATUS_CHANGED_EVENT = "live_board.status.changed"
+
+# The mapping key the cluster board is stored under. A local name rather than
+# three string literals so the key that is READ, the key that is WRITTEN and
+# the key that is RECORDED cannot drift apart.
+CLUSTER_SCOPE_KEY = "cluster"
 
 # Shown in place of a display field the guild service did not send. Display
 # fields are never load-bearing (ADR-008 D1): a guild that has not set a tag
@@ -443,7 +467,7 @@ class AdminCog(commands.Cog):
         # carries a Paused status in its own field below, so it is held back
         # here rather than saying the same thing twice on one screen.
         boarded  = {
-            cfg.get("guild_id") for key, cfg in live.items()
+            cfg.guild_id for key, cfg in live.items()
             if key.startswith("guild:")
         }
         disabled = sorted(
@@ -455,18 +479,43 @@ class AdminCog(commands.Cog):
             return embed
 
         for key, cfg in live.items():
-            channel_id  = cfg.get("channel_id")
-            channel_str = f"<#{channel_id}>" if channel_id else "❌ No channel"
-            tier_count  = len(cfg.get("messages", {}))
+            channel_str = f"<#{cfg.channel_id}>" if cfg.channel_id else "❌ No channel"
+            tier_count  = len(cfg.messages)
             label       = "Cluster" if key == "cluster" else key.replace("guild:", "")
-            # A board that is configured but paused reads as healthy on this
-            # screen unless it says otherwise — the silent-success failure the
-            # cycle records exist to prevent, in embed form.
-            paused = key.startswith("guild:") and not flags.get(cfg.get("guild_id"), True)
-            status = "\n**Status:** ⏸️ Paused (`/toggle_leaderboards`)" if paused else ""
+            # TWO INDEPENDENT SWITCHES reach this screen, and both are stated.
+            # They answer different questions and a board can sit in any
+            # combination of them, so folding them into one line would lose
+            # which lever an officer has to pull.
+            #
+            # `board_status` is THIS BOARD's own pause
+            # (`/disable_cluster_leaderboard`). A paused board is identical to a
+            # live one in the channel, because the design leaves the posted
+            # messages exactly where they are — so this line is the only place
+            # the difference is visible. It renders for BOTH states and is never
+            # omitted: absence of a warning must not be the only signal that a
+            # board is healthy (KPI-3).
+            #
+            # `leaderboards_enabled` is the GUILD's switch
+            # (`/toggle_leaderboards`), which also drops the guild out of the
+            # cluster board. A guild board can be running on its own terms while
+            # its guild is switched off, which is exactly the state that reads
+            # as healthy if only one of the two is reported.
+            state = (
+                "✅ Updating hourly"
+                if cfg.is_enabled
+                else "⛔ Turned off — messages frozen at the last update"
+            )
+            guild_off  = key.startswith("guild:") and not flags.get(cfg.guild_id, True)
+            guild_line = (
+                "\n**Guild:** ⏸️ Paused (`/toggle_leaderboards`)" if guild_off else ""
+            )
             embed.add_field(
                 name=label,
-                value=f"**Channel:** {channel_str}\n**Tiers tracked:** {tier_count}{status}",
+                value=(
+                    f"**Status:** {state}\n"
+                    f"**Channel:** {channel_str}\n"
+                    f"**Tiers tracked:** {tier_count}{guild_line}"
+                ),
                 inline=False,
             )
 
@@ -615,12 +664,15 @@ class AdminCog(commands.Cog):
                 return
 
         live = load_live_leaderboards(server_id)
-        live[f"guild:{guild_id}"] = {
-            "channel_id": channel.id,
-            "guild_id":   guild_id,
-            "messages":   message_ids,
-            "season":     season,
-        }
+        # A described configuration, not a raw dict literal (ADR-009 DDD-2).
+        # `board_status` defaults to ACTIVE, so setting a guild board up
+        # brings it back on for free — same as the cluster command below.
+        live[f"guild:{guild_id}"] = LiveBoardConfig(
+            channel_id=channel.id,
+            guild_id=guild_id,
+            messages=message_ids,
+            season=season,
+        )
         save_live_leaderboards(server_id, live)
 
         await interaction.followup.send(
@@ -648,7 +700,6 @@ class AdminCog(commands.Cog):
 
         from config import TIER_CHOICES
         from bot.embeds import build_cluster_messages
-        from bot.guilds import get_player_list
 
         server_id = interaction.guild_id
         guilds    = load_guilds(server_id)
@@ -747,11 +798,17 @@ class AdminCog(commands.Cog):
             message_ids[tier.value] = msg.id
 
         live = load_live_leaderboards(server_id)
-        live["cluster"] = {
-            "channel_id": channel.id,
-            "messages":   message_ids,
-            "season":     season,
-        }
+        # Rebuilt from scratch, so a board that was turned off comes back ON —
+        # `board_status` defaults to ACTIVE (AC-002.5), which is why building a
+        # fresh config is the whole implementation. Setting one up is an
+        # unambiguous "I want this board": carrying a stale pause across it
+        # would hand the officer a freshly-posted set of messages that then
+        # never update.
+        live["cluster"] = LiveBoardConfig(
+            channel_id=channel.id,
+            messages=message_ids,
+            season=season,
+        )
         save_live_leaderboards(server_id, live)
 
         await interaction.followup.send(
@@ -761,7 +818,130 @@ class AdminCog(commands.Cog):
         )
 
     # ==========================================
+    # SLASH COMMANDS: DISABLE / ENABLE_CLUSTER_LEADERBOARD
+    #
+    # The operator's off switch, and the one thing the cluster board had no
+    # way to express. A guild board stops on its own when the guild's key is
+    # quarantined; the cluster board has no such state — it either refreshes
+    # every hour or it silently stops because no key in the cluster could
+    # answer the season, which reads as healthy and is exactly the failure
+    # the guild-key feature exists to remove.
+    #
+    # Turning it off does NOT touch the posted messages. They stay in the
+    # channel with the content of the last refresh, which is what makes this
+    # a pause rather than a teardown: the season's board remains readable,
+    # and re-enabling picks it back up without re-posting.
+    # ==========================================
+
+    @app_commands.command(
+        name="disable_cluster_leaderboard",
+        description="Stop the live Cluster leaderboard updating. Posted messages are left in place.",
+    )
+    @require_tier("officer")
+    async def disable_cluster_leaderboard(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        await self._set_cluster_board_state(interaction, status=BoardStatus.DISABLED)
+
+    @app_commands.command(
+        name="enable_cluster_leaderboard",
+        description="Resume hourly updates of the live Cluster leaderboard.",
+    )
+    @require_tier("officer")
+    async def enable_cluster_leaderboard(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        await self._set_cluster_board_state(interaction, status=BoardStatus.ACTIVE)
+
+    async def _set_cluster_board_state(
+        self, interaction: discord.Interaction, *, status: BoardStatus
+    ) -> None:
+        """Drive the cluster board to a named state, or explain why there is none.
+
+        Both commands enter here so the "no board configured" refusal and the
+        already-in-that-state reply cannot drift apart.
+
+        Takes a `BoardStatus`, not a boolean. The boolean was the shipped
+        shape's last foothold in the cog: it forced this method to know how
+        "on" is represented in order to translate. Naming the destination
+        state removes the translation, and the command that asks for a state
+        is the command that names it.
+        """
+        server_id = interaction.guild_id
+        live      = load_live_leaderboards(server_id)
+        config    = live.get(CLUSTER_SCOPE_KEY)
+
+        if config is None:
+            # Refusing rather than storing a switch for a board that does not
+            # exist: a pause recorded against nothing would be silently
+            # discarded by the next `/set_live_cluster_leaderboard`, which
+            # rebuilds the config from scratch.
+            await interaction.followup.send(
+                "❌ No live Cluster leaderboard is configured. "
+                "Set one up with `/set_live_cluster_leaderboard` first.",
+                ephemeral=True,
+            )
+            return
+
+        enabled = status is BoardStatus.ACTIVE
+
+        if config.board_status is status:
+            state = "already running" if enabled else "already turned off"
+            await interaction.followup.send(
+                f"ℹ️ The live Cluster leaderboard is {state}.", ephemeral=True
+            )
+            return
+
+        # REBUILT, not mutated: the config is frozen, so the changed board goes
+        # back into the mapping explicitly and the save cannot be forgotten.
+        # Everything but the switch is carried across by `replace`, which is
+        # AC-001.4 held by construction rather than by remembering to copy.
+        live[CLUSTER_SCOPE_KEY] = replace(config, board_status=status)
+        save_live_leaderboards(server_id, live)
+
+        # BELOW the save and PAST both early returns, deliberately. The record
+        # follows the CHANGE, not the command: emitted at the top of this
+        # method it would answer "who ran a command" — including for the
+        # already-in-that-state reply above, which moved nothing — instead of
+        # "when did this board's state actually move", which is the question a
+        # board paused months ago leaves nobody able to answer.
+        #
+        # On change, never per cycle. The refresh loop skipping a paused board
+        # every hour is ~720 records a month for ONE board, and a log nobody
+        # can skim is a log nobody reads.
+        emit_structured(
+            logger,
+            logging.INFO,
+            BOARD_STATUS_CHANGED_EVENT,
+            server_id=server_id,
+            scope_key=CLUSTER_SCOPE_KEY,
+            from_status=config.board_status.value,
+            to_status=status.value,
+        )
+
+        where = f"<#{config.channel_id}>" if config.channel_id else "its channel"
+
+        if enabled:
+            await interaction.followup.send(
+                f"✅ The live Cluster leaderboard in {where} will update again "
+                f"on the next hourly cycle.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                f"⛔ The live Cluster leaderboard in {where} has been turned off.\n"
+                f"The posted messages are left exactly as they are and will "
+                f"stop updating. Run `/enable_cluster_leaderboard` to resume.",
+                ephemeral=True,
+            )
+
+    # ==========================================
     # SLASH COMMAND: TOGGLE_LEADERBOARDS
+    #
+    # The GUILD-level switch, and a different question from the two commands
+    # above. This one takes a guild out of leaderboards entirely — its own
+    # boards stop AND it drops out of the cluster board — while
+    # `/disable_cluster_leaderboard` pauses one board and changes nothing about
+    # which guilds count. Both survive the merge because neither subsumes the
+    # other; `/view_config` states them on separate lines for the same reason.
     # ==========================================
 
     @app_commands.command(

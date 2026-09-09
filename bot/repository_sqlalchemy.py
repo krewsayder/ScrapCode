@@ -44,8 +44,10 @@ from bot.db.session import Database
 from bot.models import Cluster, Guild
 from bot.repository import (
     BattleHitEntry,
+    BoardStatus,
     BombHitEntry,
     ClusterRepository,
+    LiveBoardConfig,
     DuplicateReplayUrlError,
     GuildBinding,
     GuildKeyAlreadyRegisteredError,
@@ -70,6 +72,16 @@ _GUILD_KEY_UNIQUENESS_MARKERS = ("guilds.api_key_hmac", "uq_guilds_api_key_hmac"
 # is taken" without a name can retry, an admin sent the ciphertext cannot
 # un-disclose it.
 _HOLDER_VANISHED = ""
+
+# The two strings `live_leaderboards.board_status` stores (ADR-009 DDD-1),
+# spelled out here because they are a COLUMN fact — what a `SELECT` returns
+# and what a hand-written migration has to write — and a column fact belongs
+# beside the column access. The port speaks `BoardStatus`, so this table is
+# the whole translation and there is nowhere else to write the strings.
+_BOARD_STATUS_BY_COLUMN_VALUE = {
+    "active":   BoardStatus.ACTIVE,
+    "disabled": BoardStatus.DISABLED,
+}
 
 
 def _violates_guild_key_uniqueness(violation: IntegrityError) -> bool:
@@ -369,13 +381,13 @@ class SqlAlchemyClusterRepository(ClusterRepository):
     # live_leaderboards (decomposed: LiveLeaderboardRow + LiveLbMessageRow)
     # ------------------------------------------------------------------
 
-    def load_live_leaderboards(self, discord_server_id: int) -> dict:
+    def load_live_leaderboards(self, discord_server_id: int) -> dict[str, LiveBoardConfig]:
         with self._db.session_scope() as session:
             rows = session.execute(
                 select(LiveLeaderboardRow).where(
                     LiveLeaderboardRow.discord_server_id == discord_server_id)
             ).scalars().all()
-            result: dict[str, dict] = {}
+            result: dict[str, LiveBoardConfig] = {}
             for row in rows:
                 messages = {
                     msg.tier_value: msg.message_id
@@ -384,15 +396,26 @@ class SqlAlchemyClusterRepository(ClusterRepository):
                             LiveLbMessageRow.config_id == row.id)
                     ).scalars().all()
                 }
-                entry: dict[str, Any] = {"channel_id": row.channel_id, "messages": messages}
-                if row.season is not None:
-                    entry["season"] = row.season
-                if row.guild_id is not None:
-                    entry["guild_id"] = row.guild_id
-                result[row.scope_key] = entry
+                # Every field is carried, `board_status` included and never
+                # conditionally. The shipped adapter emitted its status key
+                # only when the board was off so that the loaded dict matched
+                # the saved literal; ADR-009 DDD-3 holds parity the other way
+                # round — both adapters always carry the field, and a row
+                # written before the column existed (NULL) materialises
+                # ACTIVE here rather than being inferred by a reader.
+                result[row.scope_key] = LiveBoardConfig(
+                    channel_id=row.channel_id,
+                    messages=messages,
+                    season=row.season,
+                    guild_id=row.guild_id,
+                    board_status=_BOARD_STATUS_BY_COLUMN_VALUE.get(
+                        row.board_status, BoardStatus.ACTIVE
+                    ),
+                )
             return result
 
-    def save_live_leaderboards(self, discord_server_id: int, data: dict) -> None:
+    def save_live_leaderboards(self, discord_server_id: int,
+                               data: dict[str, LiveBoardConfig]) -> None:
         with self._db.session_scope() as session:
             session.execute(delete(LiveLbMessageRow).where(
                 LiveLbMessageRow.config_id.in_(
@@ -402,17 +425,18 @@ class SqlAlchemyClusterRepository(ClusterRepository):
             ))
             session.execute(delete(LiveLeaderboardRow).where(
                 LiveLeaderboardRow.discord_server_id == discord_server_id))
-            for scope_key, entry in data.items():
+            for scope_key, config in data.items():
                 row = LiveLeaderboardRow(
                     discord_server_id=discord_server_id,
                     scope_key=scope_key,
-                    guild_id=entry.get("guild_id"),
-                    channel_id=entry["channel_id"],
-                    season=entry.get("season"),
+                    guild_id=config.guild_id,
+                    channel_id=config.channel_id,
+                    season=config.season,
+                    board_status=config.board_status.value,
                 )
                 session.add(row)
                 session.flush()
-                for tier_value, message_id in entry.get("messages", {}).items():
+                for tier_value, message_id in config.messages.items():
                     session.add(LiveLbMessageRow(
                         config_id=row.id,
                         tier_value=tier_value,

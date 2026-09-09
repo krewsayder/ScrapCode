@@ -8,6 +8,16 @@ type: primary
 count: 1
 created_by_feature: guild-key-integrity
 
+# Added 2026-09-08 (cluster-board-control DISCUSS). `jobs.yaml`'s
+# `preserve-data-integrity-through-backend-swap` names `bot-operator-dev` as
+# its primary persona — a name coined by the `sqlite-backend` bootstrap in
+# 2026-07 before any persona file existed. It refers to this same person: the
+# single operator-developer who owns the deployment. Recorded as an alias
+# rather than rewritten in place, because editing another feature's
+# traceability record to fix a naming drift loses the fact that the drift
+# happened.
+aliases: [bot-operator-dev]
+
 summary: >
   The single operator-developer who owns the ScrapCode deployment. Holds every
   guild's Tacticus API key, is the only person with VM access, and is the only
@@ -45,7 +55,15 @@ mental_model:
   - >
     "If the numbers were wrong, I would see it." Only true when the two guilds
     look different. A shared alliance prefix defeats it.
-  - "Registering a guild is a one-time setup action." Was true until a key moved.
+  # Fixed 2026-09-08 (cluster-board-control DISCUSS). This entry read
+  #   - "Registering a guild is a one-time setup action." Was true until a key moved.
+  # — a double-quoted scalar with trailing text, which is invalid YAML. This
+  # file has therefore been UNPARSEABLE since it was created on 2026-07-31, so
+  # nothing has ever read it as data. Found by the Prior Wave Consultation
+  # parse check; see feature-delta.md § Upstream Changes.
+  - >
+    "Registering a guild is a one-time setup action." Was true until a key
+    moved.
 
 vocabulary:
   guild: >
@@ -62,7 +80,15 @@ vocabulary:
 decision_rights:
   - Registers and deregisters guilds
   - Installs and replaces guild API keys
-  - Sets permission tiers, ping channels, and live leaderboards
+  - Sets permission tiers
+  # Corrected 2026-09-08 by feature `cluster-board-control` (D4). This line
+  # read "Sets permission tiers, ping channels, and live leaderboards", which
+  # was wrong when written: /set_ping_channel, /set_live_leaderboard and
+  # /set_live_cluster_leaderboard have all been OFFICER tier since before the
+  # guild-key-integrity feature that created this file. Those rights belong to
+  # `guild-officer`, and are listed there. An admin still holds them —
+  # the admin tier is a superset — but they are not admin-only, and recording
+  # them here made the cluster board look more gated than it is.
   - Sole authority over anything requiring VM access
 
 anti_goals:

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from dataclasses import replace
 
 import httpx
 import discord
@@ -563,11 +564,32 @@ class TasksCog(commands.Cog):
         flags = list_leaderboard_flags(server_id)
 
         to_remove = []
+        # KEPT, not retired, now that the configs are frozen (ADR-009 DESIGN
+        # Q4). `save_live_leaderboards` rewrites EVERY board row on the
+        # server, and what this flag buys is not writing one when the pass
+        # changed nothing — a cluster of paused boards must cost zero writes
+        # an hour. Rebuilding the mapping makes a `live != snapshot` diff
+        # POSSIBLE where in-place mutation destroyed the before-state, but it
+        # does not make it better: that would allocate a copy every cycle to
+        # re-derive what the three sites below already know for certain.
         dirty     = False  # config changed (rollover, season adoption, removals)
 
-        for key, config in live.items():
-            channel_id  = config.get("channel_id")
-            message_ids = config.get("messages", {})
+        # `list(...)`: the loop REBUILDS configs into `live` (DDD-8) rather
+        # than mutating them, and rebinding a key while iterating the live
+        # mapping is the kind of thing that works until the day it does not.
+        for key, config in list(live.items()):
+            if not config.is_enabled:
+                # Turned off by an operator. Nothing is edited, nothing is
+                # sent, and the config is NOT removed — the posted messages
+                # stay in the channel exactly as they were, and `season` is
+                # deliberately left at the value it had when the board was
+                # paused so a re-enable after a rollover posts a fresh set
+                # rather than editing last season's archive.
+                print(f"[live_leaderboard] {key} is turned off, skipping")
+                continue
+
+            channel_id  = config.channel_id
+            message_ids = config.messages
             channel     = self.bot.get_channel(channel_id)
 
             if channel is None:
@@ -579,7 +601,7 @@ class TasksCog(commands.Cog):
             # Build per-tier content for the CURRENT season
             # ------------------------------------------------------------
             if key.startswith("guild:"):
-                guild_id   = config.get("guild_id")
+                guild_id   = config.guild_id
                 guild_data = guilds.get(guild_id)
                 if not guild_data:
                     to_remove.append(key)
@@ -675,12 +697,13 @@ class TasksCog(commands.Cog):
             # ------------------------------------------------------------
             # Same season -> edit in place. New season -> send fresh set.
             # ------------------------------------------------------------
-            stored_season = config.get("season")
+            stored_season = config.season
 
             if stored_season is None:
                 # Legacy config from before season tracking existed.
                 # Adopt the current season without spawning new messages.
-                config["season"] = season
+                config           = replace(config, season=season)
+                live[key]        = config
                 stored_season    = season
                 dirty            = True
 
@@ -703,12 +726,24 @@ class TasksCog(commands.Cog):
                         except Exception as e:
                             print(f"[live_leaderboard] Error sending new tier message for {tier.value} ({key}): {e}")
                             continue
-                        # Reassigned, not just mutated: `message_ids` is a
-                        # fresh dict when the config carried no `messages` key
-                        # at all, and mutating that would be lost on save.
-                        message_ids[tier.value] = msg.id
-                        config["messages"] = message_ids
-                        dirty = True
+                        # REBUILT, never mutated. Two separate hazards here,
+                        # and the merge that brought this branch together
+                        # tripped both:
+                        #
+                        # `config` is a frozen `LiveBoardConfig` now, so
+                        # `config["messages"] = ...` raises outright.
+                        #
+                        # More quietly: `message_ids` was bound from
+                        # `config.messages` above and is the SAME dict object
+                        # the config holds. Frozen blocks rebinding an
+                        # attribute, not mutating a dict inside one, so an
+                        # in-place write here would reach through the alias and
+                        # edit the config that other code still holds — legal,
+                        # silent, and wrong. Copy, then replace.
+                        message_ids = {**message_ids, tier.value: msg.id}
+                        config      = replace(config, messages=message_ids)
+                        live[key]   = config
+                        dirty       = True
                         continue
                     try:
                         msg = await channel.fetch_message(msg_id)
@@ -744,9 +779,8 @@ class TasksCog(commands.Cog):
                     # Nothing sent — keep the old config and retry next hour.
                     continue
 
-                config["messages"] = new_message_ids
-                config["season"]   = season
-                dirty              = True
+                live[key] = replace(config, messages=new_message_ids, season=season)
+                dirty     = True
 
         if to_remove:
             for key in to_remove:

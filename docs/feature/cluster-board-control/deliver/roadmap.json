@@ -1,0 +1,115 @@
+{
+  "roadmap": {
+    "project_id": "cluster-board-control",
+    "created_at": "2026-09-08",
+    "total_steps": 3
+  },
+  "slice_scope": "Slice 01 (US-001, US-002, US-003, US-005) plus its US-004 @infrastructure precursor. The user-visible behaviour ALREADY SHIPPED in commit f20227a, before any wave artifact existed; this DELIVER does not re-implement it. DELIVER's job is the conformance refactor DISCUSS D3 and ADR-009 mandate, plus the one genuinely new behaviour (US-005, the structured record). See feature-delta.md 'Retrofit Origin'.",
+  "baseline_to_preserve": "Verified 2026-09-08 immediately before Phase 1: `.venv/Scripts/python.exe -m pytest tests/unit tests/acceptance -q` = 52 failed, 358 passed, 2 skipped, 1 xfailed. The 52 failures are this feature's DISTILL-authored RED suite and are what DELIVER turns green. 353 of the 358 passes are pre-existing and MUST stay green; the other 5 are GREEN_BY_DESIGN in this suite. Use `.venv/Scripts/python.exe -m pytest`, NEVER a bare `python` — that is a different interpreter without the dependencies. Also verify `.venv/Scripts/lint-imports.exe` stays at 0 broken contracts.",
+  "standing_constraints": [
+    "ACCEPTANCE TESTS FOR THIS FEATURE ARE OFF LIMITS. No step may create, edit or delete any file under tests/acceptance/cluster-board-control/. They are DISTILL's authored specification and they are what 'done' means. If a scenario looks wrong, STOP and escalate — never edit an assertion to meet the behaviour.",
+    "TWO test files outside that directory ARE in scope and are named explicitly in the steps that touch them: tests/acceptance/sqlite-backend/test_repository_contract.py (lines 97-100 only — authorised by ADR-009 DDD-6) and tests/unit/test_live_board_off_switch.py (the shipped unit tests, which assert the representation being replaced).",
+    "DO NOT AMEND MIGRATION 0005 AFTER THIS BRANCH IS PUSHED. Amending in place is legitimate ONLY because no database has ever run it (ADR-009 DDD-4, verified: branch is 8 commits ahead of main and unpushed). If that stops being true, stop and chain a 0006 instead.",
+    "KPI-1 and KPI-2 in docs/product/kpi-contracts.yaml name two tests in tests/unit/test_live_board_off_switch.py as their measuring assertions (test_a_board_that_is_off_is_left_completely_alone, test_the_switch_survives_the_sqlite_round_trip). Those two tests must SURVIVE the refactor, adapted to the new representation. Deleting either one silently dangles a HARD KPI gate.",
+    "Never push to any branch and never open a PR. The operator merges via PR; DELIVER commits locally only."
+  ],
+  "non_goals": [
+    "Auto-flagging the silent freeze when no key can answer the season — DISCUSS D1, explicitly out of scope, has its own upstream note",
+    "Guild-scoped /disable_guild_leaderboard commands — storage covers the scope (D5), commands were not asked for",
+    "Any banner or edit on a paused board — DISCUSS D2, rejected twice by the operator",
+    "Resolving UI-1 (the test-module basename collision) — a project-level decision, not this feature's",
+    "Renaming test suite directories or changing pytest import mode"
+  ],
+  "build_order_constraint": "01-01 before 01-02 is a hard ordering: 01-02's adapters read the column 01-01 creates. 01-02 CANNOT be decomposed further — changing load_live_leaderboards' return type breaks all ten call sites in the same instant, so the type, both adapters and every call site land together or the suite is red at COMMIT. A shim in bot/guilds.py that converted back to dicts was considered and rejected: it is the fallback-coexistence the Wave Completion Enforcement rule forbids, and it would be deleted in the very next step. 02-01 is independent and additive and could run before or after Phase 01; it runs after because it is easier to assert a state change once the state has one representation.",
+  "validation": {
+    "status": "approved",
+    "gate": "orchestrator automated gate 2026-09-08: AC coupling clean, decomposition ratio 3 steps / 10 files = 0.30, no identical AC structures, no validation-only steps, all ids match ^\\d{2}-\\d{2}$, every step carries test_file + scenario_name. des-verify-integrity --roadmap-only exit 0.",
+    "review": "@nw-acceptance-designer-reviewer, 2026-09-08. REJECTED on first pass: the initial draft named only the US-004 and US-005 tests, leaving 11 command-level tests and the Tier B state machine as orphans. The omission mattered because DESIGN's load-bearing claim is that this refactor is behaviour-preserving at every driving port, and those 11 tests going green WITHOUT their assertions changing is the evidence for it. Fixed by naming all 19 in 01-02. APPROVED on re-review: 23 of 23 test entities mapped, zero orphans. The reviewer was asked to falsify the sizing justification rather than accept it, and verified against the shipped source that the commands, refusals, tier check, /view_config line and rollover handling already exist and fail only at the suite's port guard — so 01-02 hides no unplanned work behind a refactor."
+  },
+  "phases": [
+    {
+      "id": "01",
+      "name": "Conform the representation",
+      "description": "US-004, the @infrastructure precursor. Replace the shipped boolean-omitted-when-true convention with the enum-valued status and frozen dataclass the codebase already uses for a guild key.",
+      "default_agent": "nw-software-crafter",
+      "default_deps_strategy": "sequential",
+      "steps": [
+        {
+          "id": "01-01",
+          "name": "Amend 0005 and rename the stored column",
+          "agent": "nw-software-crafter",
+          "deps": [],
+          "criteria": [
+            "Migration 0005 adds board_status TEXT NOT NULL DEFAULT 'active' in place of enabled BOOLEAN",
+            "LiveLeaderboardRow.board_status replaces enabled; downgrade still uses native op.drop_column, not batch mode",
+            "Upgrading a database that already holds configured boards leaves every board reading active",
+            "The port still returns and accepts the shipped dict shape, so no call site changes in this step",
+            "Full suite still 52 failed / 358 passed; lint-imports still 0 broken"
+          ],
+          "test_file": "tests/acceptance/cluster-board-control/test_slice_01_operator_off_switch.py",
+          "scenario_name": "test_upgrading_the_database_pauses_nothing",
+          "files_to_modify": [
+            "bot/db/alembic/versions/0005_live_leaderboard_enabled.py",
+            "bot/db/models.py",
+            "bot/repository_sqlalchemy.py"
+          ],
+          "implementation_notes": "ADR-009 DDD-1 and DDD-4. This step changes STORAGE ONLY and deliberately leaves the port speaking the old dict shape — that is what keeps the suite at its baseline while the column moves. The adapter translates internally: load emits entry['enabled'] = False when row.board_status == 'disabled'; save writes row.board_status = 'disabled' if entry.get('enabled', True) is False else 'active'. That translation is temporary scaffolding for exactly one step and 01-02 deletes it. KEEP THE EXISTING DOCSTRING FINDING about native DROP COLUMN vs batch_alter_table — it holds regardless of column type, it was learned the hard way, and test_downgrade_restores_the_prior_shape_exactly (guild-key-integrity) compares stored DDL as text. Verified safe: that test's db_at_previous_head fixture pins PRE_FEATURE_HEAD absolutely, not as a distance from head, so amending 0005 cannot move it. Store the literal string values, not the enum — policy depends on storage, never the reverse (ADR-008 D3), which is why KeyStatus's values are duplicated at the storage layer rather than imported. The module filename 0005_live_leaderboard_enabled.py now misdescribes itself; grep for the basename first and if genuinely nothing references it, rename to 0005_live_leaderboard_board_status.py. Alembic keys off the `revision` string, not the filename, so this is safe — but verify before doing it, and skip the rename rather than guess."
+        },
+        {
+          "id": "01-02",
+          "name": "Move LiveBoardConfig across the port",
+          "agent": "nw-software-crafter",
+          "deps": ["01-01"],
+          "criteria": [
+            "LiveBoardConfig.is_enabled returns the status comparison and the __SCAFFOLD__ marker is gone",
+            "Both adapters return dict[str, LiveBoardConfig] and materialise ACTIVE when no status is stored",
+            "All ten call sites pass and receive configs; live_board_enabled and set_live_board_enabled are deleted",
+            "The refresh loop rebuilds configs with dataclasses.replace instead of mutating them in place",
+            "Only bot/repository.py compares a status literal anywhere in production"
+          ],
+          "test_file": "tests/acceptance/cluster-board-control/test_slice_01_operator_off_switch.py, tests/acceptance/cluster-board-control/tier_b_board_status/test_board_status_state_machine.py",
+          "scenario_name": "test_an_officer_turns_the_board_off_and_is_told_what_survived, test_a_board_that_is_off_is_never_touched_by_the_cycle, test_turning_a_board_off_changes_nothing_except_the_switch, test_a_pause_outlives_the_process, test_a_command_against_a_board_that_does_not_exist_is_refused, test_asking_for_the_state_it_is_already_in_writes_nothing, test_only_an_officer_may_change_whether_the_board_publishes, test_an_officer_turns_the_board_back_on, test_resuming_within_the_same_season_edits_the_board_already_there, test_resuming_after_a_rollover_starts_a_fresh_board, test_setting_a_board_up_again_brings_it_back_on, test_the_configuration_view_states_the_publishing_state, test_a_board_arrives_as_a_described_configuration, test_a_board_stored_before_the_switch_existed_reads_as_running, test_both_adapters_agree_about_a_board, test_exactly_one_place_decides_whether_a_board_publishes, test_setting_up_a_guild_board_still_stores_something_readable, test_any_board_can_be_turned_off_not_only_the_cluster_one, TestBoardStatusJourney",
+          "sizing_review": "@sizing-review-needed — 19 scenarios, above the 8 threshold. Reviewed and ACCEPTED as irreducible on 2026-09-08. The threshold exists to catch a step doing several unrelated things; this step does ONE thing (change a port's return type) whose blast radius is 19 scenarios wide because ten call sites read that port. Splitting it leaves the suite red at an intermediate COMMIT, which Mandate 7 forbids. THE MAJORITY OF THESE SCENARIOS REQUIRE NO NEW BEHAVIOUR: the two commands, the refusal paths, the tier check, the /view_config status line and the rollover handling all shipped in f20227a and work today. They are failing only because the suite's port guard rejects the dict-shaped port. They are named here as REGRESSION EVIDENCE for DESIGN's load-bearing claim — 'the whole DESIGN wave is behaviour-preserving at every driving port' — which is a claim about tests that must go green without their assertions changing. TestBoardStatusJourney is listed for the same reason and needs no implementation of its own: it is the property-based counterpart to test_a_board_that_is_off_is_never_touched_by_the_cycle, proving KPI-1 across generated interleavings rather than one. It is NOT given its own step because a step with an empty files_to_modify is a validation-only step, which the orchestrator's automated gate rejects.",
+          "files_to_modify": [
+            "bot/repository.py",
+            "bot/repository_sqlalchemy.py",
+            "bot/guilds.py",
+            "bot/cogs/admin_cog.py",
+            "bot/cogs/tasks_cog.py",
+            "bot/db/migrations_json_to_sqlite.py",
+            "tests/acceptance/sqlite-backend/test_repository_contract.py",
+            "tests/unit/test_live_board_off_switch.py",
+            "tests/unit/test_leaderboard_season_fall_through.py"
+          ],
+          "file_list_correction": "tests/unit/test_leaderboard_season_fall_through.py was ADDED to this list on 2026-09-08, mid-step, after the crafter hit it and stopped rather than reaching outside its boundary. My implementation_notes asserted that every test touching /set_live_leaderboard 'uses a repository DOUBLE, so those tests stay green while production breaks'. That was half right and the wrong half mattered: the double stores what the command saved, and this test's own _surface helper then reads a field off the stored object — `board.get(\"season\")` at line 294, which is a dict call on what is now a frozen dataclass. A double insulates a test from the ADAPTER, not from the PORT'S TYPE. This is the second time this feature's blast-radius figure has been wrong in the same direction (see UI-4), and both times the error was assuming a measurement rather than running one.",
+          "implementation_notes": "ADR-009 DDD-2, DDD-3, DDD-6, DDD-7, DDD-8. THE ATOMIC STEP — see build_order_constraint for why it cannot be split. MEASURED CALL SITES (grepped 2026-09-08, not estimated; the DESIGN figure of '4 reads and 2 writes' was wrong and hid a whole driving port — UI-4): load_live_leaderboards at admin_cog 437/589/713/776 and tasks_cog 556; save_live_leaderboards at admin_cog 596/723/799, tasks_cog 723 and migrations_json_to_sqlite 511. THE ONE THAT BITES: admin_cog 589-596 is /set_live_leaderboard, the GUILD-scoped setup command, which writes a raw dict literal into the mapping. Every existing test that touches it uses a repository DOUBLE, so those tests stay green while production breaks — which is precisely why test_setting_up_a_guild_board_still_stores_something_readable was added against both real adapters. admin_cog 713-723 is the cluster setup command and must keep re-enabling on setup (AC-002.5): building a fresh LiveBoardConfig gives that for free, since board_status defaults to ACTIVE. JSON ON-DISK SHAPE: keep it a plain dict (brief.md section C says the JSON file shape stays accurate as the on-disk form) and always write board_status; a file written before the column existed simply has no key and load materialises ACTIVE, which is DDD-3. Do NOT reintroduce omit-when-default in either adapter — that convention is the defect this step removes. tasks_cog: config['messages'] = ... and config['season'] = ... at 669 and 712-713 mutate a frozen dataclass and will raise; rebuild with dataclasses.replace and write the result back into the live mapping. DESIGN open question Q4 is yours to answer: decide whether the `dirty` flag is still the right mechanism once the mapping is rebuilt, and record the answer. Q2 is also yours: BoardStatus currently sits in bot/repository.py and STATUS_COMPARISON_OWNER in the test vocabulary pins it there — moving it means the acceptance test fails, so leave it unless you have a strong reason and escalate if you do. TEST EDITS AUTHORISED HERE, AND ONLY THESE: test_repository_contract.py 97-100, where the exact-equality literal must carry a LiveBoardConfig (DDD-6 — the contract genuinely changed, and amending the test to match an intended change is a different act from bending production to avoid amending it, which is what produced the shipped shape); and tests/unit/test_live_board_off_switch.py, whose test_enabling_never_writes_a_true_flag asserts the convention being deleted and should go, while test_a_config_with_no_flag_is_on keeps its claim (AC-004.3) and changes its mechanism. KPI-1 and KPI-2 name two tests in that file — see standing_constraints; both must survive."
+        }
+      ]
+    },
+    {
+      "id": "02",
+      "name": "The operator's record",
+      "description": "US-005. The one genuinely new behaviour in this wave: a paused board leaves a trace an operator can find months later, when nobody remembers pausing it.",
+      "default_agent": "nw-software-crafter",
+      "default_deps_strategy": "sequential",
+      "steps": [
+        {
+          "id": "02-01",
+          "name": "Record a board's state change",
+          "agent": "nw-software-crafter",
+          "deps": ["01-02"],
+          "criteria": [
+            "A real state change emits exactly one live_board.status.changed record",
+            "The record names the scope key and both the previous and the new status",
+            "A no-op flip emits no record at all",
+            "The hourly cycle emits no record for a paused board, however many times it runs"
+          ],
+          "test_file": "tests/acceptance/cluster-board-control/test_slice_01_operator_off_switch.py",
+          "scenario_name": "test_a_state_change_is_recorded_where_an_operator_can_find_it, test_a_no_op_flip_records_nothing, test_an_hour_passing_on_a_paused_board_records_nothing",
+          "files_to_modify": ["bot/cogs/admin_cog.py"],
+          "implementation_notes": "US-005, and OD-1 in kpi-contracts.yaml. USE bot/obs.py emit_structured — do not write a second structured-log helper. Two divergent JSON log schemas is exactly what that module exists to prevent, and every KPI query in kpi-contracts.yaml assumes one shape. Pass the emitting module's own logger, not a shared one, so the record lands under bot.cogs.admin_cog and the operator can tell where it came from. The event name is live_board.status.changed and it is pinned in the test vocabulary as BOARD_STATUS_CHANGED_EVENT — the operator's grep and the test have to break together, so do not rename it. emit_structured attaches fields via extra=, which is how the board_events fixture asserts on record.event without re-parsing JSON; that is already handled by the helper. PLACEMENT IS THE WHOLE DESIGN: the record follows the CHANGE, not the command. Emit it after the save, past the no-op early return — if it sits at the top of the handler the log answers 'who ran a command' rather than 'when did the state move', and AC-005.2 fails. Nothing is emitted from the refresh loop: ~720 records a month for one paused board is how a log stops being read (AC-005.3). The existing print() in the refresh loop skip branch is NOT the record and must not be promoted into one — leave it or drop it, but do not make the hourly cycle emit a structured event."
+        }
+      ]
+    }
+  ]
+}

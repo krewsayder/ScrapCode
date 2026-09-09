@@ -37,6 +37,7 @@ import asyncio
 import os
 import sys
 from contextlib import contextmanager
+from dataclasses import replace
 
 import pytest
 
@@ -46,6 +47,11 @@ import pytest
 os.environ.setdefault("UPDATE_CHANNEL_ID", "0")
 os.environ.setdefault("REPLAY_INDEX_CHANNEL_ID", "0")
 os.environ.setdefault("SCRAPCODE_REPO_BACKEND", "json")
+
+# Safe at module scope, unlike a cog: `bot.repository` reads no environment and
+# does not build the process-wide repository singleton. The env pins above
+# still run first.
+from bot.repository import LiveBoardConfig  # noqa: E402
 
 SERVER_ID = 4242
 SEASON = 77
@@ -89,12 +95,12 @@ def test_a_disabled_board_keeps_its_config():
     """
     surface = _surface(disabled={OFF_GUILD})
 
-    assert surface["config"][f"guild:{OFF_GUILD}"] == {
-        "channel_id": CHANNEL_ID,
-        "guild_id": OFF_GUILD,
-        "messages": OFF_MESSAGE_IDS,
-        "season": SEASON,
-    }, (
+    assert surface["config"][f"guild:{OFF_GUILD}"] == LiveBoardConfig(
+        channel_id=CHANNEL_ID,
+        guild_id=OFF_GUILD,
+        messages=OFF_MESSAGE_IDS,
+        season=SEASON,
+    ), (
         "the disabled board's config was altered or discarded; re-enabling it "
         f"can no longer resume the live messages: {surface['config']!r}"
     )
@@ -194,7 +200,7 @@ def _surface(*, disabled: set[str], with_cluster: bool = False) -> dict:
             "sent": list(world.sent),
             "edited": dict(world.edited),
             "config": {
-                key: {**config, "messages": dict(config.get("messages", {}))}
+                key: replace(config, messages=dict(config.messages))
                 for key, config in world.live.items()
             },
         }
@@ -237,26 +243,32 @@ def _a_world(*, disabled: set[str], with_cluster: bool = False):
 class _World:
     def __init__(self, *, disabled: set[str], with_cluster: bool) -> None:
         self.flags = {gid: gid not in disabled for gid in GUILD_NAMES}
+        # `LiveBoardConfig`, not dicts. The port stopped handing cogs raw dicts
+        # when `cluster-board-control` landed (ADR-009 DDD-2), and a double
+        # still returning the old shape fails at `config.is_enabled` before it
+        # reaches anything this module is about. The two switches are
+        # independent: `board_status` here stays ACTIVE throughout, because
+        # what these scenarios exercise is the GUILD flag, not the board's own.
         self.live = {
-            f"guild:{OFF_GUILD}": {
-                "channel_id": CHANNEL_ID,
-                "guild_id": OFF_GUILD,
-                "messages": dict(OFF_MESSAGE_IDS),
-                "season": SEASON,
-            },
-            f"guild:{ON_GUILD}": {
-                "channel_id": CHANNEL_ID,
-                "guild_id": ON_GUILD,
-                "messages": dict(ON_MESSAGE_IDS),
-                "season": SEASON,
-            },
+            f"guild:{OFF_GUILD}": LiveBoardConfig(
+                channel_id=CHANNEL_ID,
+                guild_id=OFF_GUILD,
+                messages=dict(OFF_MESSAGE_IDS),
+                season=SEASON,
+            ),
+            f"guild:{ON_GUILD}": LiveBoardConfig(
+                channel_id=CHANNEL_ID,
+                guild_id=ON_GUILD,
+                messages=dict(ON_MESSAGE_IDS),
+                season=SEASON,
+            ),
         }
         if with_cluster:
-            self.live["cluster"] = {
-                "channel_id": CHANNEL_ID,
-                "messages": dict(CLUSTER_MESSAGE_IDS),
-                "season": SEASON,
-            }
+            self.live["cluster"] = LiveBoardConfig(
+                channel_id=CHANNEL_ID,
+                messages=dict(CLUSTER_MESSAGE_IDS),
+                season=SEASON,
+            )
         self.sent: list[str] = []
         self.edited: dict[int, str] = {}
         self.channel = _FakeChannel(self)

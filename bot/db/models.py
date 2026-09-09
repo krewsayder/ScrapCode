@@ -297,6 +297,18 @@ class LiveLeaderboardRow(Base):
     guild_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     channel_id: Mapped[int] = mapped_column(Integer, nullable=False)
     season: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The operator's off switch, as a named state rather than a boolean
+    # (ADR-009 DDD-1). Stores the string values of `BoardStatus`
+    # (`active` / `disabled`), duplicated rather than imported for the same
+    # reason `key_status` duplicates `KeyStatus`: storage must not depend on
+    # the layer whose policy it holds (ADR-008 D3).
+    #
+    # NOT NULL defaulting to `active`, so an existing board keeps updating
+    # across the upgrade — a schema change that silently pauses every live
+    # board is the outage it is meant to prevent. Scope-agnostic on purpose:
+    # the column serves `guild:{id}` rows too, even though only the cluster
+    # board has commands to drive it today.
+    board_status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
 
     __table_args__ = (
         UniqueConstraint(

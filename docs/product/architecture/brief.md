@@ -947,3 +947,162 @@ key-verification path. The System Context (§1) and Container (§4) diagrams are
 | D7 season discovery fall-through | US-004 |
 | D8 trust-on-first-use | US-001 |
 | D9 `force` parameter | US-003 |
+
+---
+
+## Application Architecture — `cluster-board-control` (DESIGN wave)
+
+> Appended by the DESIGN wave for feature `cluster-board-control`
+> (2026-09-08). §§1–8 and both sections above are unchanged. Full decision
+> text, alternatives and consequences:
+> [ADR-009](adr-009-live-board-status-representation.md).
+
+### A. Scope and quality-attribute priorities
+
+An **operator switch** on a live leaderboard's hourly refresh. The cluster
+board previously had two states and neither was chosen: refreshing hourly, or
+frozen silently because no key in the cluster could answer the season. This
+feature adds the deliberate, human-set state.
+
+Quality-attribute priorities, in order: **pattern conformance > correctness >
+operability > maintainability > time-to-market**. Conformance leads because it
+is the reason this wave ran at all — the implementation shipped before any
+wave artifact existed, and diverged from the pattern the codebase already used
+for the same concept.
+
+Scope: application / components. System and domain scopes are intentionally
+empty (§1 single-process framing, unchanged).
+
+### B. Architecture pattern
+
+**Unchanged** — modular monolith with dependency inversion
+(ports-and-adapters). This feature adds one column, one enum and one frozen
+dataclass, and changes the signature of two existing port methods. No new
+architectural style, no new container, no new external integration.
+
+### C. Correction to §4.6 (`live_leaderboards.json` schema)
+
+§4.6 documents the live-board config as a bare dict of `channel_id`,
+`guild_id`, `messages`, `season`. It gains a fifth field, `board_status`, and
+— more consequentially — **the config stops being a bare dict at the port**.
+
+`ClusterRepository.load_live_leaderboards` returns `dict[str,
+LiveBoardConfig]`; §4.6's JSON shape remains accurate as the *on-disk* form
+for `JsonClusterRepository`, but is no longer what a cog receives. The §4.6
+prose is left intact as an as-built snapshot per the baseline's status banner;
+this section is the correction.
+
+### D. New and modified components
+
+| Component (status) | Responsibility | Depends on (inward only) |
+|---|---|---|
+| `BoardStatus` enum (**NEW**) | `active` / `disabled`. Follows `KeyStatus`: declared once, literal duplicated at the storage layer rather than imported (ADR-008 D3). `DISABLED` not `QUARANTINED` — a quarantine is system-detected, this is human-set | — |
+| `LiveBoardConfig` frozen dataclass (**NEW**) | Port-level shape of one `live_leaderboards` row plus its `live_lb_messages`. Carries `is_enabled` as a property, so the status comparison exists in exactly one place | `dataclasses`, `enum` |
+| `bot/repository.py` (**MODIFIED**) | ABC signature change on `load_live_leaderboards` / `save_live_leaderboards`; the JSON impl materialises `ACTIVE` for configs with no stored status | `bot.models` |
+| `bot/repository_sqlalchemy.py` (**MODIFIED**) | Reads/writes `board_status`, always emitted (NOT NULL) | `bot/db/models.py` |
+| `bot/db/models.py` (**MODIFIED**) | `LiveLeaderboardRow.board_status` | `sqlalchemy` |
+| `bot/db/alembic/versions/0005_*` (**AMENDED IN PLACE**) | Adds `board_status TEXT NOT NULL DEFAULT 'active'` | — |
+| `bot/cogs/{admin,tasks}_cog.py` (**MODIFIED**) | Construct and read configs; the refresh loop stops mutating them | `bot.guilds` |
+| `bot/guilds.py` (**MODIFIED**) | The two shipped helper functions are **removed** — absorbed into the dataclass | — |
+
+### E. Why `GuildBinding` and not `load_battle_hits`
+
+The repository carries two port shapes, and the choice between them is
+principled:
+
+| Method | Returns | Because |
+|---|---|---|
+| `load_battle_hits` | raw `dict` | genuinely dict-shaped — `boss_id → encounter → tier → entries`, variable keys throughout |
+| `load_guild_binding` | frozen `GuildBinding` | genuinely record-shaped — a fixed set of named fields |
+
+A board config is a fixed set of named fields, so `GuildBinding` governs. This
+is the reasoning that resolves the port question on architectural grounds
+rather than preference.
+
+### F. The JSON rollback path is NOT degraded here
+
+Recorded because the asymmetry with `key_status` looks like an oversight
+otherwise. `key_status` is **inert** under `JsonClusterRepository` (ADR-006 D9
+/ ADR-008 DDD-4 — no binding store, writes dropped, loud
+`health.startup.json_rollback` warning). Live-board configs **are** stored
+natively by that adapter, so `board_status` round-trips normally on the
+rollback path and needs no degradation and no warning.
+
+### G. Architecture enforcement (extends §I of the `sqlite-backend` section)
+
+Existing `import-linter` contracts cover this feature unchanged. One rule is
+added:
+
+- No module outside `bot/repository.py` may compare a board's status literal.
+  The comparison lives once, in `LiveBoardConfig.is_enabled`. Mirrors ADR-008's
+  "cogs never compare `key_status` themselves."
+
+Whether it lands as an AST assertion or an import-linter contract is DISTILL's
+call.
+
+### H. External integrations
+
+**None new.** Tacticus and Chronicler unchanged; this feature makes no external
+call and adds nothing to the contract-test surface. The handoff to
+platform-architect carries: "No new external integrations; no change to the
+Tacticus or Chronicler contract-test recommendations."
+
+### I. Development paradigm
+
+**OOP — unchanged.** Pinned in `CLAUDE.md` and ADR-006 D13. A frozen dataclass
+plus an enum is the same shape as `GuildBinding` + `KeyStatus`. Routes DELIVER
+to `@nw-software-crafter`. No change requested to `CLAUDE.md`.
+
+### J. C4 diagrams
+
+System Context (§1) and Container (§4) are **unchanged**. A Component diagram
+for the live-board control path is added at
+[c4-diagrams.md §7](c4-diagrams.md).
+
+### K. Traceability
+
+| ADR-009 decision | Driving stories |
+|---|---|
+| DDD-1 `board_status` enum-valued column | US-001, US-004 |
+| DDD-2 `LiveBoardConfig` at the port | US-004 |
+| DDD-3 default materialised by both adapters | US-004 |
+| DDD-4 amend `0005` in place | US-004 |
+| DDD-5 JSON path not degraded | US-004 |
+| DDD-6 contract-test literal amended | US-004 |
+| DDD-7 `is_enabled` on the type | US-004 |
+| DDD-8 refresh loop stops mutating | US-001, US-002 |
+
+### L. As-built — DELIVER, 2026-09-08
+
+**Every component in §D shipped. Nothing was deferred, nothing was added.**
+Commits `74b6e00`, `d00b9ed`, `f563889`, `681943e` on
+`feature/cluster-board-control`.
+
+| §D component | Shipped as |
+|---|---|
+| `BoardStatus` enum (NEW) | `bot/repository.py` — placement question Q2 resolved in favour of staying beside the dataclass; nothing external owns board lifecycle the way Tacticus owns key lifecycle |
+| `LiveBoardConfig` (NEW) | `bot/repository.py`, frozen, `is_enabled` as a property. Gained `from_stored` / `as_stored` projections not anticipated by §D — one place now knows the on-disk key names, shared by the JSON adapter and the JSON→SQLite migration |
+| `bot/repository.py` (MODIFIED) | ABC signatures changed in place; JSON impl materialises `ACTIVE` |
+| `bot/repository_sqlalchemy.py` (MODIFIED) | reads/writes `board_status`; NULL or unrecognised materialises `ACTIVE` |
+| `bot/db/models.py` (MODIFIED) | `board_status` declared as `String(32)`, matching `key_status` exactly rather than the literal `TEXT` §D wrote — SQLite gives both TEXT affinity, and pattern conformance was this feature's leading quality attribute |
+| `0005_*` (AMENDED IN PLACE) | amended, and **renamed** to `0005_live_leaderboard_board_status.py`; the old name had become a lie. Alembic keys off the `revision` string, verified nothing referenced the basename |
+| `bot/cogs/{admin,tasks}_cog.py` (MODIFIED) | as specified; the handler's `enabled: bool` parameter became `status: BoardStatus`, deleting a translation §D did not foresee |
+| `bot/guilds.py` (MODIFIED) | both helpers deleted outright, not deprecated |
+
+**§G's added enforcement rule holds.** "No module outside `bot/repository.py`
+may compare a board's status literal" is asserted executably by
+`test_exactly_one_place_decides_whether_a_board_publishes` — DISTILL's answer to
+open question Q1 was an AST-style scan rather than an `import-linter` contract.
+Worth knowing about that test: its first half checks that the owning module
+*mentions* a status literal, and the `BoardStatus` enum declaration satisfies
+that on its own, so the load-bearing half is the second one (no cog compares
+it).
+
+**§C's correction stands as written.** A live-board config is no longer a bare
+dict at the port. The `live_leaderboards.json` on-disk shape in §4.6 remains
+accurate for `JsonClusterRepository` and gains a fifth key, `board_status`,
+always written.
+
+**One new event family** joins the structured-log surface:
+`live_board.status.changed`, emitted through `bot/obs.py` like every other
+record. Registered in `kpi-contracts.yaml`.

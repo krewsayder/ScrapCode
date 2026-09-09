@@ -42,6 +42,7 @@ from alembic.config import Config as AlembicConfig
 
 from bot.db.models import Base
 from bot.models import Cluster, Guild
+from bot.repository import LiveBoardConfig
 from bot.migrations.player_list_migrations import PlayerListMigrator
 
 # Parity report covers the easy-entity tables + battle/bomb hit tables.
@@ -508,9 +509,18 @@ def _populate_live_leaderboards(repo, server_dir: Path, server_id: int,
     if not path.exists():
         return counts
     data = json.loads(path.read_text(encoding="utf-8"))
-    repo.save_live_leaderboards(server_id, data)
-    counts["live_leaderboards"] += len(data)
-    counts["live_lb_messages"] += sum(len(s.get("messages", {})) for s in data.values())
+    # The file is the storage form and the port speaks `LiveBoardConfig`, so
+    # the translation runs through the one method that knows the key names
+    # (ADR-009 DDD-2). A board written before `board_status` existed — which
+    # is every board this migration will ever read — materialises ACTIVE, so
+    # a cutover cannot pause a cluster (DDD-3 / KPI-4).
+    configs = {
+        scope_key: LiveBoardConfig.from_stored(stored)
+        for scope_key, stored in data.items()
+    }
+    repo.save_live_leaderboards(server_id, configs)
+    counts["live_leaderboards"] += len(configs)
+    counts["live_lb_messages"] += sum(len(c.messages) for c in configs.values())
     return counts
 
 

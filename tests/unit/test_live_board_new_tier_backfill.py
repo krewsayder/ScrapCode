@@ -33,6 +33,7 @@ import asyncio
 import os
 import sys
 from contextlib import contextmanager
+from dataclasses import replace
 
 import pytest
 
@@ -42,6 +43,12 @@ import pytest
 os.environ.setdefault("UPDATE_CHANNEL_ID", "0")
 os.environ.setdefault("REPLAY_INDEX_CHANNEL_ID", "0")
 os.environ.setdefault("SCRAPCODE_REPO_BACKEND", "json")
+
+# Safe at module scope, unlike the cog: `bot.repository` imports `bot.models`
+# and nothing that reads the environment, so it does not build the process-wide
+# repository singleton the way importing a cog does. The env pins above still
+# run first.
+from bot.repository import LiveBoardConfig  # noqa: E402
 
 SERVER_ID = 4242
 SEASON = 77
@@ -114,7 +121,7 @@ def test_the_adoption_is_persisted_so_the_next_hour_edits_instead_of_posting():
             "the second hourly pass posted Mythic 3 again — the adopted message "
             f"id was not persisted: {world.sent!r}"
         )
-        assert world.live["guild:" + GUILD_ID]["messages"][THE_NEW_TIER] == NEW_MESSAGE_ID
+        assert world.live["guild:" + GUILD_ID].messages[THE_NEW_TIER] == NEW_MESSAGE_ID
         assert world.edited_ids.count(NEW_MESSAGE_ID) == 1, (
             "the second pass did not edit the adopted message in place"
         )
@@ -130,7 +137,7 @@ def _run_refresh() -> dict:
         return {
             "sent": list(world.sent),
             "edited": dict(world.edited),
-            "saved": dict(world.saved.get("guild:" + GUILD_ID, {}).get("messages", {})),
+            "saved": dict(getattr(world.saved.get("guild:" + GUILD_ID), "messages", {})),
         }
 
 
@@ -184,13 +191,18 @@ class _World:
     """Storage and the channel, and everything they were asked to do."""
 
     def __init__(self) -> None:
+        # `LiveBoardConfig`, not a dict. The port stopped handing cogs raw
+        # dicts when `cluster-board-control` landed (ADR-009 DDD-2), and a
+        # double that keeps returning the old shape tests a system that no
+        # longer exists — it fails at `config.is_enabled` before reaching
+        # anything this module is about.
         self.live = {
-            f"guild:{GUILD_ID}": {
-                "channel_id": CHANNEL_ID,
-                "guild_id": GUILD_ID,
-                "messages": dict(EXISTING_MESSAGE_IDS),
-                "season": SEASON,
-            }
+            f"guild:{GUILD_ID}": LiveBoardConfig(
+                channel_id=CHANNEL_ID,
+                guild_id=GUILD_ID,
+                messages=dict(EXISTING_MESSAGE_IDS),
+                season=SEASON,
+            )
         }
         self.saved: dict = {}
         self.sent: list[str] = []
@@ -200,12 +212,14 @@ class _World:
 
     def save(self, server_id, live) -> None:
         assert server_id == SERVER_ID
-        # The cog mutates `live` in place and hands back the same object, so
-        # snapshot the messages dict rather than aliasing it — otherwise the
-        # second pass would rewrite the first pass's recorded result.
+        # The cog rebuilds each config rather than mutating it now (the type is
+        # frozen), but it still hands back the same MAPPING, so the snapshot is
+        # still needed — otherwise the second pass would rewrite the first
+        # pass's recorded result. `messages` is copied because a frozen
+        # dataclass does not freeze the dict inside it.
         self.live = live
         self.saved = {
-            key: {**config, "messages": dict(config.get("messages", {}))}
+            key: replace(config, messages=dict(config.messages))
             for key, config in live.items()
         }
 
