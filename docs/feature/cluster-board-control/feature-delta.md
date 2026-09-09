@@ -1037,6 +1037,173 @@ All 22 ACs now have executable coverage; DISCUSS recorded 10 with none.
 
 ---
 
+## Wave: DELIVER / [REF] Implementation Summary
+
+The shipped representation was brought to ADR-009. A live board's on/off state
+was a `bool` **omitted from the config when true**, carried across the
+repository port inside a raw `dict`, with the default inferred at each of four
+read sites. It is now a `BoardStatus` enum on a frozen `LiveBoardConfig`
+dataclass, always present, materialised on load by **both** adapters, and
+compared in exactly one place — `LiveBoardConfig.is_enabled`. This is the
+`GuildBinding` / `KeyStatus` pattern the codebase already used for a guild
+key's on/off state, which is what DISCUSS D3 asked for.
+
+One genuinely new behaviour shipped alongside it: `live_board.status.changed`,
+a structured record emitted when a board's state actually moves — not when a
+command is run, and never per refresh cycle.
+
+**The user-visible behaviour did not change, and that was the point.** Every
+DESIGN decision was behaviour-preserving at every driving port; the evidence is
+that the eleven command-level scenarios went green without any assertion being
+edited.
+
+---
+
+## Wave: DELIVER / [REF] Files Modified
+
+**Production (8):**
+
+| File | Change |
+|---|---|
+| `bot/repository.py` | `is_enabled` implemented, `__SCAFFOLD__` removed; `from_stored`/`as_stored` projections added so one place knows the on-disk key names; ABC signatures changed in place to `dict[str, LiveBoardConfig]`; JSON adapter translates through the projections |
+| `bot/repository_sqlalchemy.py` | reads/writes `board_status`; NULL or unknown materialises `ACTIVE` (DDD-3); the omit-when-enabled convention is gone |
+| `bot/db/models.py` | `LiveLeaderboardRow.board_status` replaces `enabled`, declared exactly as `key_status` is |
+| `bot/db/alembic/versions/0005_live_leaderboard_board_status.py` | amended in place (DDD-4) and renamed — the old filename had become a lie. Native `DROP COLUMN` retained |
+| `bot/guilds.py` | `live_board_enabled` and `set_live_board_enabled` **deleted**, not deprecated |
+| `bot/cogs/admin_cog.py` | three command paths + `/view_config` construct and read configs; handler takes a `BoardStatus` rather than a `bool`; emits the status-change record |
+| `bot/cogs/tasks_cog.py` | skip reads the property; rollover and season adoption rebuild via `dataclasses.replace` (DDD-8) |
+| `bot/db/migrations_json_to_sqlite.py` | converts through `LiveBoardConfig.from_stored` |
+
+**Tests (4):**
+
+| File | Change |
+|---|---|
+| `tests/acceptance/cluster-board-control/test_slice_01_operator_off_switch.py` | UI-6 — the permission harness now runs `Command.checks`; two setup call sites moved onto it |
+| `tests/acceptance/sqlite-backend/test_repository_contract.py` | the exact-equality literal now carries a `LiveBoardConfig` (DDD-6) |
+| `tests/unit/test_live_board_off_switch.py` | mechanisms updated; one test deleted outright (see below) |
+| `tests/unit/test_leaderboard_season_fall_through.py` | one line — a field read that a repository double did not insulate from the port's type change |
+
+**One test was deleted, deliberately:** `test_enabling_never_writes_a_true_flag`
+asserted the omit-when-true convention itself, which ADR-009 DDD-6 reverses. Its
+underlying parity claim did not disappear — it moved somewhere stronger.
+`test_both_adapters_agree_about_a_board` now proves it against **both real
+adapters** for both statuses, where the deleted test proved it against a dict.
+
+**Both KPI-named tests survived under their original names**, so
+`kpi-contracts.yaml` needed no edit: `test_a_board_that_is_off_is_left_completely_alone`
+(KPI-1) and `test_the_switch_survives_the_sqlite_round_trip` (KPI-2).
+
+---
+
+## Wave: DELIVER / [REF] Scenarios Green
+
+**57 of 57** in `tests/acceptance/cluster-board-control/`, measured 2026-09-08.
+
+Full repository suite: **407 passed, 2 failed, 2 skipped, 1 xfailed.**
+
+The 2 failures are UI-7 and UI-8 — both in `guild-key-integrity`, both found by
+Hypothesis during this wave on inputs it had never generated before, neither
+caused by nor fixed by this feature. A fresh clone does not show them. See the
+note under Upstream Issues.
+
+Progression, per step:
+
+| After | Failed | Passed |
+|---|---|---|
+| baseline (DISTILL hand-off) | 52 | 358 |
+| `01-01` storage | 51 | 359 |
+| `01-02` port | 5 | 404 |
+| UI-6 harness fix | 5 | 404 |
+| `02-01` record | 2 | 407 |
+
+---
+
+## Wave: DELIVER / [REF] Outcome KPIs
+
+| # | KPI | Target | Result | Evidence |
+|---|---|---|---|---|
+| KPI-1 | Discord calls against a paused board per cycle | 0 edits, 0 sends | **MET** | `test_a_board_that_is_off_is_left_completely_alone`, plus `TestBoardStatusJourney` proving it across generated interleavings |
+| KPI-2 | Paused boards surviving a restart | 100% | **MET** | `test_the_switch_survives_the_sqlite_round_trip`, `test_a_pause_outlives_the_process` |
+| KPI-3 | Paused boards distinguishable without reading logs | 100% | **MET** | demo evidence below shows the status line in both states |
+| KPI-4 | Boards paused as a side effect of the migration | 0 | **MET** | `test_upgrading_the_database_pauses_nothing`, real Alembic upgrade over rows seeded at revision `0004` |
+| KPI-5 | Adapter pairs disagreeing on a round trip | 0 | **MET** | `test_both_adapters_agree_about_a_board`, both statuses, both real adapters |
+
+**OD-1 (observability debt) — CLOSED.** `status: specified` becomes shipped;
+`grep live_board.status.changed discord.log` now returns rows.
+
+---
+
+## Wave: DELIVER / [REF] Demo Evidence
+
+Captured 2026-09-08 by driving the **real** `app_commands.Command` objects —
+checks first, then callback — against a **real** `JsonClusterRepository` in a
+temp directory.
+
+**Disposition on the subprocess demo gate, stated rather than skipped:** this
+feature's driving port is Discord, so there is no CLI to run as a subprocess and
+no stdout to grep. Faking one would be worse than not running it. What follows
+is the closest honest substitute: everything except the Discord transport is
+real. The transport itself is covered only by the operator's dogfood on the VM,
+which the slice brief already requires and UI-5 recommends treating as a gate.
+
+```
+US-001  /disable_cluster_leaderboard
+  SEES: ⛔ The live Cluster leaderboard in <#777> has been turned off.
+        The posted messages are left exactly as they are and will stop
+        updating. Run `/enable_cluster_leaderboard` to resume.
+  STORED: BoardStatus.DISABLED
+
+US-003  /view_config config:leaderboards   (paused)
+  SEES: Cluster -> **Status:** ⛔ Turned off — messages frozen at the last update
+
+US-002  /enable_cluster_leaderboard
+  SEES: ✅ The live Cluster leaderboard in <#777> will update again on the
+        next hourly cycle.
+
+US-003  /view_config config:leaderboards   (running)
+  SEES: Cluster -> **Status:** ✅ Updating hourly
+
+AC-001.8  a member below the officer tier tries to pause it
+  REFUSED by the permission gate
+  STORED (unchanged): BoardStatus.ACTIVE
+
+US-005  grep live_board.status.changed discord.log
+  SEES: {"event": "live_board.status.changed", "from_status": "active",
+         "scope_key": "cluster", "server_id": 4242, "to_status": "disabled"}
+  SEES: {"event": "live_board.status.changed", "from_status": "disabled",
+         "scope_key": "cluster", "server_id": 4242, "to_status": "active"}
+  (2 records for 2 real changes + 1 refused attempt)
+```
+
+Every Elevator Pitch's `sees` clause matches its promised text verbatim. The
+refused attempt produced **no** record, which is AC-005.2 observed rather than
+asserted.
+
+---
+
+## Wave: DELIVER / [REF] Quality Gates
+
+| Gate | Outcome |
+|---|---|
+| Roadmap review (`@nw-acceptance-designer-reviewer`) | REJECTED then APPROVED — caught 12 orphan scenarios in the first draft |
+| Roadmap integrity (`des-verify-integrity --roadmap-only`) | exit 0 |
+| Per-step TDD (RED → GREEN → COMMIT) | 3 of 3 steps complete |
+| Design compliance (F-2, no unauthorised new files) | PASS — zero new files; every component EXTENDED, matching the Reuse Analysis |
+| Wiring smoke check | PASS — `is_enabled` called from two production sites, not only tests |
+| `import-linter` | 6 contracts kept, 0 broken |
+| Mutation testing | **SKIPPED** — `CLAUDE.md` declares `pre-release`; handled at the release boundary, not per feature |
+| DELIVER integrity (`des-verify-integrity`) | exit 0 — "All 3 steps have complete DES traces" |
+| Wave completion (`__SCAFFOLD__` absent, old path deleted) | PASS |
+
+**L1-L6 refactoring** was performed inside GREEN rather than as a separate pass,
+by the crafter's judgement: extracting `from_stored`/`as_stored` (L4), replacing
+the handler's `bool` parameter with `BoardStatus` to delete a translation (L4),
+hoisting a function-local import (L1), and an iteration guard (L2). A second
+speculative sweep over a just-green suite near the turn budget was declined.
+Recorded as a judgement call rather than a silent omission.
+
+---
+
 ## Wave: DELIVER / [WHY] Upstream Issues
 
 Findings this wave produced about artifacts it does not own, or about its own
@@ -1133,5 +1300,65 @@ everywhere except the machine that found it.
 **Suggested fix** (for its owner, not applied here): scan the record's *values*
 rather than its rendered text, or exclude keys shorter than some floor from the
 generated strategy. The assertion is a good one; its aperture is too wide.
+
+---
+
+### UI-8 — a guild's display name can corrupt the identity parsed back out of `quarantine_reason`
+
+**Severity: medium, and unlike UI-7 this is a real defect, not a test artifact.**
+Found by the step `02-01` crafter, 2026-09-08. Not this feature's to fix.
+Owner: `guild-key-integrity`.
+
+`bot/guild_keys.py` records a quarantine as a flat string
+([`_quarantine_reason`, ~line 776](../../../bot/guild_keys.py#L776)):
+
+```
+... — observed={observed.uuid}
+```
+
+and later recovers the drifted identity by searching that string for the marker
+`"— observed="` ([`_observed_uuid_from_reason`, ~line 814](../../../bot/guild_keys.py#L814)).
+The bound and observed guild **names** are interpolated into the same string
+unescaped.
+
+Hypothesis generated a guild named `"� observed="`. That injects a second
+copy of the marker ahead of the real one, the parse latches onto the wrong
+occurrence, and the refusal reports the observed guild's uuid as
+`"� observed=f728b4fa-…"` instead of `"f728b4fa-…"`.
+
+**This is the classic shape: free, externally-controlled text interpolated into
+a delimited record that is later parsed by splitting on the delimiter.** Guild
+names come from the Tacticus API, so the content is not under this project's
+control.
+
+**Bounded, not alarming.** The corrupted value is a *diagnostic* — the identity
+shown in a refusal message. The quarantine decision itself is made from
+`tacticus_guild_id` comparison and is unaffected, so a drifted key is still
+refused. It needs a guild whose display name literally contains `— observed=`.
+
+**Suggested fix** (for its owner): store the observed uuid in its own column, or
+serialise the reason as JSON, rather than recovering structure from prose by
+string search. `bot/obs.py` already exists for exactly this reason one layer up.
+
+**Confirmed not a regression from this feature:** the crafter reverted
+`admin_cog.py` to HEAD and reproduced it; the orchestrator independently
+reproduced it and read both functions.
+
+---
+
+### A note on UI-7 and UI-8 together: your local suite now disagrees with a fresh checkout
+
+Both were found by Hypothesis **during this DELIVER wave**, on inputs it had
+never generated before, and both are now pinned in the local `.hypothesis`
+example database. They replay on every subsequent run on this machine.
+
+Consequence worth stating plainly: **`pytest tests/unit tests/acceptance` on this
+machine shows 2 failures that a fresh clone or a CI runner would not show.**
+Neither is caused by `cluster-board-control`; neither is fixed by it. A future
+reader comparing a local run against a clean one should start here rather than
+re-deriving it.
+
+That the DELIVER baseline (52 failed / 358 passed) did not include them is not an
+error in the baseline — it is when they were discovered.
 
 ---

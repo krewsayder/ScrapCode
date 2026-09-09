@@ -16,7 +16,36 @@ again, without losing the board or the season's posted messages.
 
 ---
 
-## Status — shipped out of process, non-conforming
+## Status — DONE, 2026-09-08
+
+**The precursor landed, so the slice is done.** Commits `74b6e00` (storage),
+`d00b9ed` (the port), `f563889` (a harness defect the port change exposed) and
+`681943e` (the status-change record). 57 of 57 scenarios green; all five HARD
+KPIs met; `import-linter` 6 kept / 0 broken.
+
+Everything below this line was written BEFORE DELIVER ran and is left unedited
+as the record of what was outstanding. Two items resolved differently from how
+they were framed:
+
+- Point 5 of the precursor scope asked whether `0005` would be amended or
+  superseded. DESIGN ruled amend-in-place (DDD-4) and DELIVER did so, while the
+  revision was still unpushed. **That window is now closed** — the branch has
+  been migrated locally, so any further change to this column needs a `0006`.
+- The blast radius below reads "5 load and 5 save call sites". It was still one
+  short: `tests/unit/test_leaderboard_season_fall_through.py` reads a field off
+  a stored config, and a repository double did not insulate it — a double
+  insulates a test from the ADAPTER, not from the PORT'S TYPE. Third correction
+  to this figure in this feature; see UI-4 and the roadmap's
+  `file_list_correction`.
+
+**The learning hypothesis is NOT yet tested.** It is disproved or confirmed by
+the dogfood on the production VM, not by the test suite — see Dogfood Moment at
+the foot of this brief. Until an officer pauses the real board and finds the
+pause legible, D2 remains an accepted risk rather than a validated decision.
+
+---
+
+## Status at DISCUSS time — shipped out of process, non-conforming
 
 This slice's user-visible behaviour **is already merged** on
 `fix/startup-probe-module-shadowing`. It was written on 2026-09-08 before

@@ -1066,3 +1066,38 @@ for the live-board control path is added at
 | DDD-6 contract-test literal amended | US-004 |
 | DDD-7 `is_enabled` on the type | US-004 |
 | DDD-8 refresh loop stops mutating | US-001, US-002 |
+
+### L. As-built — DELIVER, 2026-09-08
+
+**Every component in §D shipped. Nothing was deferred, nothing was added.**
+Commits `74b6e00`, `d00b9ed`, `f563889`, `681943e` on
+`feature/cluster-board-control`.
+
+| §D component | Shipped as |
+|---|---|
+| `BoardStatus` enum (NEW) | `bot/repository.py` — placement question Q2 resolved in favour of staying beside the dataclass; nothing external owns board lifecycle the way Tacticus owns key lifecycle |
+| `LiveBoardConfig` (NEW) | `bot/repository.py`, frozen, `is_enabled` as a property. Gained `from_stored` / `as_stored` projections not anticipated by §D — one place now knows the on-disk key names, shared by the JSON adapter and the JSON→SQLite migration |
+| `bot/repository.py` (MODIFIED) | ABC signatures changed in place; JSON impl materialises `ACTIVE` |
+| `bot/repository_sqlalchemy.py` (MODIFIED) | reads/writes `board_status`; NULL or unrecognised materialises `ACTIVE` |
+| `bot/db/models.py` (MODIFIED) | `board_status` declared as `String(32)`, matching `key_status` exactly rather than the literal `TEXT` §D wrote — SQLite gives both TEXT affinity, and pattern conformance was this feature's leading quality attribute |
+| `0005_*` (AMENDED IN PLACE) | amended, and **renamed** to `0005_live_leaderboard_board_status.py`; the old name had become a lie. Alembic keys off the `revision` string, verified nothing referenced the basename |
+| `bot/cogs/{admin,tasks}_cog.py` (MODIFIED) | as specified; the handler's `enabled: bool` parameter became `status: BoardStatus`, deleting a translation §D did not foresee |
+| `bot/guilds.py` (MODIFIED) | both helpers deleted outright, not deprecated |
+
+**§G's added enforcement rule holds.** "No module outside `bot/repository.py`
+may compare a board's status literal" is asserted executably by
+`test_exactly_one_place_decides_whether_a_board_publishes` — DISTILL's answer to
+open question Q1 was an AST-style scan rather than an `import-linter` contract.
+Worth knowing about that test: its first half checks that the owning module
+*mentions* a status literal, and the `BoardStatus` enum declaration satisfies
+that on its own, so the load-bearing half is the second one (no cog compares
+it).
+
+**§C's correction stands as written.** A live-board config is no longer a bare
+dict at the port. The `live_leaderboards.json` on-disk shape in §4.6 remains
+accurate for `JsonClusterRepository` and gains a fifth key, `board_status`,
+always written.
+
+**One new event family** joins the structured-log surface:
+`live_board.status.changed`, emitted through `bot/obs.py` like every other
+record. Registered in `kpi-contracts.yaml`.

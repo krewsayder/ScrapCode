@@ -386,8 +386,46 @@ features:
       executable assertions but never registered here — a real violation of
       this file's own convention, found only because the gate ran.
 
-      NO event_family. This feature emits no structured record. That is itself
-      a finding rather than an omission — see `observability_debt` below.
+      NO event_family — CORRECTED 2026-09-08 at DELIVER. That sentence was
+      true when written and is now false: OD-1 was resolved in the same wave
+      and this feature emits `live_board.status.changed`. See `event_family`
+      immediately below and OD-1's closure at the foot of this entry.
+
+    event_family: live_board.*
+    events:
+      - name: live_board.status.changed
+        emitted_by: bot/cogs/admin_cog.py::_set_cluster_board_state
+        level: INFO
+        fields: [server_id, scope_key, from_status, to_status]
+        emitted_when: |
+          A board's stored status actually MOVES. Not when a command is run:
+          the emit sits below the save and past both early returns, so a
+          refusal (no board configured) and a no-op flip (already in that
+          state) produce nothing. The log answers "when did this board's state
+          move", not "who ran a command".
+
+          Never per refresh cycle. ~720 records a month for one paused board
+          is how a log stops being read.
+        operator_query: grep live_board.status.changed discord.log
+
+    delivered:
+      wave: DELIVER
+      dated: 2026-09-08
+      commits: [74b6e00, d00b9ed, f563889, 681943e]
+      suite_at_delivery: |
+        57 of 57 scenarios green in tests/acceptance/cluster-board-control/.
+        Full repository suite 407 passed / 2 failed / 2 skipped / 1 xfailed.
+        Both failures are UI-7 and UI-8 in guild-key-integrity — found by
+        Hypothesis DURING this wave on inputs it had not generated before,
+        neither caused by nor fixable within this feature, and absent from a
+        fresh clone because they replay from the local example database.
+      baseline_note: |
+        All five KPIs are pass/fail assertions rather than continuous
+        measurements, so the "measured baseline at GA" for each is simply the
+        target: 0, 100%, 100%, 0, 0. The value worth recording for future
+        deltas is not a number but the assertion names, which are already in
+        each KPI's `scenario` list. A future regression shows up as a named
+        test going red, not as a metric drifting.
 
     kpis:
       - id: KPI-1
@@ -501,4 +539,27 @@ features:
           - "slice-01-operator-off-switch.feature :: An hour passing on a paused board records nothing"
         operator_query: |
           grep live_board.status.changed discord.log
-        status: specified — implementation is DELIVER's
+        status: CLOSED — shipped 2026-09-08 in commit 681943e (step 02-01)
+        closure_evidence: |
+          Emitted via bot/obs.py::emit_structured, so there is one structured
+          record schema in this codebase rather than two. Verified by driving
+          the real command objects against a real repository:
+
+            {"event": "live_board.status.changed", "from_status": "active",
+             "scope_key": "cluster", "server_id": 4242, "to_status": "disabled"}
+            {"event": "live_board.status.changed", "from_status": "disabled",
+             "scope_key": "cluster", "server_id": 4242, "to_status": "active"}
+
+          Two records for two real changes; none for a refused attempt.
+
+          One honest caveat on the specifying scenarios. The crafter ran a
+          falsification rather than asserting the tests were meaningful: it
+          hoisted the emit above the no-op early return and confirmed all four
+          `records nothing` parametrizations went red, then restored the file.
+          The fourth scenario — "An hour passing on a paused board records
+          nothing" — remains STRUCTURALLY VACUOUS, because the module it
+          drives contains no emitter at all, so no placement mistake in
+          admin_cog.py can turn it red. It is a forward guard against someone
+          later promoting the refresh loop's print() into a record, and it
+          will start biting the moment anyone does. Recorded rather than
+          quietly counted as coverage.
