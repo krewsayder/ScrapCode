@@ -1,3 +1,4 @@
+import logging
 from dataclasses import replace
 
 import httpx
@@ -6,6 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot import guild_keys
+from bot.obs import emit_structured
 # The MODULE, not `repo` by value. `bot/guilds.py` binds `repo = build_repo()`
 # at import time; a test (or a rollback that rebuilds it) swaps that attribute,
 # and a `from bot.guilds import repo` in this module would keep pointing at the
@@ -30,6 +32,25 @@ from bot.embeds import guild_autocomplete, encounter_limit
 from bot.permissions import require_tier, check_tier
 from bot.services.chronicl3r.player_service import PlayerService
 from bot.services.tacticus.guild_client import GuildSnapshot, KeyStatus
+
+# This module's OWN logger, not a shared one: `emit_structured` takes the
+# caller's logger so the record lands under `bot.cogs.admin_cog` and the
+# operator reading `discord.log` can see which module moved the board.
+logger = logging.getLogger(__name__)
+
+# The structured record a board's state change leaves behind — the only thing
+# that answers "since when" about a paused board (`/view_config` answers "is it
+# paused NOW"). Dotted like every other event this bot emits
+# (`guild.key.quarantined`, `health.startup.refused`), and pinned in the
+# acceptance suite's vocabulary because the operator's
+# `grep live_board.status.changed discord.log` and the test have to break
+# together.
+BOARD_STATUS_CHANGED_EVENT = "live_board.status.changed"
+
+# The mapping key the cluster board is stored under. A local name rather than
+# three string literals so the key that is READ, the key that is WRITTEN and
+# the key that is RECORDED cannot drift apart.
+CLUSTER_SCOPE_KEY = "cluster"
 
 # Shown in place of a display field the guild service did not send. Display
 # fields are never load-bearing (ADR-008 D1): a guild that has not set a tag
@@ -782,7 +803,7 @@ class AdminCog(commands.Cog):
         """
         server_id = interaction.guild_id
         live      = load_live_leaderboards(server_id)
-        config    = live.get("cluster")
+        config    = live.get(CLUSTER_SCOPE_KEY)
 
         if config is None:
             # Refusing rather than storing a switch for a board that does not
@@ -809,8 +830,28 @@ class AdminCog(commands.Cog):
         # back into the mapping explicitly and the save cannot be forgotten.
         # Everything but the switch is carried across by `replace`, which is
         # AC-001.4 held by construction rather than by remembering to copy.
-        live["cluster"] = replace(config, board_status=status)
+        live[CLUSTER_SCOPE_KEY] = replace(config, board_status=status)
         save_live_leaderboards(server_id, live)
+
+        # BELOW the save and PAST both early returns, deliberately. The record
+        # follows the CHANGE, not the command: emitted at the top of this
+        # method it would answer "who ran a command" — including for the
+        # already-in-that-state reply above, which moved nothing — instead of
+        # "when did this board's state actually move", which is the question a
+        # board paused months ago leaves nobody able to answer.
+        #
+        # On change, never per cycle. The refresh loop skipping a paused board
+        # every hour is ~720 records a month for ONE board, and a log nobody
+        # can skim is a log nobody reads.
+        emit_structured(
+            logger,
+            logging.INFO,
+            BOARD_STATUS_CHANGED_EVENT,
+            server_id=server_id,
+            scope_key=CLUSTER_SCOPE_KEY,
+            from_status=config.board_status.value,
+            to_status=status.value,
+        )
 
         where = f"<#{config.channel_id}>" if config.channel_id else "its channel"
 
