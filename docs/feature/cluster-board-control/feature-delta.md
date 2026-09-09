@@ -1418,3 +1418,35 @@ running the suite against the merged tree is.
 merge that crosses a port-signature change, before trusting the result.
 
 ---
+
+### UI-10 — the merge turned an incomplete fixture into a failing scenario
+
+**Severity: low. RESOLVED** by operator decision, 2026-09-08.
+
+`main`'s new-tier backfill posts a message for any tier in `TIER_CHOICES` that
+a board has no message for, so a tier added mid-season stops being invisible.
+This suite's `_seed` helper built boards carrying **one** message out of eight.
+
+After the merge, that fixture read as "seven tiers need backfilling", and
+`test_resuming_within_the_same_season_edits_the_board_already_there` (AC-002.2,
+KPI-adjacent) failed on seven sends — which were the backfill working exactly
+as designed, on a board no real server would have.
+
+**Neither feature was wrong.** They collided over what a half-populated board
+means, and a half-populated board only became meaningful when the backfill
+shipped.
+
+**Operator ruling:** a same-season resume must update the board already in the
+channel and must not create a new one. That is what AC-002.2 always meant, so
+the fixture was corrected rather than the assertion weakened or the behaviour
+changed.
+
+`_seed` now derives a complete message set from `TIER_CHOICES` rather than
+hard-coding one. Deriving matters more than the count: eight hard-coded values
+would fail the same way, for the same reason, the day a ninth tier ships — on a
+scenario about resuming that has nothing to do with tiers.
+
+**Verified after the fix:** a same-season resume edits the existing messages and
+sends nothing. 57 of 57 scenarios green.
+
+---

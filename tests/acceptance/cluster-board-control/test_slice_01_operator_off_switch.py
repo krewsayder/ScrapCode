@@ -86,13 +86,34 @@ def _require_typed_port(repo) -> None:
     repo.save_live_leaderboards(SERVER_ID, {})
 
 
+def _a_complete_board() -> dict[str, int]:
+    """A message id for every tier the bot posts — what a real board carries.
+
+    DERIVED from `TIER_CHOICES`, never hard-coded, and that is the whole point.
+    A board carrying fewer messages than there are tiers became a MEANINGFUL
+    state when the new-tier backfill shipped: the refresh loop now adopts a
+    missing tier by POSTING it, so that a tier added to the game mid-season
+    stops being invisible.
+
+    A fixture pinned to one tier therefore reads as "seven tiers need
+    backfilling", and `test_resuming_within_the_same_season_edits_the_board_
+    already_there` fails on seven sends that are the backfill working
+    correctly. Hard-coding eight would fix it until the ninth tier ships and
+    then fail the same way, for the same reason, on a scenario about resuming
+    that has nothing to do with tiers.
+    """
+    from config import TIER_CHOICES
+
+    return {tier.value: 900 + index for index, tier in enumerate(TIER_CHOICES)}
+
+
 def _seed(repo, *, status=BoardStatus.ACTIVE, season=SEASON,
           scope=ScopeKind.CLUSTER, messages=None) -> LiveBoardConfig:
     """`Given a <kind> leaderboard that is <state>`."""
     _require_typed_port(repo)
     config = LiveBoardConfig(
         channel_id=CHANNEL_ID,
-        messages={"Legendary_0": 999} if messages is None else messages,
+        messages=_a_complete_board() if messages is None else messages,
         season=season,
         guild_id=scope.guild_id,
         board_status=status,
