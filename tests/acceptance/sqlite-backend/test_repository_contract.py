@@ -121,6 +121,53 @@ def test_every_abc_method_round_trips_through_the_repository(impl_pair, tmp_clus
     assert "boss_hits" in bomb
 
 
+def test_registering_a_player_preserves_everyone_elses_capped_state(impl_pair):
+    """@driving_port — regression: production duplicate cap pings, 2026-10-20.
+
+    `save_player_registrations` is a full replace, and `is_capped` is not part
+    of a registration dict — those carry only `api_key` and `guild_id`. The
+    SQLite impl therefore re-inserted every row with the column default and
+    cleared the cap state of EVERY player on the server, not just the one
+    being registered. The hourly `cap_detect` edge-trigger then read
+    `was_capped=False` for all of them and re-pinged everyone sitting at 3/3.
+
+    RC1 above cannot catch this: it saves registrations BEFORE capped state,
+    the one ordering where the wipe is invisible. The ordering asserted here
+    is the production one — somebody caps, then somebody else registers.
+
+    The JSON impl passes unchanged, because capped_state.json is a separate
+    file that a registration write never opens. That parity is the point: this
+    pins the SQLite impl to the behaviour the JSON impl always had.
+
+    Asserted per-key rather than by dict equality because the two impls differ
+    legitimately in shape — JSON's capped_state is sparse (only players ever
+    written), SQLite's is dense (one entry per registration row). Both satisfy
+    the only consumer, which reads `capped_state.get(discord_id, False)`.
+    """
+    repo = impl_pair
+    server = PROD_SERVER
+
+    registered = {
+        "111111111": {"api_key": "tacticus-aaa", "guild_id": "neuro"},
+        "222222222": {"api_key": "tacticus-bbb", "guild_id": "neuro"},
+    }
+    repo.save_player_registrations(server, registered)
+    repo.save_capped_state(server, {"111111111": True, "222222222": False})
+
+    # The production trigger: a third player registers while 111 sits capped.
+    repo.save_player_registrations(server, {
+        **registered,
+        "333333333": {"api_key": "tacticus-ccc", "guild_id": "mech"},
+    })
+
+    state = repo.load_capped_state(server)
+    assert state.get("111111111"), \
+        "capped state was wiped by a DIFFERENT player's registration"
+    assert not state.get("222222222", False)
+    assert not state.get("333333333", False), \
+        "a new registration must start uncapped so the first cap still pings"
+
+
 # ---------------------------------------------------------------------------
 # The remaining scenarios are skipped until DELIVER enables them one at a time.
 # ---------------------------------------------------------------------------
