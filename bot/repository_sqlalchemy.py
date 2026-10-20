@@ -308,7 +308,30 @@ class SqlAlchemyClusterRepository(ClusterRepository):
             }
 
     def save_player_registrations(self, discord_server_id: int, data: dict) -> None:
+        # Full replace, so `is_capped` has to be carried across by hand. It is
+        # NOT part of `data` — a registration dict holds only `api_key` and
+        # `guild_id` (see `load_player_registrations` above) — so re-inserting
+        # takes the column default and silently clears the cap state of EVERY
+        # player on the server, not just the one being registered. The next
+        # `cap_detect` cycle then reads `was_capped=False` for all of them and
+        # re-pings everyone who is sitting at 3/3.
+        #
+        # The JSON backend cannot fail this way: there, capped_state.json is a
+        # separate file that a registration write never opens. Collapsing both
+        # onto `player_registrations` is what introduced the coupling, so the
+        # carry-over below is what restores JSON parity.
+        #
+        # `unregister` in registration_cog deletes the departing player from
+        # capped_state AFTER calling this method, which only reads correctly
+        # once the other players' flags survive the round trip.
         with self._db.session_scope() as session:
+            previously_capped = {
+                row.discord_id: row.is_capped
+                for row in session.execute(
+                    select(PlayerRegistrationRow).where(
+                        PlayerRegistrationRow.discord_server_id == discord_server_id)
+                ).scalars().all()
+            }
             session.execute(delete(PlayerRegistrationRow).where(
                 PlayerRegistrationRow.discord_server_id == discord_server_id))
             for discord_id, info in data.items():
@@ -319,7 +342,9 @@ class SqlAlchemyClusterRepository(ClusterRepository):
                     guild_id=info["guild_id"],
                     api_key=encrypt_api_key(plain, self._fernet_key),
                     api_key_hmac=api_key_hmac(plain, self._fernet_key),
-                    is_capped=False,
+                    # A genuinely new registration defaults to False so the
+                    # player is pinged the first time they actually cap.
+                    is_capped=previously_capped.get(discord_id, False),
                 ))
 
     def load_capped_state(self, discord_server_id: int) -> dict:
