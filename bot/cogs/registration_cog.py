@@ -1,16 +1,19 @@
 import asyncio
 import logging
+import os
+from datetime import datetime, timezone
 
 import httpx
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from typing import Optional
 
 from bot.guilds import load_player_registrations, save_player_registrations, load_capped_state, save_capped_state, load_guilds, repo
 from bot.embeds import guild_autocomplete, resolve_members
 from bot.obs import emit_structured
 from bot.permissions import require_guild_member, require_tier, check_tier
+from bot.services.chronicl3r.key_sync import KeySyncAction, KeySyncSchedule
 
 # This module's OWN logger: `emit_structured` keeps records under the emitting
 # module's name, so registration records stay greppable by origin.
@@ -53,6 +56,20 @@ CHRONICLER_UNLINK_EVENT = "chronicler.key.unlink"
 # What a raised link/unlink call is recorded as: the same as an unreachable
 # Chronicl3r, since the outcome for the player is identical.
 _RAISED_CODE = "transport"
+
+# Background key sync: backfills keys registered before the Chronicl3r link
+# existed. One link per tick = 30/h, half of Chronicl3r's per-account link
+# throttle, leaving the rest for live registrations. Lookups have their own
+# far larger bucket.
+KEY_SYNC_SWITCH_ENV = "CHRONICL3R_KEY_SYNC"
+KEY_SYNC_LOOKUPS_PER_TICK = 20
+KEY_SYNC_LOOKUP_EVENT = "chronicler.key_sync.lookup"
+KEY_SYNC_LINK_EVENT = "chronicler.key_sync.link"
+KEY_SYNC_PAUSED_EVENT = "chronicler.key_sync.paused"
+KEY_SYNC_TICK_FAILED_EVENT = "chronicler.key_sync.tick_failed"
+
+# Outcomes that settle a player normally; anything else is logged as a warning.
+_SETTLED_OUTCOMES = frozenset({"linked", "not_linked"})
 
 
 async def _probe_api_keys(
@@ -156,6 +173,26 @@ def _log_chronicler(event: str, level: int, server_id, discord_id: str, code: st
     )
 
 
+def _lookup_sync_outcome(result) -> str | None:
+    """The schedule outcome for one lookup. A held but invalid key is re-linked."""
+    if result.status == 200:
+        valid = bool(result.profile) and result.profile.get("has_valid_api_key") is True
+        return "linked" if valid else "not_linked"
+    return result.code
+
+
+def _link_sync_outcome(result) -> str | None:
+    return "linked" if result.status == 200 else result.code
+
+
+def _key_sync_switched_off() -> bool:
+    return os.getenv(KEY_SYNC_SWITCH_ENV, "").strip().lower() == "off"
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 class RegistrationCog(commands.Cog):
     def __init__(self, bot: commands.Bot, player_service=None):
         # `player_service` defaults to None so callers that predate the
@@ -163,6 +200,90 @@ class RegistrationCog(commands.Cog):
         # Chronicl3r entirely (no link, no link line, no storage notice).
         self.bot = bot
         self.player_service = player_service
+        # One schedule shared by the loop and `register`, so a key the
+        # command just linked (or saw refused) is not posted again.
+        self.key_sync = KeySyncSchedule()
+        self.clock = _utc_now
+
+    async def cog_load(self):
+        # Started on load rather than in __init__: discord.py's Loop.start
+        # needs a running event loop, which `add_cog` always provides.
+        if self.player_service is not None:
+            self.chronicler_key_sync.start()
+
+    def cog_unload(self):
+        self.chronicler_key_sync.cancel()
+
+    # ==========================================
+    # TASK: CHRONICL3R KEY SYNC (every 2 minutes)
+    # ==========================================
+
+    @tasks.loop(minutes=2)
+    async def chronicler_key_sync(self):
+        """Look up at most 20 due keys, then link at most one.
+
+        Every player key read stays inside this function (the architecture
+        chokepoint exempts it by name). A failing tick is logged by exception
+        type only and never ends the loop.
+        """
+        if self.player_service is None or _key_sync_switched_off():
+            return
+        try:
+            now = self.clock()
+            if self.key_sync.paused_until(now) is not None:
+                return
+            # The FULL list every tick: the schedule forgets anyone missing.
+            registrations = [
+                (server_id, discord_id, entry.get("api_key"))
+                for server_id in repo.list_server_ids()
+                for discord_id, entry in load_player_registrations(server_id).items()
+                if isinstance(entry, dict) and entry.get("api_key")
+            ]
+
+            async def settle(registration, action) -> bool:
+                """Make one call and record it; False when the loop is now paused."""
+                server_id, discord_id, key = registration
+                if action is KeySyncAction.LOOKUP:
+                    call, outcome_of, event = (self.player_service.lookup_key,
+                                               _lookup_sync_outcome, KEY_SYNC_LOOKUP_EVENT)
+                else:
+                    call, outcome_of, event = (self.player_service.link_key,
+                                               _link_sync_outcome, KEY_SYNC_LINK_EVENT)
+                try:
+                    result = await call(key)
+                    outcome, retry_after = outcome_of(result), result.retry_after
+                except Exception:
+                    outcome, retry_after = _RAISED_CODE, None
+                self.key_sync.record(server_id, discord_id, key, outcome, now, retry_after)
+                code = outcome or "unexpected"
+                level = logging.INFO if code in _SETTLED_OUTCOMES else logging.WARNING
+                _log_chronicler(event, level, server_id, discord_id, code)
+                paused_until = self.key_sync.paused_until(now)
+                if paused_until is None:
+                    return True
+                emit_structured(
+                    logger, logging.WARNING, KEY_SYNC_PAUSED_EVENT,
+                    code=code, pause_seconds=int((paused_until - now).total_seconds()),
+                )
+                return False
+
+            due = self.key_sync.due(registrations, now)
+            lookups = [r for r, action in due if action is KeySyncAction.LOOKUP]
+            for registration in lookups[:KEY_SYNC_LOOKUPS_PER_TICK]:
+                if not await settle(registration, KeySyncAction.LOOKUP):
+                    return
+            # Re-asked, so a key this tick's lookups found unlinked is linked now.
+            links = [r for r, action in self.key_sync.due(registrations, now)
+                     if action is KeySyncAction.LINK]
+            if links:
+                await settle(links[0], KeySyncAction.LINK)
+        except Exception as exc:
+            emit_structured(logger, logging.ERROR, KEY_SYNC_TICK_FAILED_EVENT,
+                            error_type=type(exc).__name__)
+
+    @chronicler_key_sync.before_loop
+    async def _before_chronicler_key_sync(self):
+        await self.bot.wait_until_ready()
 
     reg = app_commands.Group(name="registration", description="Player registration commands")
 
@@ -279,8 +400,14 @@ class RegistrationCog(commands.Cog):
             try:
                 result = await self.player_service.link_key(api_key)
                 line, link_code = _link_outcome(result.status, result.code)
+                retry_after = result.retry_after
             except Exception:
                 line, link_code = _link_outcome(None, _RAISED_CODE)
+                retry_after = None
+            # Same mapping as the loop's link: "unexpected" pauses exactly as a
+            # code-less answer would.
+            self.key_sync.record(server_id, discord_id, api_key, link_code,
+                                 self.clock(), retry_after)
             level = logging.INFO if line == CHRONICLER_LINKED_LINE else logging.WARNING
             _log_chronicler(CHRONICLER_LINK_EVENT, level, server_id, discord_id, link_code)
             message = "\n".join((message, line, CHRONICLER_STORAGE_NOTICE))
