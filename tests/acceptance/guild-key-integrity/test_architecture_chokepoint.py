@@ -77,6 +77,8 @@ EXEMPT_PLAYER_KEY_FUNCTIONS = {
     "bot/cogs/token_cog.py": {"token_availability"},
     # unregister: player-registration key read to delete it from Chronicl3r on unregister.
     "bot/cogs/registration_cog.py": {"register", "validate_keys", "unregister"},
+    # _collect_guild_player_keys: player-registration keys read to delete them from Chronicl3r on deregister_guild.
+    "bot/cogs/admin_cog.py": {"_collect_guild_player_keys"},
 }
 
 

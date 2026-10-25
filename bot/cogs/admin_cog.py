@@ -23,6 +23,7 @@ from bot.guilds import (
     save_live_leaderboards,
     get_player_list,
     load_player_list,
+    load_player_registrations,
     add_cluster_role,
     add_guild_member_role,
     repo,
@@ -101,6 +102,13 @@ _UNUSABLE_KEY_WORDS = {
     guild_keys.QUARANTINED: "quarantined — its stored key resolves to another guild",
     guild_keys.NO_KEY_REGISTERED: "no API key registered",
 }
+
+# The record a deregistration leaves for a player key Chronicl3r may still
+# hold. Same event and codes as `/registration unregister`, so one grep finds
+# every key the bot failed to remove. A success leaves no record.
+CHRONICLER_UNLINK_EVENT = "chronicler.key.unlink"
+_UNLINK_FAILED_CODE = "unlink_failed"
+_RAISED_CODE = "transport"
 
 CONFIG_OPTIONS = [
     app_commands.Choice(name="guilds",        value="guilds"),
@@ -371,6 +379,7 @@ class AdminCog(commands.Cog):
         counts = guild_registry.repo.count_guild_destruction_rows(server_id, guild_id)
         view = _DeregistrationConfirmView(
             server_id=server_id, guild_id=guild_id, guild_name=guild_name, counts=counts,
+            player_service=self.player_service,
         )
         await interaction.followup.send(
             _deregistration_warning(guild_id, guild_name, counts),
@@ -1107,15 +1116,19 @@ class _DeregistrationConfirmView(discord.ui.View):
     moves with the deletion, so a confirmation that is never taken leaves no
     tombstone behind for a guild that was not destroyed (step 08-03's
     invariant, preserved here).
+
+    With a `player_service`, confirming also removes from Chronicl3r the key
+    of every player registered to the guild; `None` skips that entirely.
     """
 
     def __init__(self, *, server_id: int, guild_id: str, guild_name: str,
-                 counts: dict) -> None:
+                 counts: dict, player_service: PlayerService | None = None) -> None:
         super().__init__()
-        self._server_id  = server_id
-        self._guild_id   = guild_id
-        self._guild_name = guild_name
-        self._counts     = counts
+        self._server_id      = server_id
+        self._guild_id       = guild_id
+        self._guild_name     = guild_name
+        self._counts         = counts
+        self._player_service = player_service
 
     @discord.ui.button(
         label="Confirm deregistration", style=discord.ButtonStyle.danger,
@@ -1142,6 +1155,16 @@ class _DeregistrationConfirmView(discord.ui.View):
         # it ceases to exist. It sits in the confirmation callback — not at
         # command invocation — so a confirmation that is never taken leaves
         # no tombstone behind for a deletion the admin declined.
+        #
+        # The player keys are read on the same principle: the CASCADE takes
+        # this guild's registrations with the `guilds` row, so they are
+        # collected first. They are unlinked only AFTER the deletion and the
+        # reply, so no Chronicl3r latency or failure can delay, block or
+        # reverse the deregistration.
+        player_keys = (
+            _collect_guild_player_keys(server_id, guild_id)
+            if self._player_service is not None else []
+        )
         _record_quarantine_history(server_id, guild_id)
         del guilds[guild_id]
         save_guilds(server_id, guilds)
@@ -1154,6 +1177,42 @@ class _DeregistrationConfirmView(discord.ui.View):
             f"{counts['battle_hits']} battle hits, "
             f"{counts['bomb_hits']} bomb hits.",
             ephemeral=True,
+        )
+        for discord_id, key in player_keys:
+            await _unlink_player_key(self._player_service, server_id, discord_id, key)
+
+
+def _collect_guild_player_keys(server_id: int, guild_id: str) -> list[tuple[str, str]]:
+    """(discord_id, key) for every player on this server registered to `guild_id`.
+
+    A read failure is swallowed: a deregistration that cannot read the
+    registrations still deregisters; it just removes no key.
+    """
+    try:
+        registrations = load_player_registrations(server_id)
+    except Exception:
+        logger.warning("[deregister_guild] could not read player registrations")
+        return []
+    return [
+        (discord_id, entry.get("api_key"))
+        for discord_id, entry in registrations.items()
+        if isinstance(entry, dict)
+        and entry.get("guild_id") == guild_id
+        and entry.get("api_key")
+    ]
+
+
+async def _unlink_player_key(player_service: PlayerService, server_id: int,
+                             discord_id: str, key: str) -> None:
+    """Best-effort removal of one key; a failure is recorded, never raised."""
+    try:
+        code = None if await player_service.unlink_key(key) else _UNLINK_FAILED_CODE
+    except Exception:
+        code = _RAISED_CODE
+    if code is not None:
+        emit_structured(
+            logger, logging.WARNING, CHRONICLER_UNLINK_EVENT,
+            server_id=server_id, discord_id=discord_id, code=code,
         )
 
 
