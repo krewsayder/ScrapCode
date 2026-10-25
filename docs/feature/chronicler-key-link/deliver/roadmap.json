@@ -1,0 +1,226 @@
+{
+  "roadmap": {
+    "project_id": "chronicler-key-link",
+    "created_at": "2026-10-23",
+    "total_steps": 7
+  },
+  "slice_scope": "Send each registered player's Tacticus API key to Chronicl3r (contract v2) and take it back out when they leave: link on /registration register, delete on /registration unregister and on a confirmed /deregister_guild, and a rate-budgeted background loop that backfills the keys ScrapCode already holds. Reference contract: docs/product/architecture/chronicler-player-profiles-api.md. NO DISCUSS, DESIGN OR DISTILL WAVE RAN FOR THIS FEATURE. There are no pre-authored acceptance tests; the operator-approved plan is the design input. Each step's crafter therefore AUTHORS ITS OWN TESTS in RED, in the NEW test file named in that step's test_file, containing at least the test functions named in scenario_name (names are behaviour-first and may gain parametrisation, but may not be renamed into implementation terms). A step is done when those tests and the whole pre-existing suite are green.",
+  "baseline_to_preserve": "Measured 2026-10-23 on feature/chronicler-key-link (= origin/main e2d1823): `.venv/Scripts/python.exe -m pytest tests/unit tests/acceptance -q` = 1 failed, 450 passed, 2 skipped, 1 xfailed. The 1 failure is PRE-EXISTING and deterministic on main: tests/unit/test_guild_keys_quarantine_gate.py::test_a_quarantined_guild_is_refused_before_any_request_whatever_enforce_says. It is out of scope, must NOT be fixed or touched by this feature, and does not count against any step. Every COMMIT must show exactly that 1 failure, at least 450 passed plus the step's new tests, 2 skipped, 1 xfailed. `.venv/Scripts/lint-imports.exe` = 6 kept, 0 broken, and must stay so. Always use `.venv/Scripts/python.exe`, never a bare `python` (different interpreter, missing dependencies).",
+  "standing_constraints": [
+    "NO PRE-AUTHORED TESTS. Each step writes its own tests first (RED), in the NEW file named in its test_file. Do not edit any existing test file, with ONE exception: the step that adds a new player-key read (02-02, 02-03, 03-02) may add exactly the one EXEMPT_PLAYER_KEY_FUNCTIONS entry it names to tests/acceptance/guild-key-integrity/test_architecture_chokepoint.py, with a one-line reason comment, and nothing else in that file. tests/unit/test_deregister_confirmation_gate.py must keep passing UNMODIFIED.",
+    "Never push to any branch and never open a PR. DELIVER commits locally only, via des-commit. The operator merges via PR.",
+    "SECRETS. Never print, log, echo or format into an exception message an API key, a Chronicl3r token or a request body, in production code or in tests. Tests use obviously fake keys such as 'fake-key-1'. Logs carry ONLY server_id, discord_id and an outcome code (plus a pause duration for loop pauses). No log line and no Discord reply may contain Chronicl3r's `detail` text or a tacticus_user_id. Use bot.obs.emit_structured with the module's own logger for new records.",
+    "Do not touch tests/unit/test_guild_keys_quarantine_gate.py or the behaviour it tests. Its one failing test is pre-existing and out of scope.",
+    "Nothing under bot/services/chronicl3r may import httpx, directly or TRANSITIVELY (pytest-archon rule 'chronicler makes no outbound calls' in test_architecture_chokepoint.py walks the import graph, including function-local and TYPE_CHECKING imports). Chronicl3r calls use `requests`.",
+    "Cogs must not import sqlalchemy or bot.db (import-linter). Registrations are read through bot.guilds (load_player_registrations, repo.list_server_ids) exactly as tasks_cog does.",
+    "Player-key reads: test_no_cog_or_service_reads_a_guild_api_key_directly fails on any read of `api_key` (subscript, .get, attribute) in bot/cogs or bot/services outside the functions listed in EXEMPT_PLAYER_KEY_FUNCTIONS. `register` is already exempt. Pass keys onward as plain values; keep each new read inside the one function the step names, so exactly one exemption entry covers it. test_the_player_key_exemptions_still_describe_real_code then requires that named function to genuinely contain the read.",
+    "Tests make NO live network call. Patch requests.post / requests.delete in bot.services.chronicl3r.client with a fake that records calls and raises on any unexpected URL, pre-set the client token so authenticate() is never reached, and in cog tests patch bot.cogs.registration_cog.httpx.AsyncClient for the Tacticus key check (precedent: tests/unit/test_registration_validate_keys.py). Set SCRAPCODE_REPO_BACKEND, UPDATE_CHANNEL_ID and REPLAY_INDEX_CHANNEL_ID placeholders before any bot.* import.",
+    "Every new cog code path catches its own exceptions. The global app-command error handler (main.py on_app_command_error) echoes raw exception text to the user, so an uncaught Chronicl3r failure would leak whatever is in the message.",
+    "Full suite and lint-imports at baseline-or-better at every COMMIT (see baseline_to_preserve).",
+    "Test helpers: this repo has no shared assert_state_delta; follow the module-local `_assert_state_delta` + declared UNIVERSE precedent in tests/unit/test_replace_guild_key_refusals.py. Hypothesis is installed and used (tests/unit/test_deregister_confirmation_gate.py). New test-file basenames must be unique across tests/ (UI-1 basename collision); the names below were checked on 2026-10-23."
+  ],
+  "non_goals": [
+    "Storing the returned tacticus_user_id in ScrapCode's database — that is the player-unit-history binding decision; no schema change and no Alembic migration in this feature",
+    "Deleting Chronicl3r PROFILES — only keys are removed; roster sync registered the profiles and other features rely on them for display names",
+    "Fixing the global error handler in main.py that echoes raw exception text",
+    "Persisting key-sync scheduler state across restarts — it is in-memory by decision; a restart re-checks everything via the cheap lookup",
+    "Guarding against unlinking a key that a second Discord server still registers (one Chronicl3r account serves all servers). The backfill loop in 03-02 relinks such a key on its next pass; a cross-server guard was not in the approved plan and is raised to the orchestrator rather than added",
+    "Documentation (chronicler-player-profiles-api.md 'Changes needed' marked shipped, brief.md section 2.5 endpoint table rows) — handled at finalize by the orchestrator, not a crafter step"
+  ],
+  "build_order_constraint": "Reordered from the suggested decomposition to satisfy the wiring rule (every new production function has a production caller in the step that introduces it or in the very next step). Suggested order put the scheduler between PlayerService and the cog, which would have left link_key/unlink_key unwired for two steps. Final order: 01-01 client methods -> wired by 01-02 PlayerService -> wired by 02-01 /registration register (plus main.py composition) -> 02-02 unregister and 02-03 deregister_guild reuse unlink_key -> 03-01 pure scheduler -> wired by 03-02 loop (which also makes register record its outcome in the scheduler). The suggested 02-01 (register + unregister together) was split into 02-01 and 02-02 because together they carried 13 scenarios against the 8 threshold and are independently shippable; split this way each step is green on its own. 02-03 depends only on 01-02 and 02-01's composition (it reuses the PlayerService AdminCog already receives) and is ordered before Phase 03 so all key-removal paths land before the loop starts linking keys that previously sat unlinked. 03-01 is pure and could run any time after 01-01, but runs immediately before 03-02 so it is wired the very next step. All steps run sequentially.",
+  "validation": {
+    "status": "approved",
+    "gate": "orchestrator automated gate 2026-10-23: AC coupling clean, 7 steps / 6 production files, no identical AC structures, no validation-only steps, ids match ^\\\\d{2}-\\\\d{2}$, every step carries test_file + scenario_name. des-verify-integrity --roadmap-only exit 0.",
+    "review": "@nw-acceptance-designer-reviewer 2026-10-23: APPROVED. All six plan items mapped (item 7 docs at finalize). One MEDIUM fixed: 02-03 deps corrected to 01-02 (AdminCog already receives player_service; ordering stays sequential). Steps 01-01, 02-01, 03-01, 03-02 sit at exactly 8 scenarios: informational."
+  },
+  "phases": [
+    {
+      "id": "01",
+      "name": "Speak Chronicl3r contract v2",
+      "description": "The client gains the three key routes with timeouts and parses every outcome without raising; PlayerService exposes them asynchronously and keeps the Tacticus user ID to itself.",
+      "default_agent": "nw-software-crafter",
+      "default_deps_strategy": "sequential",
+      "steps": [
+        {
+          "id": "01-01",
+          "name": "Key-call results from the Chronicl3r client",
+          "agent": "nw-software-crafter",
+          "deps": [],
+          "criteria": [
+            "Linking, looking up and deleting a key each return a KeyCallResult carrying the HTTP status, the contract code, any Retry-After seconds and the profile body on success",
+            "Every contract error code (missing_key, invalid_key, no_profiles, no_name_match, no_match, insufficient_data, ambiguous, upstream_rate_limited, upstream_unavailable, throttled, not_linked) is read from the JSON body",
+            "A non-JSON 404 reads as not_deployed; a timeout or connection failure reads as transport with no status; a DRF error without a code keeps only its status",
+            "No key call raises for an error status, and the link waits up to 60 s while lookup and delete wait up to 10 s",
+            "Neither a KeyCallResult nor its repr ever contains the submitted key or the profile's tacticus_user_id",
+            "The removed PATCH method and the duplicate profile getter no longer exist on the client"
+          ],
+          "test_file": "tests/unit/test_chronicler_key_calls.py",
+          "scenario_name": "test_a_linked_key_comes_back_as_a_profile_with_no_code, test_every_contract_error_code_is_read_from_the_body, test_a_route_that_is_not_deployed_reads_as_not_deployed, test_retry_after_is_honoured_on_throttled_and_unavailable_responses, test_a_timeout_or_dropped_connection_reads_as_transport, test_a_drf_error_without_a_code_keeps_only_its_status, test_linking_waits_sixty_seconds_and_every_other_key_call_ten, test_the_key_never_appears_in_a_result_or_its_repr",
+          "files_to_modify": [
+            "bot/services/chronicl3r/client.py",
+            "tests/unit/test_chronicler_key_calls.py"
+          ],
+          "implementation_notes": "Approved plan item 1. Add a frozen dataclass KeyCallResult(status: int | None, code: str | None, retry_after: int | None, profile: dict | None) and three methods: link_api_key(key) -> POST player-profiles/api-keys/ (timeout 60), lookup_api_key(key) -> POST player-profiles/lookup/ (timeout 10), delete_api_key(tacticus_user_id) -> DELETE player-profiles/<id>/api-key/ (timeout 10). Body for the two POSTs is {'tacticus_player_api_key': key}. Route all three through ONE shared private helper that: never calls raise_for_status; catches requests.RequestException (covers Timeout and ConnectionError) and returns code='transport', status=None; parses the body as JSON and reads 'code' (absent -> None); treats a body that is not JSON (Content-Type not JSON, or .json() raising ValueError / requests.JSONDecodeError) on a 404 as code='not_deployed'; reads Retry-After as integer seconds (an HTTP-date or garbage -> None, the scheduler applies its own default); sets profile only on a 200. 204 has no body: status 204, code None, profile None. Declare `profile` with field(repr=False) so a logged result can never print the tacticus_user_id; the class holds no field for the key at all. The helper must not format the request body into any message. Delete set_player_api_key (old PATCH, now 405) and get_player_profile (duplicate of get_profile); grep on 2026-10-23 found no caller of either anywhere in the repo, re-grep before deleting. Leave register_user/get_profile/authenticate untouched. Testing: patch requests.post / requests.delete in bot.services.chronicl3r.client with a fake returning crafted responses (status, headers, body) and asserting the timeout kwarg; set client.token beforehand so authenticate() never fires. Property-test the parser: for any (status, code-or-none, json-or-html, retry-after) drawn by Hypothesis, the call returns a KeyCallResult, never raises, and repr(result) contains neither the fake key nor a sentinel tacticus_user_id. WIRING: the three new methods are wired by 01-02 (PlayerService), the very next step. TEST PARADIGM (mandatory): Unit tests for this step MUST be written as property-based tests using Hypothesis @given strategies + state-delta matchers (assert_state_delta over a declared universe with strict=True). Single-example unit tests are FALLBACK only — document why in a `# bypass:` comment if used. Acceptance scenarios MUST be framed as Property: blocks (quantified preconditions + invariant outcomes) where the contract supports it; classic Scenario: is fallback. Integration and E2E tests REMAIN single-example — they verify wiring, not invariants. Universe declaration is mandatory even when only one slot is checked: the unchanged() predicate covers the rest. STAGE CONTEXT (cascade): NEW code = Stage 0 (paradigm-from-day-zero, no debt accumulates). Bug-prone legacy code = Stage 1 first (state-delta migration captures hidden mutations, 33-75% yield), THEN Stage 2 PBT amplification (low yield by design — surface is debt-paid). Don't expect high hit rate on Stage-1-completed surfaces; that's healthy. See nw-tdd-methodology::Paradigm Mandate for the full debt-payoff framing."
+        },
+        {
+          "id": "01-02",
+          "name": "PlayerService links, looks up and unlinks keys",
+          "agent": "nw-software-crafter",
+          "deps": [
+            "01-01"
+          ],
+          "criteria": [
+            "link_key hands the key to Chronicl3r and returns the outcome without blocking the event loop",
+            "unlink_key looks the key up and deletes the key of the profile the lookup names; a key Chronicl3r never linked counts as unlinked",
+            "unlink_key reports failure, without raising, when the lookup or the delete does not succeed",
+            "lookup_key reports whether the key is held and whether it is still valid",
+            "No result PlayerService returns, and nothing it logs, contains a tacticus_user_id or a key"
+          ],
+          "test_file": "tests/unit/test_player_service_key_link.py",
+          "scenario_name": "test_linking_hands_the_key_to_chronicler_and_returns_the_outcome, test_unlinking_deletes_the_key_of_the_profile_the_lookup_names, test_a_key_chronicler_never_linked_counts_as_unlinked, test_unlinking_reports_failure_when_the_lookup_or_the_delete_fails, test_a_held_key_lookup_reports_validity_only, test_no_tacticus_user_id_leaves_the_player_service, test_key_calls_run_off_the_event_loop",
+          "files_to_modify": [
+            "bot/services/chronicl3r/player_service.py",
+            "tests/unit/test_player_service_key_link.py"
+          ],
+          "implementation_notes": "Approved plan item 2, plus one necessary refinement. Add async link_key(key), lookup_key(key) and unlink_key(key), each running the sync client via asyncio.to_thread (same shape as get_or_register). REFINEMENT, flagged: the plan names only link_key and unlink_key, but the 03-02 loop runs in RegistrationCog, which holds a PlayerService and must not reach the client directly, so lookup_key is added here. To keep plan item 2's guarantee ('the tacticus_user_id never leaves unlink_key') true for ALL three, every KeyCallResult PlayerService returns has its profile reduced to {'has_valid_api_key': bool} (or None) via dataclasses.replace; display name and tacticus_user_id are dropped at this boundary. unlink_key returns a bool: True when the lookup returns not_linked, or when the lookup returns 200 and DELETE of that profile's tacticus_user_id returns 204; False for anything else (lookup throttled/transport/not_deployed, delete failure). It never raises for a Chronicl3r outcome; an exception from authenticate() inside the thread may still propagate, which is why every cog caller wraps its call (standing constraint). The tacticus_user_id is a local inside unlink_key only: not returned, not logged, not stored. Tests: drive the PlayerService public methods over a real chronicl3rClient with requests.post / requests.delete patched (fake records URLs and bodies, token pre-set), and assert via a sentinel tacticus_user_id that it reaches the DELETE URL and nowhere else (not in any return value, not in caplog). Property: for every lookup/delete outcome pair drawn from the contract codes, unlink_key returns the stated bool and never raises. WIRING: link_key and unlink_key are wired by 02-01 (/registration register), the very next step; lookup_key is wired by 03-02 (the loop) — it is the one exception to next-step wiring and is accepted because it is a three-line delegate whose only purpose is that loop; if the reviewer objects, move lookup_key into 03-02 instead. TEST PARADIGM (mandatory): Unit tests for this step MUST be written as property-based tests using Hypothesis @given strategies + state-delta matchers (assert_state_delta over a declared universe with strict=True). Single-example unit tests are FALLBACK only — document why in a `# bypass:` comment if used. Acceptance scenarios MUST be framed as Property: blocks (quantified preconditions + invariant outcomes) where the contract supports it; classic Scenario: is fallback. Integration and E2E tests REMAIN single-example — they verify wiring, not invariants. Universe declaration is mandatory even when only one slot is checked: the unchanged() predicate covers the rest. STAGE CONTEXT (cascade): NEW code = Stage 0 (paradigm-from-day-zero, no debt accumulates). Bug-prone legacy code = Stage 1 first (state-delta migration captures hidden mutations, 33-75% yield), THEN Stage 2 PBT amplification (low yield by design — surface is debt-paid). Don't expect high hit rate on Stage-1-completed surfaces; that's healthy. See nw-tdd-methodology::Paradigm Mandate for the full debt-payoff framing."
+        }
+      ]
+    },
+    {
+      "id": "02",
+      "name": "The key follows the registration",
+      "description": "Registering sends the key to Chronicl3r and tells the player so; unregistering and a confirmed guild deregistration take it back out. Chronicl3r failing never fails a ScrapCode command.",
+      "default_agent": "nw-software-crafter",
+      "default_deps_strategy": "sequential",
+      "steps": [
+        {
+          "id": "02-01",
+          "name": "Link the key on /registration register",
+          "agent": "nw-software-crafter",
+          "deps": [
+            "01-02"
+          ],
+          "criteria": [
+            "A successful registration links the key in Chronicl3r and the reply says it is linked",
+            "Whatever Chronicl3r answers, or if it cannot be reached or raises, the registration is saved and the command succeeds",
+            "Each link outcome adds exactly one reply line in ScrapCode's own words: linked, will retry automatically, or why insufficient_data stops linking",
+            "Every successful registration reply carries the Chronicl3r storage notice, and the command description names Chronicl3r within 100 characters",
+            "Re-registering with a different key unlinks the old key before linking the new; re-registering with the same key unlinks nothing",
+            "The bot builds RegistrationCog with the same PlayerService the other cogs receive"
+          ],
+          "test_file": "tests/unit/test_registration_chronicler_key.py",
+          "scenario_name": "test_registering_links_the_key_and_says_so, test_a_link_failure_never_fails_the_registration, test_each_link_outcome_gets_one_reply_line_in_our_own_words, test_every_successful_registration_reply_carries_the_storage_notice, test_the_register_description_names_chronicler_within_discords_limit, test_only_a_changed_key_unlinks_the_old_one_and_before_the_new_link, test_no_register_reply_or_log_carries_a_key_a_detail_or_a_tacticus_id, test_the_registration_cog_is_built_with_the_shared_player_service",
+          "files_to_modify": [
+            "bot/cogs/registration_cog.py",
+            "main.py",
+            "tests/unit/test_registration_chronicler_key.py"
+          ],
+          "implementation_notes": "Approved plan item 4 (register half) and item 6. RegistrationCog.__init__(bot, player_service) stores the service; setup_registration(bot, player_service); main.py load_cogs passes the existing player_service (currently `await setup_registration(bot)`). Inside `register`, capture the player's previous key BEFORE the registrations dict is overwritten, then keep the existing order: Tacticus check -> duplicate-key check -> local save. After the save: if a previous key exists and differs from the new one, `await player_service.unlink_key(previous)` best-effort (False or an exception is logged by server_id, discord_id and code and otherwise ignored); THEN `await player_service.link_key(api_key)` in try/except Exception (an exception is treated as code 'transport'). Order matters and is pinned by test: unlink the old key first; never DELETE by an id obtained before the new link. Reply mapping, OUR wording only, never Chronicl3r's detail: 200 -> a 'linked' line; insufficient_data -> explain that Chronicl3r needs at least 3 levelled showcase units to match the key to a player, so it was not linked; every other outcome -> 'not linked yet, will retry automatically' (the retry arrives in 03-02; parked codes such as ambiguous/invalid_key are retried after a restart, so the line stays true). Notice: append exactly 'Your key is also stored in Chronicl3r, our backend data store, which may allow roster analytics. Unregistering deletes it.' to all three success variants (target_user, updated, new). Update the register command description to name Chronicl3r; Discord rejects descriptions over 100 characters at sync, so the test asserts len <= 100. Every read of the previous key stays inside `register`, which is already in EXEMPT_PLAYER_KEY_FUNCTIONS; do not factor a key read into a helper (that would need a new exemption). Log with bot.obs.emit_structured (suggested event 'chronicler.key.link'), fields server_id, discord_id, code only. Tests: drive the real `register` callback via RegistrationCog.__cog_app_commands__ with a fake interaction (precedent: _invoke in tests/unit/test_deregister_confirmation_gate.py), patch bot.cogs.registration_cog.httpx.AsyncClient for the Tacticus check, patch load_guilds / load_player_registrations / save_player_registrations at the cog module, and use a real PlayerService over a real chronicl3rClient with requests patched. Seed the fake Chronicl3r with a sentinel detail string and a sentinel tacticus_user_id and assert neither appears in any reply or caplog record, for every outcome (Hypothesis over sampled_from(all codes) plus transport and a raised exception). For the composition test, call setup_registration with a fake bot whose add_cog records the cog. Constructing RegistrationCog via __init__ is safe in this step (no loop yet); 03-02 changes that. WIRING: this step is the production caller of link_key and unlink_key (from 01-02). TEST PARADIGM (mandatory): Unit tests for this step MUST be written as property-based tests using Hypothesis @given strategies + state-delta matchers (assert_state_delta over a declared universe with strict=True). Single-example unit tests are FALLBACK only — document why in a `# bypass:` comment if used. Acceptance scenarios MUST be framed as Property: blocks (quantified preconditions + invariant outcomes) where the contract supports it; classic Scenario: is fallback. Integration and E2E tests REMAIN single-example — they verify wiring, not invariants. Universe declaration is mandatory even when only one slot is checked: the unchanged() predicate covers the rest. STAGE CONTEXT (cascade): NEW code = Stage 0 (paradigm-from-day-zero, no debt accumulates). Bug-prone legacy code = Stage 1 first (state-delta migration captures hidden mutations, 33-75% yield), THEN Stage 2 PBT amplification (low yield by design — surface is debt-paid). Don't expect high hit rate on Stage-1-completed surfaces; that's healthy. See nw-tdd-methodology::Paradigm Mandate for the full debt-payoff framing."
+        },
+        {
+          "id": "02-02",
+          "name": "Remove the key on /registration unregister",
+          "agent": "nw-software-crafter",
+          "deps": [
+            "02-01"
+          ],
+          "criteria": [
+            "Unregistering removes the player's key from Chronicl3r and the reply says so",
+            "When the removal fails or Chronicl3r is unreachable, the player is still unregistered, the failure is logged by outcome code, and the reply does not claim the key was removed",
+            "An admin unregistering another player, by member or by raw ID, removes that player's key, not the admin's",
+            "A registration with no key on file unregisters without calling Chronicl3r",
+            "No unregister reply or log line carries a key or a tacticus_user_id"
+          ],
+          "test_file": "tests/unit/test_unregistration_chronicler_key.py",
+          "scenario_name": "test_unregistering_removes_the_key_from_chronicler_and_says_so, test_unregistering_still_succeeds_when_chronicler_fails, test_an_admin_unregistering_another_player_removes_that_players_key, test_an_entry_with_no_key_unregisters_without_calling_chronicler, test_no_unregister_reply_or_log_carries_a_key_or_a_tacticus_id",
+          "files_to_modify": [
+            "bot/cogs/registration_cog.py",
+            "tests/unit/test_unregistration_chronicler_key.py",
+            "tests/acceptance/guild-key-integrity/test_architecture_chokepoint.py"
+          ],
+          "implementation_notes": "Approved plan item 4 (unregister half). In `unregister`, read the entry's key BEFORE `del registrations[discord_id]`; after the local save (and the existing capped-state cleanup), if a key was present, `await player_service.unlink_key(key)` inside try/except Exception. True -> reply adds a line that the key was removed from Chronicl3r. False or an exception -> log (emit_structured, suggested 'chronicler.key.unlink', fields server_id, discord_id, code) and still complete the unregistration; INTERPRETATION, flagged to the orchestrator: the plan says the reply says the key was removed, but stating that after a failed removal would be false, so on failure the reply instead says, in our wording, that removal from Chronicl3r could not be confirmed. The three existing success variants (target_user, user_id, self) all get the line. CHOKEPOINT TEST: the new key read sits in `unregister`, which is not exempt, so test_no_cog_or_service_reads_a_guild_api_key_directly goes red. AUTHORISED EDIT: add 'unregister' to the bot/cogs/registration_cog.py set in EXEMPT_PLAYER_KEY_FUNCTIONS with a one-line comment (player-registration key read to delete it from Chronicl3r on unregister) — the file documents this as the deliberate mechanism. No other change to that file. Tests: same harness as 02-01 (real callback, fake interaction with admin permissions where needed, patched registrations loaders, PlayerService over a patched-requests client). Property over (who: self | target_user | user_id) x (unlink outcome: success | not_linked | failure | exception): the entry is always gone from the saved registrations, the DELETE (if any) targets the profile the lookup named for the UNREGISTERED player's key, and the reply's Chronicl3r line matches the outcome. WIRING: reuses unlink_key (wired in 02-01). TEST PARADIGM (mandatory): Unit tests for this step MUST be written as property-based tests using Hypothesis @given strategies + state-delta matchers (assert_state_delta over a declared universe with strict=True). Single-example unit tests are FALLBACK only — document why in a `# bypass:` comment if used. Acceptance scenarios MUST be framed as Property: blocks (quantified preconditions + invariant outcomes) where the contract supports it; classic Scenario: is fallback. Integration and E2E tests REMAIN single-example — they verify wiring, not invariants. Universe declaration is mandatory even when only one slot is checked: the unchanged() predicate covers the rest. STAGE CONTEXT (cascade): NEW code = Stage 0 (paradigm-from-day-zero, no debt accumulates). Bug-prone legacy code = Stage 1 first (state-delta migration captures hidden mutations, 33-75% yield), THEN Stage 2 PBT amplification (low yield by design — surface is debt-paid). Don't expect high hit rate on Stage-1-completed surfaces; that's healthy. See nw-tdd-methodology::Paradigm Mandate for the full debt-payoff framing."
+        },
+        {
+          "id": "02-03",
+          "name": "Remove a guild's keys when /deregister_guild is confirmed",
+          "agent": "nw-software-crafter",
+          "deps": [
+            "01-02"
+          ],
+          "criteria": [
+            "Confirming a guild deregistration removes from Chronicl3r the key of every player registered to that guild",
+            "Keys of players registered to other guilds stay linked",
+            "Declining, or never pressing, the confirmation removes no key",
+            "A Chronicl3r failure or timeout for any key never prevents or reverses the deregistration",
+            "The confirmation gate behaves exactly as before: stated counts, deferred deletion, tombstone"
+          ],
+          "test_file": "tests/unit/test_deregister_guild_unlinks_keys.py",
+          "scenario_name": "test_confirming_unlinks_every_key_registered_to_that_guild, test_keys_registered_to_other_guilds_are_left_linked, test_an_unconfirmed_deregistration_unlinks_nothing, test_a_chronicler_failure_never_blocks_the_deregistration, test_no_deregistration_reply_or_log_carries_a_key_or_a_tacticus_id",
+          "files_to_modify": [
+            "bot/cogs/admin_cog.py",
+            "tests/unit/test_deregister_guild_unlinks_keys.py",
+            "tests/acceptance/guild-key-integrity/test_architecture_chokepoint.py"
+          ],
+          "implementation_notes": "Approved plan item 5. AdminCog already receives player_service (setup_admin(bot, player_service)); pass it into _DeregistrationConfirmView as a new keyword argument from deregister_guild. In the confirm callback, after the 'guild no longer registered' early return and BEFORE _record_quarantine_history / the deletion, collect the keys of this server's registrations whose guild_id is the deregistered guild (the FK CASCADE destroys those registrations, so they cannot be read afterwards) and unlink each best-effort with its own try/except; per-key outcomes are logged by server_id, discord_id and code. The deletion and the tombstone write stay together and run regardless of any Chronicl3r outcome. No reply text changes. Put the key read in ONE distinctly named helper (for example _unlink_guild_player_keys) rather than in `confirm` itself, so the exemption does not cover every function in admin_cog named 'confirm'. AUTHORISED EDIT: add that helper's name under a new 'bot/cogs/admin_cog.py' key in EXEMPT_PLAYER_KEY_FUNCTIONS with a one-line reason comment; nothing else in that file. LATENCY NOTE: N players cost up to 2 calls each at a 10 s timeout before the deletion runs; that is the plan's ordering and is accepted, but the collect-before-delete is the load-bearing part — if review prefers, the unlinks may run after the deletion over the already-collected keys without changing any criterion. tests/unit/test_deregister_confirmation_gate.py MUST pass unmodified: its _ChroniclerClient has no lookup/delete methods and it seeds no registrations, so the unlink set is empty there; even if it were not, the per-key try/except keeps the gate intact. Tests: drive the real deregister_guild callback then press the button through the view (the gate test's _invoke / _confirm_if_awaiting shape), with registrations for the target guild and a sibling guild, a PlayerService over a patched-requests client, and Hypothesis over per-key outcome assignments. WIRING: reuses unlink_key. TEST PARADIGM (mandatory): Unit tests for this step MUST be written as property-based tests using Hypothesis @given strategies + state-delta matchers (assert_state_delta over a declared universe with strict=True). Single-example unit tests are FALLBACK only — document why in a `# bypass:` comment if used. Acceptance scenarios MUST be framed as Property: blocks (quantified preconditions + invariant outcomes) where the contract supports it; classic Scenario: is fallback. Integration and E2E tests REMAIN single-example — they verify wiring, not invariants. Universe declaration is mandatory even when only one slot is checked: the unchanged() predicate covers the rest. STAGE CONTEXT (cascade): NEW code = Stage 0 (paradigm-from-day-zero, no debt accumulates). Bug-prone legacy code = Stage 1 first (state-delta migration captures hidden mutations, 33-75% yield), THEN Stage 2 PBT amplification (low yield by design — surface is debt-paid). Don't expect high hit rate on Stage-1-completed surfaces; that's healthy. See nw-tdd-methodology::Paradigm Mandate for the full debt-payoff framing."
+        }
+      ]
+    },
+    {
+      "id": "03",
+      "name": "Backfill the keys already held",
+      "description": "A pure scheduler decides which registrations are due and when the whole loop must back off; a two-minute loop in RegistrationCog uses cheap lookups to skip linked keys and spends at most one link per tick.",
+      "default_agent": "nw-software-crafter",
+      "default_deps_strategy": "sequential",
+      "steps": [
+        {
+          "id": "03-01",
+          "name": "Key-sync schedule",
+          "agent": "nw-software-crafter",
+          "deps": [
+            "02-03"
+          ],
+          "criteria": [
+            "A registration the schedule has never seen is due at once; one whose key is linked is never due again while its key is unchanged",
+            "no_match is retried every 15 minutes and parked after 4 tries; no_name_match is retried 24 hours later",
+            "insufficient_data, ambiguous, invalid_key and missing_key park the player until the key changes; a changed key starts that player afresh",
+            "no_profiles and not_deployed pause the whole loop for an hour",
+            "upstream_rate_limited, upstream_unavailable, throttled and transport pause the whole loop for Retry-After, 300 s when absent, backing off on repeats",
+            "The schedule never holds a plaintext key"
+          ],
+          "test_file": "tests/unit/test_chronicler_key_sync_schedule.py",
+          "scenario_name": "test_an_unseen_registration_is_due_at_once, test_a_linked_key_is_never_due_again, test_no_match_retries_every_fifteen_minutes_and_parks_after_four_tries, test_no_name_match_retries_a_day_later, test_a_permanent_refusal_parks_until_the_key_changes, test_configuration_outcomes_pause_the_whole_loop_for_an_hour, test_upstream_pressure_pauses_for_retry_after_and_backs_off, test_the_schedule_never_holds_a_plaintext_key",
+          "files_to_modify": [
+            "bot/services/chronicl3r/key_sync.py",
+            "tests/unit/test_chronicler_key_sync_schedule.py"
+          ],
+          "implementation_notes": "Approved plan item 3. New module bot/services/chronicl3r/key_sync.py: PURE, no I/O, no clock reads (the caller passes `now`), no logging. It must not import client.py (which runs load_dotenv() at import) or anything that reaches httpx (transitive archrule); stdlib only (hashlib, dataclasses, datetime). Its input vocabulary is plain values: (server_id, discord_id, key) triples for the current registrations, and recorded outcomes expressed as the contract code strings plus a 'linked' outcome (lookup 200 with has_valid_api_key true, or link 200) and a 'not_linked' outcome (lookup said the key is not held, so a link is due). State is keyed by (server_id, discord_id) and stores the SHA-256 hex fingerprint of the key, never the key; a fingerprint mismatch resets that player's state. The caller asks for due entries (distinguishing 'needs a lookup' from 'needs a link') and for whether the loop is paused; the key travels back to the caller only from the triples it passed in. Retry table exactly as the plan: linked -> done; no_match -> 15 min, max 4 tries then parked; no_name_match -> 24 h (no cap: the plan sets none); insufficient_data / ambiguous / invalid_key / missing_key -> parked until key change (or restart, since state is in-memory); no_profiles / not_deployed -> loop paused 1 h; upstream_rate_limited / upstream_unavailable / throttled / transport -> loop paused for retry_after or 300 s. REFINEMENTS the plan left open, pinned here so the crafter does not invent them: (a) backoff = consecutive transient pauses double the wait from max(retry_after, 300) s, capped at 3600 s, reset by any non-pause outcome; (b) any outcome not in the table (a code-less 401/403/5xx, a non-JSON non-404) is treated as a transient pause with the default — it protects the 60/h budget and a configuration error then surfaces in the logs at most hourly. Tests: Hypothesis over sequences of (registration sets, outcomes, clock advances); a RuleBasedStateMachine is welcome for the interleavings. The plaintext property walks the scheduler's state recursively (vars, containers, repr, pickle bytes) and asserts no generated key string appears. WIRING: this module has no production caller until 03-02, the very next step. TEST PARADIGM (mandatory): Unit tests for this step MUST be written as property-based tests using Hypothesis @given strategies + state-delta matchers (assert_state_delta over a declared universe with strict=True). Single-example unit tests are FALLBACK only — document why in a `# bypass:` comment if used. Acceptance scenarios MUST be framed as Property: blocks (quantified preconditions + invariant outcomes) where the contract supports it; classic Scenario: is fallback. Integration and E2E tests REMAIN single-example — they verify wiring, not invariants. Universe declaration is mandatory even when only one slot is checked: the unchanged() predicate covers the rest. STAGE CONTEXT (cascade): NEW code = Stage 0 (paradigm-from-day-zero, no debt accumulates). Bug-prone legacy code = Stage 1 first (state-delta migration captures hidden mutations, 33-75% yield), THEN Stage 2 PBT amplification (low yield by design — surface is debt-paid). Don't expect high hit rate on Stage-1-completed surfaces; that's healthy. See nw-tdd-methodology::Paradigm Mandate for the full debt-payoff framing."
+        },
+        {
+          "id": "03-02",
+          "name": "Background key-sync loop in RegistrationCog",
+          "agent": "nw-software-crafter",
+          "deps": [
+            "03-01"
+          ],
+          "criteria": [
+            "Each tick looks up at most 20 due keys across every server, marks already-linked ones done without spending a link, and posts at most one link",
+            "While the schedule says the loop is paused, a tick makes no Chronicl3r call",
+            "Setting CHRONICL3R_KEY_SYNC=off stops every Chronicl3r call from the loop",
+            "A tick that fails for any reason is logged and the loop keeps running",
+            "The loop starts with the cog, waits for the bot to be ready, and stops when the cog unloads",
+            "A link made by /registration register is recorded, so the loop does not repeat it",
+            "No sync log line carries a key or a tacticus_user_id"
+          ],
+          "test_file": "tests/unit/test_registration_key_sync_loop.py",
+          "scenario_name": "test_a_tick_spends_at_most_twenty_lookups_and_one_link, test_already_linked_keys_are_marked_done_without_spending_a_link, test_a_paused_loop_makes_no_call_until_the_pause_ends, test_the_sync_can_be_switched_off_by_environment, test_a_failing_tick_never_stops_the_loop, test_the_loop_starts_with_the_cog_and_stops_on_unload, test_registering_records_its_link_outcome_so_the_loop_does_not_repeat_it, test_no_sync_log_carries_a_key_or_a_tacticus_id",
+          "files_to_modify": [
+            "bot/cogs/registration_cog.py",
+            "tests/unit/test_registration_key_sync_loop.py",
+            "tests/acceptance/guild-key-integrity/test_architecture_chokepoint.py"
+          ],
+          "implementation_notes": "Approved plan item 4 (loop half). RegistrationCog.__init__ builds the scheduler from 03-01 and starts `chronicler_key_sync`, a @tasks.loop(minutes=2); cog_unload cancels it; its before_loop awaits bot.wait_until_ready (pattern: tasks_cog.py TasksCog.__init__ / cog_unload). Tick: read CHRONICL3R_KEY_SYNC each tick (case-insensitive 'off' -> return before any call); if the scheduler is paused, return; gather (server_id, discord_id, key) for every entry with a key across repo.list_server_ids() + load_player_registrations(server_id); ask the scheduler for due entries; run up to 20 `player_service.lookup_key` calls on entries needing a lookup, recording each outcome; then at most ONE `player_service.link_key` on an entry needing a link, recording its outcome; stop the tick at the first outcome that pauses the loop. Whole tick body in try/except Exception, logged (suggested event 'chronicler.key_sync.tick_failed'), so the loop never dies. Budget: one link per 2 min = 30/h, leaving half of Chronicl3r's 60/h per-account throttle for live registrations. Lookups have their own 6000/h bucket. Also in this step: `register` records its own link outcome in the same scheduler so a key just linked or just refused is not immediately re-posted by the loop. CHOKEPOINT TEST: the loop reads player keys, so AUTHORISED EDIT: add 'chronicler_key_sync' to the bot/cogs/registration_cog.py set in EXEMPT_PLAYER_KEY_FUNCTIONS with a one-line reason comment, and keep every key read inside that function (the enclosing-set check covers nested closures, so a local helper defined inside it is fine; a separate method is not). Log only server_id, discord_id, outcome code, and pause seconds for pauses. Tests: construct RegistrationCog via __init__ inside an async test with a fake bot whose wait_until_ready awaits an Event that is never set (so the real loop task idles), drive ticks by awaiting `cog.chronicler_key_sync.coro(cog)` directly, assert the loop is running after construction and cancelled after cog_unload. Patch repo.list_server_ids and load_player_registrations at the cog module with registrations spread over at least two servers; PlayerService over a patched-requests client that counts lookup vs link POSTs. Property: for any registration population and any outcome assignment, per tick lookups <= 20 and links <= 1, and no call at all while paused or switched off. NOTE for existing tests: 02-01 and 02-02 tests construct RegistrationCog; once __init__ starts the loop they must do so inside a running event loop and unload it at teardown, or the crafter adjusts those NEW test files (they are this feature's own tests, not pre-existing ones). WIRING: this step is the production caller of key_sync (03-01) and of lookup_key (01-02). TEST PARADIGM (mandatory): Unit tests for this step MUST be written as property-based tests using Hypothesis @given strategies + state-delta matchers (assert_state_delta over a declared universe with strict=True). Single-example unit tests are FALLBACK only — document why in a `# bypass:` comment if used. Acceptance scenarios MUST be framed as Property: blocks (quantified preconditions + invariant outcomes) where the contract supports it; classic Scenario: is fallback. Integration and E2E tests REMAIN single-example — they verify wiring, not invariants. Universe declaration is mandatory even when only one slot is checked: the unchanged() predicate covers the rest. STAGE CONTEXT (cascade): NEW code = Stage 0 (paradigm-from-day-zero, no debt accumulates). Bug-prone legacy code = Stage 1 first (state-delta migration captures hidden mutations, 33-75% yield), THEN Stage 2 PBT amplification (low yield by design — surface is debt-paid). Don't expect high hit rate on Stage-1-completed surfaces; that's healthy. See nw-tdd-methodology::Paradigm Mandate for the full debt-payoff framing."
+        }
+      ]
+    }
+  ]
+}

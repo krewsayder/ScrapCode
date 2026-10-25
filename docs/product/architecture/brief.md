@@ -179,8 +179,13 @@ to keep the event loop unblocked; token auth via
 |----------|--------|---------|---------|
 | `api/auth/token/` | POST | `chronicl3rClient.authenticate` | Obtain a non-expiring auth token |
 | `tacticus-guild-raid/api/v1/player-profile/register/` | POST | `PlayerService.get_or_register` | Register a Tacticus player profile (409 = already exists → fall back to fetch) |
-| `tacticus-guild-raid/api/v1/player-profiles/{id}/api-key/` | GET | `get_profile` / `get_player_profile` | Fetch a player profile (display name) |
-| `tacticus-guild-raid/api/v1/player-profiles/{id}/api-key/` | PATCH | `set_player_api_key` | Store a Tacticus API key against a profile |
+| `tacticus-guild-raid/api/v1/player-profiles/{id}/api-key/` | GET | `get_profile` | Fetch a player profile (display name, `has_valid_api_key`) |
+| `tacticus-guild-raid/api/v1/player-profiles/api-keys/` | POST | `link_api_key` ← `PlayerService.link_key` | Link a player's Tacticus API key; Chronicler finds the profile from the key (60 s timeout, 60/h) |
+| `tacticus-guild-raid/api/v1/player-profiles/lookup/` | POST | `lookup_api_key` ← `PlayerService.lookup_key` / `unlink_key` | Is this key held, and is it valid? (separate 6000/h bucket, no upstream call) |
+| `tacticus-guild-raid/api/v1/player-profiles/{id}/api-key/` | DELETE | `delete_api_key` ← `PlayerService.unlink_key` | Remove a profile's key (204, idempotent) |
+
+The key routes, their error codes and the bot's handling are specified in
+[chronicler-player-profiles-api.md](chronicler-player-profiles-api.md).
 
 **Which is which today:** Chronicler is the source of **player identity / display
 name** (profile lookup + registration) and is consulted whenever the bot needs to
@@ -633,9 +638,10 @@ during this baseline pass and are **flagged, not resolved** (per scope):
    `on_app_command_error` denial path is not used. (Convention note, not a
    README contradiction.)
 6. **`registration register` validates the API key against Tacticus directly**
-   (`/api/v1/player`), not via Chronicler, even though Chronicler stores API keys
-   (`set_player_api_key`). The bot keeps its own copy in
-   `player_registrations.json`. This is consistent with ADR-003's allow-list but
+   (`/api/v1/player`), not via Chronicler. After saving, it also links the key in
+   Chronicler (`PlayerService.link_key`, best-effort; unregistering unlinks it),
+   but the bot keeps its own copy in the registration store and never reads keys
+   back from Chronicler. This is consistent with ADR-003's allow-list but
    is worth knowing: API-key validation is a Tacticus-direct call.
 
 ---
