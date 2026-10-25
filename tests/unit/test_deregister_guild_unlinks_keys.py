@@ -38,7 +38,6 @@ import asyncio
 import copy
 import importlib
 import json
-import logging
 import os
 from contextlib import contextmanager
 from unittest.mock import patch
@@ -49,12 +48,16 @@ os.environ.setdefault("REPLAY_INDEX_CHANNEL_ID", "0")
 
 import pytest
 import requests
-from requests.structures import CaseInsensitiveDict
 
 hypothesis = pytest.importorskip("hypothesis")
 
 import hypothesis.strategies as st
 from hypothesis import given, settings
+
+from chronicler_key_fakes import (
+    StructuredLogRecorder as _LogRecorder, chronicler_transport, recording_bot_logs,
+    response as _response,
+)
 
 cog_module = importlib.import_module("bot.cogs.admin_cog")
 client_module = importlib.import_module("bot.services.chronicl3r.client")
@@ -92,22 +95,6 @@ sentinel_details = st.from_regex(r"sentinel-detail-[a-f0-9]{8}", fullmatch=True)
 
 
 # ---------------------------------------------------------------- responses
-
-def _response(status, *, json_body=None, text=None, content_type=None):
-    response = requests.Response()
-    response.status_code = status
-    headers = CaseInsensitiveDict()
-    if json_body is not None:
-        response._content = json.dumps(json_body).encode()
-        headers["Content-Type"] = "application/json"
-    else:
-        response._content = (text or "").encode()
-        if content_type is not None:
-            headers["Content-Type"] = content_type
-    response.headers = headers
-    response.encoding = "utf-8"
-    return response
-
 
 def _delete_url(user_id):
     return BASE + f"player-profiles/{user_id}/api-key/"
@@ -265,26 +252,6 @@ class _FakeChronicler:
         return answer
 
 
-def _refuse(*args, **kwargs):
-    raise AssertionError("a key call used a verb the contract does not name")
-
-
-class _LogRecorder(logging.Handler):
-    def __init__(self):
-        super().__init__(level=logging.DEBUG)
-        self.records = []
-        self.raw = []
-
-    def emit(self, record):
-        self.raw.append(record.getMessage() + " " + repr(record.__dict__))
-        if getattr(record, "structured", False):
-            fields = {k: getattr(record, k) for k in ("server_id", "discord_id", "code")
-                      if hasattr(record, k)}
-            self.records.append((record.event, fields))
-        else:
-            self.records.append(("message", record.getMessage()))
-
-
 # ------------------------------------------------------------- fake Discord
 
 class _Response:
@@ -395,32 +362,18 @@ class _World:
 
 @contextmanager
 def _patched(world):
-    target = "bot.services.chronicl3r.client.requests"
-    root = logging.getLogger("bot")
-    previous_level = root.level
-    root.addHandler(world.recorder)
-    root.setLevel(logging.DEBUG)
     quarantined = world.scenario.quarantined
-    try:
-        with patch(f"{target}.post", world.fake.post), \
-                patch(f"{target}.delete", world.fake.delete), \
-                patch(f"{target}.get", _refuse), \
-                patch(f"{target}.patch", _refuse), \
-                patch(f"{target}.put", _refuse), \
-                patch(f"{target}.request", _refuse), \
-                patch("bot.cogs.admin_cog.load_guilds", world.guilds.load), \
-                patch("bot.cogs.admin_cog.save_guilds", world.guilds.save), \
-                patch("bot.cogs.admin_cog.load_player_registrations",
-                      world.registrations.load, create=True), \
-                patch("bot.cogs.admin_cog.save_player_registrations",
-                      world.registrations.save, create=True), \
-                patch("bot.cogs.admin_cog.load_guild_binding",
-                      lambda server_id, guild_id: _binding(quarantined)), \
-                patch("bot.guilds.repo", world.repo):
-            yield
-    finally:
-        root.removeHandler(world.recorder)
-        root.setLevel(previous_level)
+    with recording_bot_logs(world.recorder), chronicler_transport(world.fake), \
+            patch("bot.cogs.admin_cog.load_guilds", world.guilds.load), \
+            patch("bot.cogs.admin_cog.save_guilds", world.guilds.save), \
+            patch("bot.cogs.admin_cog.load_player_registrations",
+                  world.registrations.load, create=True), \
+            patch("bot.cogs.admin_cog.save_player_registrations",
+                  world.registrations.save, create=True), \
+            patch("bot.cogs.admin_cog.load_guild_binding",
+                  lambda server_id, guild_id: _binding(quarantined)), \
+            patch("bot.guilds.repo", world.repo):
+        yield
 
 
 def _deregister_command():

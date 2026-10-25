@@ -35,8 +35,6 @@ import dataclasses
 import importlib
 import json
 import os
-from contextlib import contextmanager
-from unittest.mock import patch
 
 # Same precedent as tests/unit/test_registration_validate_keys.py: pin
 # placeholders before any `bot.*` module is loaded.
@@ -46,12 +44,13 @@ os.environ.setdefault("REPLAY_INDEX_CHANNEL_ID", "0")
 
 import pytest
 import requests
-from requests.structures import CaseInsensitiveDict
 
 hypothesis = pytest.importorskip("hypothesis")
 
 import hypothesis.strategies as st
 from hypothesis import given, settings
+
+from chronicler_key_fakes import chronicler_transport as _chronicler, response as _response
 
 client_module = importlib.import_module("bot.services.chronicl3r.client")
 
@@ -107,25 +106,6 @@ def profiles(draw, user_id):
 
 # ------------------------------------------------------------- fake transport
 
-def _response(status, *, json_body=None, text=None, content_type=None,
-              retry_after=None):
-    response = requests.Response()
-    response.status_code = status
-    headers = CaseInsensitiveDict()
-    if json_body is not None:
-        response._content = json.dumps(json_body).encode()
-        headers["Content-Type"] = content_type or "application/json"
-    else:
-        response._content = (text or "").encode()
-        if content_type is not None:
-            headers["Content-Type"] = content_type
-    if retry_after is not None:
-        headers["Retry-After"] = retry_after
-    response.headers = headers
-    response.encoding = "utf-8"
-    return response
-
-
 def _route(operation, user_id):
     if operation == "link":
         return "POST", BASE + "player-profiles/api-keys/", LINK_TIMEOUT
@@ -164,22 +144,6 @@ class _FakeChronicler:
         if isinstance(self.answer, BaseException):
             raise self.answer
         return self.answer
-
-
-def _refuse(*args, **kwargs):
-    raise AssertionError("a key call used a verb the contract does not name")
-
-
-@contextmanager
-def _chronicler(fake):
-    target = "bot.services.chronicl3r.client.requests"
-    with patch(f"{target}.post", fake.post), \
-            patch(f"{target}.delete", fake.delete), \
-            patch(f"{target}.get", _refuse), \
-            patch(f"{target}.patch", _refuse), \
-            patch(f"{target}.put", _refuse), \
-            patch(f"{target}.request", _refuse):
-        yield
 
 
 def _client(token=TOKEN):

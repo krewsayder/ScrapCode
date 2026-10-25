@@ -36,7 +36,6 @@ import asyncio
 import copy
 import importlib
 import json
-import logging
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -48,12 +47,16 @@ os.environ.setdefault("REPLAY_INDEX_CHANNEL_ID", "0")
 
 import pytest
 import requests
-from requests.structures import CaseInsensitiveDict
 
 hypothesis = pytest.importorskip("hypothesis")
 
 import hypothesis.strategies as st
 from hypothesis import given, settings
+
+from chronicler_key_fakes import (
+    StructuredLogRecorder as _LogRecorder, chronicler_transport, recording_bot_logs,
+    response as _response,
+)
 
 cog_module = importlib.import_module("bot.cogs.registration_cog")
 client_module = importlib.import_module("bot.services.chronicl3r.client")
@@ -99,22 +102,6 @@ other_keys = st.from_regex(r"fake-key-oth-[a-z0-9]{4,10}", fullmatch=True)
 sentinel_details = st.from_regex(r"sentinel-detail-[a-f0-9]{8}", fullmatch=True)
 sentinel_user_ids = st.from_regex(r"sentinel-tuid-[a-f0-9]{8}", fullmatch=True)
 variants = st.sampled_from(("new", "updated", "target_user"))
-
-
-def _response(status, *, json_body=None, text=None, content_type=None):
-    response = requests.Response()
-    response.status_code = status
-    headers = CaseInsensitiveDict()
-    if json_body is not None:
-        response._content = json.dumps(json_body).encode()
-        headers["Content-Type"] = "application/json"
-    else:
-        response._content = (text or "").encode()
-        if content_type is not None:
-            headers["Content-Type"] = content_type
-    response.headers = headers
-    response.encoding = "utf-8"
-    return response
 
 
 class _Answer:
@@ -206,26 +193,6 @@ class _FakeChronicler:
         if isinstance(answer, BaseException):
             raise answer
         return answer
-
-
-def _refuse(*args, **kwargs):
-    raise AssertionError("a key call used a verb the contract does not name")
-
-
-class _LogRecorder(logging.Handler):
-    def __init__(self):
-        super().__init__(level=logging.DEBUG)
-        self.records = []
-        self.raw = []
-
-    def emit(self, record):
-        self.raw.append(record.getMessage() + " " + repr(record.__dict__))
-        if getattr(record, "structured", False):
-            fields = {k: getattr(record, k) for k in ("server_id", "discord_id", "code")
-                      if hasattr(record, k)}
-            self.records.append((record.event, fields))
-        else:
-            self.records.append(("message", record.getMessage()))
 
 
 # ------------------------------------------------------------- fake Discord
@@ -327,31 +294,17 @@ class _World:
 
 @contextmanager
 def _patched(world):
-    target = "bot.services.chronicl3r.client.requests"
-    root = logging.getLogger("bot")
-    previous_level = root.level
-    root.addHandler(world.recorder)
-    root.setLevel(logging.DEBUG)
-    try:
-        with patch(f"{target}.post", world.fake.post), \
-                patch(f"{target}.delete", world.fake.delete), \
-                patch(f"{target}.get", _refuse), \
-                patch(f"{target}.patch", _refuse), \
-                patch(f"{target}.put", _refuse), \
-                patch(f"{target}.request", _refuse), \
-                patch("bot.cogs.registration_cog.httpx.AsyncClient",
-                      return_value=_tacticus_accepts()), \
-                patch("bot.cogs.registration_cog.load_guilds",
-                      lambda server_id: {GUILD_ID: {"name": GUILD_NAME}}), \
-                patch("bot.cogs.registration_cog.load_player_registrations",
-                      world.storage.load), \
-                patch("bot.cogs.registration_cog.save_player_registrations",
-                      world.storage.save), \
-                patch("bot.cogs.registration_cog.repo", _Repo()):
-            yield
-    finally:
-        root.removeHandler(world.recorder)
-        root.setLevel(previous_level)
+    with recording_bot_logs(world.recorder), chronicler_transport(world.fake), \
+            patch("bot.cogs.registration_cog.httpx.AsyncClient",
+                  return_value=_tacticus_accepts()), \
+            patch("bot.cogs.registration_cog.load_guilds",
+                  lambda server_id: {GUILD_ID: {"name": GUILD_NAME}}), \
+            patch("bot.cogs.registration_cog.load_player_registrations",
+                  world.storage.load), \
+            patch("bot.cogs.registration_cog.save_player_registrations",
+                  world.storage.save), \
+            patch("bot.cogs.registration_cog.repo", _Repo()):
+        yield
 
 
 def _register_command():

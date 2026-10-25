@@ -40,7 +40,6 @@ import logging
 import os
 import threading
 from contextlib import contextmanager
-from unittest.mock import patch
 
 os.environ.setdefault("SCRAPCODE_REPO_BACKEND", "json")
 os.environ.setdefault("UPDATE_CHANNEL_ID", "0")
@@ -48,12 +47,13 @@ os.environ.setdefault("REPLAY_INDEX_CHANNEL_ID", "0")
 
 import pytest
 import requests
-from requests.structures import CaseInsensitiveDict
 
 hypothesis = pytest.importorskip("hypothesis")
 
 import hypothesis.strategies as st
 from hypothesis import given, settings
+
+from chronicler_key_fakes import chronicler_transport, recording_bot_logs, response as _response
 
 client_module = importlib.import_module("bot.services.chronicl3r.client")
 service_module = importlib.import_module("bot.services.chronicl3r.player_service")
@@ -86,22 +86,6 @@ sentinel_user_ids = st.from_regex(r"sentinel-tuid-[a-f0-9]{8}", fullmatch=True)
 
 def _delete_url(user_id):
     return BASE + f"player-profiles/{user_id}/api-key/"
-
-
-def _response(status, *, json_body=None, text=None, content_type=None):
-    response = requests.Response()
-    response.status_code = status
-    headers = CaseInsensitiveDict()
-    if json_body is not None:
-        response._content = json.dumps(json_body).encode()
-        headers["Content-Type"] = "application/json"
-    else:
-        response._content = (text or "").encode()
-        if content_type is not None:
-            headers["Content-Type"] = content_type
-    response.headers = headers
-    response.encoding = "utf-8"
-    return response
 
 
 class _Outcome:
@@ -233,10 +217,6 @@ class _FakeChronicler:
         return answer
 
 
-def _refuse(*args, **kwargs):
-    raise AssertionError("a key call used a verb the contract does not name")
-
-
 class _LogRecorder(logging.Handler):
     def __init__(self):
         super().__init__(level=logging.DEBUG)
@@ -248,22 +228,8 @@ class _LogRecorder(logging.Handler):
 
 @contextmanager
 def _chronicler(fake, recorder):
-    target = "bot.services.chronicl3r.client.requests"
-    root = logging.getLogger("bot")
-    previous_level = root.level
-    root.addHandler(recorder)
-    root.setLevel(logging.DEBUG)
-    try:
-        with patch(f"{target}.post", fake.post), \
-                patch(f"{target}.delete", fake.delete), \
-                patch(f"{target}.get", _refuse), \
-                patch(f"{target}.patch", _refuse), \
-                patch(f"{target}.put", _refuse), \
-                patch(f"{target}.request", _refuse):
-            yield
-    finally:
-        root.removeHandler(recorder)
-        root.setLevel(previous_level)
+    with recording_bot_logs(recorder), chronicler_transport(fake):
+        yield
 
 
 def _service():

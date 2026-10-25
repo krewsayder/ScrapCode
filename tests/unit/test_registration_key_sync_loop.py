@@ -39,7 +39,6 @@ import contextlib
 import copy
 import importlib
 import json
-import logging
 import math
 import os
 from contextlib import contextmanager
@@ -52,12 +51,16 @@ os.environ.setdefault("REPLAY_INDEX_CHANNEL_ID", "0")
 
 import pytest
 import requests
-from requests.structures import CaseInsensitiveDict
 
 hypothesis = pytest.importorskip("hypothesis")
 
 import hypothesis.strategies as st
 from hypothesis import given, settings
+
+from chronicler_key_fakes import (
+    StructuredLogRecorder, chronicler_transport, recording_bot_logs,
+    response as _response,
+)
 
 import discord
 from discord.ext import commands
@@ -97,24 +100,6 @@ SETTINGS = settings(max_examples=30, deadline=None)
 
 sentinel_details = st.from_regex(r"sentinel-detail-[a-f0-9]{8}", fullmatch=True)
 sentinel_user_ids = st.from_regex(r"sentinel-tuid-[a-f0-9]{8}", fullmatch=True)
-
-
-def _response(status, *, json_body=None, text=None, content_type=None, retry_after=None):
-    response = requests.Response()
-    response.status_code = status
-    headers = CaseInsensitiveDict()
-    if json_body is not None:
-        response._content = json.dumps(json_body).encode()
-        headers["Content-Type"] = "application/json"
-    else:
-        response._content = (text or "").encode()
-        if content_type is not None:
-            headers["Content-Type"] = content_type
-    if retry_after is not None:
-        headers["Retry-After"] = str(retry_after)
-    response.headers = headers
-    response.encoding = "utf-8"
-    return response
 
 
 class _Answer:
@@ -283,25 +268,8 @@ class _FakeChronicler:
         raise AssertionError("the key sync never deletes")
 
 
-def _refuse(*args, **kwargs):
-    raise AssertionError("a key call used a verb the contract does not name")
-
-
-class _LogRecorder(logging.Handler):
+class _LogRecorder(StructuredLogRecorder):
     FIELDS = ("server_id", "discord_id", "code", "pause_seconds", "error_type")
-
-    def __init__(self):
-        super().__init__(level=logging.DEBUG)
-        self.records = []
-        self.raw = []
-
-    def emit(self, record):
-        self.raw.append(record.getMessage() + " " + repr(record.__dict__))
-        if getattr(record, "structured", False):
-            fields = {k: getattr(record, k) for k in self.FIELDS if hasattr(record, k)}
-            self.records.append((record.event, fields))
-        else:
-            self.records.append(("message", record.getMessage()))
 
 
 class _Storage:
@@ -353,26 +321,12 @@ class _World:
 
 @contextmanager
 def _patched(world):
-    target = "bot.services.chronicl3r.client.requests"
-    root = logging.getLogger("bot")
-    previous_level = root.level
-    root.addHandler(world.recorder)
-    root.setLevel(logging.DEBUG)
-    try:
-        with patch(f"{target}.post", world.fake.post), \
-                patch(f"{target}.delete", world.fake.delete), \
-                patch(f"{target}.get", _refuse), \
-                patch(f"{target}.patch", _refuse), \
-                patch(f"{target}.put", _refuse), \
-                patch(f"{target}.request", _refuse), \
-                patch.object(cog_module.repo, "list_server_ids", world.storage.list_server_ids), \
-                patch("bot.cogs.registration_cog.load_player_registrations", world.storage.load), \
-                patch("bot.cogs.registration_cog.save_player_registrations", world.storage.save), \
-                patch.dict(os.environ, {"CHRONICL3R_KEY_SYNC": "on"}):
-            yield
-    finally:
-        root.removeHandler(world.recorder)
-        root.setLevel(previous_level)
+    with recording_bot_logs(world.recorder), chronicler_transport(world.fake), \
+            patch.object(cog_module.repo, "list_server_ids", world.storage.list_server_ids), \
+            patch("bot.cogs.registration_cog.load_player_registrations", world.storage.load), \
+            patch("bot.cogs.registration_cog.save_player_registrations", world.storage.save), \
+            patch.dict(os.environ, {"CHRONICL3R_KEY_SYNC": "on"}):
+        yield
 
 
 def _cog(bot=None):
