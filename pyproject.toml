@@ -47,6 +47,7 @@ type = "forbidden"
 source_modules = [
     "bot.cogs.admin_cog",
     "bot.cogs.bomb_cog",
+    "bot.cogs.chronicler_key_removal",
     "bot.cogs.fun_cog",
     "bot.cogs.registration_cog",
     "bot.cogs.replay_cog",
