@@ -75,7 +75,8 @@ EXEMPT_PLAYER_KEY_FUNCTIONS = {
     "bot/cogs/tasks_cog.py": {"cap_detect"},
     "bot/cogs/bomb_cog.py": {"bomb_availability"},
     "bot/cogs/token_cog.py": {"token_availability"},
-    "bot/cogs/registration_cog.py": {"register", "validate_keys"},
+    # unregister: player-registration key read to delete it from Chronicl3r on unregister.
+    "bot/cogs/registration_cog.py": {"register", "validate_keys", "unregister"},
 }
 
 

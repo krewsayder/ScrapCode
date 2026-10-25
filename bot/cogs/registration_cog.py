@@ -43,6 +43,10 @@ CHRONICLER_STORAGE_NOTICE = (
     "Your key is also stored in Chronicl3r, our backend data store, "
     "which may allow roster analytics. Unregistering deletes it."
 )
+CHRONICLER_UNLINKED_LINE = "🗑️ The key was removed from Chronicl3r."
+CHRONICLER_UNLINK_UNCONFIRMED_LINE = (
+    "⚠️ Removal of the key from Chronicl3r could not be confirmed."
+)
 CHRONICLER_LINK_EVENT = "chronicler.key.link"
 CHRONICLER_UNLINK_EVENT = "chronicler.key.unlink"
 
@@ -335,6 +339,9 @@ class RegistrationCog(commands.Cog):
             )
             return
 
+        entry = registrations[discord_id]
+        key = entry.get("api_key") if isinstance(entry, dict) else None
+
         del registrations[discord_id]
         save_player_registrations(server_id, registrations)
 
@@ -344,20 +351,29 @@ class RegistrationCog(commands.Cog):
             save_capped_state(server_id, capped_state)
 
         if target_user:
-            await interaction.followup.send(
-                f"✅ {target_user.mention} has been unregistered successfully.",
-                ephemeral=True,
-            )
+            message = f"✅ {target_user.mention} has been unregistered successfully."
         elif user_id:
-            await interaction.followup.send(
-                f"✅ User `{discord_id}` has been unregistered successfully.",
-                ephemeral=True,
-            )
+            message = f"✅ User `{discord_id}` has been unregistered successfully."
         else:
-            await interaction.followup.send(
-                "✅ You've been unregistered and will no longer receive token cap pings.",
-                ephemeral=True,
-            )
+            message = "✅ You've been unregistered and will no longer receive token cap pings."
+
+        if key and self.player_service is not None:
+            # Best-effort: the unregistration above is already saved, and
+            # nothing Chronicl3r does (or raises) may fail the command. Removal
+            # is only claimed when Chronicl3r confirmed it.
+            try:
+                unlink_code = None if await self.player_service.unlink_key(key) else "unlink_failed"
+            except Exception:
+                unlink_code = _RAISED_CODE
+            if unlink_code is None:
+                line = CHRONICLER_UNLINKED_LINE
+            else:
+                line = CHRONICLER_UNLINK_UNCONFIRMED_LINE
+                _log_chronicler(CHRONICLER_UNLINK_EVENT, logging.WARNING,
+                                server_id, discord_id, unlink_code)
+            message = "\n".join((message, line))
+
+        await interaction.followup.send(message, ephemeral=True)
 
     # ==========================================
     # SLASH COMMAND: REGISTRATION MOVE
