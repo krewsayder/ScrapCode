@@ -58,6 +58,8 @@ NO_NAME_MATCH_RETRY = timedelta(hours=24)
 CONFIGURATION_PAUSE = timedelta(hours=1)
 TRANSIENT_PAUSE_SECONDS = 300
 TRANSIENT_PAUSE_CAP_SECONDS = 3600
+# Bounds the exponent only; the cap above is what limits the wait.
+_MAX_DOUBLINGS = 16
 
 PARKING_OUTCOMES = frozenset({"insufficient_data", "ambiguous", "invalid_key", "missing_key"})
 CONFIGURATION_OUTCOMES = frozenset({"no_profiles", "not_deployed"})
@@ -118,9 +120,12 @@ class _LoopPause:
     def back_off(self, now: datetime, retry_after: int | None) -> None:
         self.transient_streak += 1
         base = max(retry_after or 0, TRANSIENT_PAUSE_SECONDS)
-        doubled = base * 2 ** min(self.transient_streak - 1, 16)
+        doubled = base * 2 ** min(self.transient_streak - 1, _MAX_DOUBLINGS)
         seconds = min(doubled, max(base, TRANSIENT_PAUSE_CAP_SECONDS))
         self.hold(now + timedelta(seconds=seconds), now)
+
+    def reset_back_off(self) -> None:
+        self.transient_streak = 0
 
 
 class KeySyncSchedule:
@@ -164,7 +169,7 @@ class KeySyncSchedule:
         if outcome not in PLAYER_OUTCOMES:
             self._pause.back_off(now, retry_after)
             return
-        self._pause.transient_streak = 0
+        self._pause.reset_back_off()
         registration = (server_id, discord_id, key)
         self._players[(server_id, discord_id)] = self._state_for(registration).after(outcome, now)
 

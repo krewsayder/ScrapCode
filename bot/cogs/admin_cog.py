@@ -32,6 +32,7 @@ from bot.repository import BoardStatus, LiveBoardConfig, QuarantineTombstone
 from bot.embeds import guild_autocomplete, encounter_limit
 from bot.permissions import require_tier, check_tier
 from bot.services.chronicl3r.player_service import PlayerService
+from bot.cogs.chronicler_key_removal import remove_key_from_chronicler
 from bot.services.tacticus.guild_client import GuildSnapshot, KeyStatus
 
 # This module's OWN logger, not a shared one: `emit_structured` takes the
@@ -102,13 +103,6 @@ _UNUSABLE_KEY_WORDS = {
     guild_keys.QUARANTINED: "quarantined — its stored key resolves to another guild",
     guild_keys.NO_KEY_REGISTERED: "no API key registered",
 }
-
-# The record a deregistration leaves for a player key Chronicl3r may still
-# hold. Same event and codes as `/registration unregister`, so one grep finds
-# every key the bot failed to remove. A success leaves no record.
-CHRONICLER_UNLINK_EVENT = "chronicler.key.unlink"
-_UNLINK_FAILED_CODE = "unlink_failed"
-_RAISED_CODE = "transport"
 
 CONFIG_OPTIONS = [
     app_commands.Choice(name="guilds",        value="guilds"),
@@ -1179,7 +1173,10 @@ class _DeregistrationConfirmView(discord.ui.View):
             ephemeral=True,
         )
         for discord_id, key in player_keys:
-            await _unlink_player_key(self._player_service, server_id, discord_id, key)
+            await remove_key_from_chronicler(
+                self._player_service, key,
+                logger=logger, server_id=server_id, discord_id=discord_id,
+            )
 
 
 def _collect_guild_player_keys(server_id: int, guild_id: str) -> list[tuple[str, str]]:
@@ -1200,20 +1197,6 @@ def _collect_guild_player_keys(server_id: int, guild_id: str) -> list[tuple[str,
         and entry.get("guild_id") == guild_id
         and entry.get("api_key")
     ]
-
-
-async def _unlink_player_key(player_service: PlayerService, server_id: int,
-                             discord_id: str, key: str) -> None:
-    """Best-effort removal of one key; a failure is recorded, never raised."""
-    try:
-        code = None if await player_service.unlink_key(key) else _UNLINK_FAILED_CODE
-    except Exception:
-        code = _RAISED_CODE
-    if code is not None:
-        emit_structured(
-            logger, logging.WARNING, CHRONICLER_UNLINK_EVENT,
-            server_id=server_id, discord_id=discord_id, code=code,
-        )
 
 
 def _deregistration_warning(guild_id: str, guild_name: str, counts: dict) -> str:

@@ -14,6 +14,7 @@ from bot.embeds import guild_autocomplete, resolve_members
 from bot.obs import emit_structured
 from bot.permissions import require_guild_member, require_tier, check_tier
 from bot.services.chronicl3r.key_sync import KeySyncAction, KeySyncSchedule
+from bot.cogs.chronicler_key_removal import RAISED_CODE, remove_key_from_chronicler
 
 # This module's OWN logger: `emit_structured` keeps records under the emitting
 # module's name, so registration records stay greppable by origin.
@@ -51,11 +52,6 @@ CHRONICLER_UNLINK_UNCONFIRMED_LINE = (
     "⚠️ Removal of the key from Chronicl3r could not be confirmed."
 )
 CHRONICLER_LINK_EVENT = "chronicler.key.link"
-CHRONICLER_UNLINK_EVENT = "chronicler.key.unlink"
-
-# What a raised link/unlink call is recorded as: the same as an unreachable
-# Chronicl3r, since the outcome for the player is identical.
-_RAISED_CODE = "transport"
 
 # Background key sync: backfills keys registered before the Chronicl3r link
 # existed. One link per tick = 30/h, half of Chronicl3r's per-account link
@@ -240,46 +236,62 @@ class RegistrationCog(commands.Cog):
                 if isinstance(entry, dict) and entry.get("api_key")
             ]
 
-            async def settle(registration, action) -> bool:
-                """Make one call and record it; False when the loop is now paused."""
-                server_id, discord_id, key = registration
-                if action is KeySyncAction.LOOKUP:
-                    call, outcome_of, event = (self.player_service.lookup_key,
-                                               _lookup_sync_outcome, KEY_SYNC_LOOKUP_EVENT)
-                else:
-                    call, outcome_of, event = (self.player_service.link_key,
-                                               _link_sync_outcome, KEY_SYNC_LINK_EVENT)
-                try:
-                    result = await call(key)
-                    outcome, retry_after = outcome_of(result), result.retry_after
-                except Exception:
-                    outcome, retry_after = _RAISED_CODE, None
-                self.key_sync.record(server_id, discord_id, key, outcome, now, retry_after)
-                code = outcome or "unexpected"
-                level = logging.INFO if code in _SETTLED_OUTCOMES else logging.WARNING
-                _log_chronicler(event, level, server_id, discord_id, code)
-                paused_until = self.key_sync.paused_until(now)
-                if paused_until is None:
-                    return True
-                emit_structured(
-                    logger, logging.WARNING, KEY_SYNC_PAUSED_EVENT,
-                    code=code, pause_seconds=int((paused_until - now).total_seconds()),
-                )
-                return False
-
             due = self.key_sync.due(registrations, now)
             lookups = [r for r, action in due if action is KeySyncAction.LOOKUP]
             for registration in lookups[:KEY_SYNC_LOOKUPS_PER_TICK]:
-                if not await settle(registration, KeySyncAction.LOOKUP):
+                if not await self._settle(registration, KeySyncAction.LOOKUP, now):
                     return
             # Re-asked, so a key this tick's lookups found unlinked is linked now.
             links = [r for r, action in self.key_sync.due(registrations, now)
                      if action is KeySyncAction.LINK]
             if links:
-                await settle(links[0], KeySyncAction.LINK)
+                await self._settle(links[0], KeySyncAction.LINK, now)
         except Exception as exc:
             emit_structured(logger, logging.ERROR, KEY_SYNC_TICK_FAILED_EVENT,
                             error_type=type(exc).__name__)
+
+    async def _settle(self, registration, action: KeySyncAction, now: datetime) -> bool:
+        """Make one sync call and record it; False when the loop is now paused."""
+        server_id, discord_id, key = registration
+        if action is KeySyncAction.LOOKUP:
+            call, outcome_of, event = (self.player_service.lookup_key,
+                                       _lookup_sync_outcome, KEY_SYNC_LOOKUP_EVENT)
+        else:
+            call, outcome_of, event = (self.player_service.link_key,
+                                       _link_sync_outcome, KEY_SYNC_LINK_EVENT)
+        try:
+            result = await call(key)
+            outcome, retry_after = outcome_of(result), result.retry_after
+        except Exception:
+            outcome, retry_after = RAISED_CODE, None
+        self.key_sync.record(server_id, discord_id, key, outcome, now, retry_after)
+        code = outcome or "unexpected"
+        level = logging.INFO if code in _SETTLED_OUTCOMES else logging.WARNING
+        _log_chronicler(event, level, server_id, discord_id, code)
+        paused_until = self.key_sync.paused_until(now)
+        if paused_until is None:
+            return True
+        emit_structured(
+            logger, logging.WARNING, KEY_SYNC_PAUSED_EVENT,
+            code=code, pause_seconds=int((paused_until - now).total_seconds()),
+        )
+        return False
+
+    async def _link_registered_key(self, server_id, discord_id: str, key: str) -> str:
+        """Link a just-registered key and record it; the reply line. Never raises."""
+        try:
+            result = await self.player_service.link_key(key)
+            line, link_code = _link_outcome(result.status, result.code)
+            retry_after = result.retry_after
+        except Exception:
+            line, link_code = _link_outcome(None, RAISED_CODE)
+            retry_after = None
+        # Same mapping as the loop's link: "unexpected" pauses exactly as a
+        # code-less answer would.
+        self.key_sync.record(server_id, discord_id, key, link_code, self.clock(), retry_after)
+        level = logging.INFO if line == CHRONICLER_LINKED_LINE else logging.WARNING
+        _log_chronicler(CHRONICLER_LINK_EVENT, level, server_id, discord_id, link_code)
+        return line
 
     @chronicler_key_sync.before_loop
     async def _before_chronicler_key_sync(self):
@@ -389,27 +401,11 @@ class RegistrationCog(commands.Cog):
             # Chronicl3r does (or raises) may fail the command. The old key is
             # unlinked BEFORE the new one is linked.
             if previous_key and previous_key != api_key:
-                try:
-                    unlinked = await self.player_service.unlink_key(previous_key)
-                    unlink_code = None if unlinked else "unlink_failed"
-                except Exception:
-                    unlink_code = _RAISED_CODE
-                if unlink_code is not None:
-                    _log_chronicler(CHRONICLER_UNLINK_EVENT, logging.WARNING,
-                                    server_id, discord_id, unlink_code)
-            try:
-                result = await self.player_service.link_key(api_key)
-                line, link_code = _link_outcome(result.status, result.code)
-                retry_after = result.retry_after
-            except Exception:
-                line, link_code = _link_outcome(None, _RAISED_CODE)
-                retry_after = None
-            # Same mapping as the loop's link: "unexpected" pauses exactly as a
-            # code-less answer would.
-            self.key_sync.record(server_id, discord_id, api_key, link_code,
-                                 self.clock(), retry_after)
-            level = logging.INFO if line == CHRONICLER_LINKED_LINE else logging.WARNING
-            _log_chronicler(CHRONICLER_LINK_EVENT, level, server_id, discord_id, link_code)
+                await remove_key_from_chronicler(
+                    self.player_service, previous_key,
+                    logger=logger, server_id=server_id, discord_id=discord_id,
+                )
+            line = await self._link_registered_key(server_id, discord_id, api_key)
             message = "\n".join((message, line, CHRONICLER_STORAGE_NOTICE))
 
         await interaction.followup.send(message, ephemeral=True)
@@ -488,16 +484,11 @@ class RegistrationCog(commands.Cog):
             # Best-effort: the unregistration above is already saved, and
             # nothing Chronicl3r does (or raises) may fail the command. Removal
             # is only claimed when Chronicl3r confirmed it.
-            try:
-                unlink_code = None if await self.player_service.unlink_key(key) else "unlink_failed"
-            except Exception:
-                unlink_code = _RAISED_CODE
-            if unlink_code is None:
-                line = CHRONICLER_UNLINKED_LINE
-            else:
-                line = CHRONICLER_UNLINK_UNCONFIRMED_LINE
-                _log_chronicler(CHRONICLER_UNLINK_EVENT, logging.WARNING,
-                                server_id, discord_id, unlink_code)
+            removed = await remove_key_from_chronicler(
+                self.player_service, key,
+                logger=logger, server_id=server_id, discord_id=discord_id,
+            )
+            line = CHRONICLER_UNLINKED_LINE if removed else CHRONICLER_UNLINK_UNCONFIRMED_LINE
             message = "\n".join((message, line))
 
         await interaction.followup.send(message, ephemeral=True)
