@@ -24,6 +24,7 @@ the consumer states its own requirement, and the dependency now points inward.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
@@ -32,7 +33,7 @@ import requests
 
 from bot.guilds import load_player_list, save_player_list
 from bot.obs import emit_structured
-from bot.services.chronicl3r.client import chronicl3rClient
+from bot.services.chronicl3r.client import KeyCallResult, chronicl3rClient
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,24 @@ class PlayerService:
                     return self.client.get_profile(tacticus_user_id)
                 raise
         return await asyncio.to_thread(_sync)
+
+    async def link_key(self, key: str) -> KeyCallResult:
+        """Hand a player API key to Chronicl3r; the outcome, without identity."""
+        result = await asyncio.to_thread(self.client.link_api_key, key)
+        return _without_identity(result)
+
+    async def lookup_key(self, key: str) -> KeyCallResult:
+        """Whether Chronicl3r holds this key and whether it is still valid."""
+        result = await asyncio.to_thread(self.client.lookup_api_key, key)
+        return _without_identity(result)
+
+    async def unlink_key(self, key: str) -> bool:
+        """Remove the key from the profile holding it. True when no profile holds it after.
+
+        A key Chronicl3r never linked is already unlinked. Any other outcome
+        that is not a confirmed delete is False; nothing is raised for one.
+        """
+        return await asyncio.to_thread(self._unlink_sync, key)
 
     async def refresh_guild(
         self, discord_server_id: int, guild_id: str, snapshot: RosterSnapshot
@@ -234,6 +253,16 @@ class PlayerService:
                 "is_former": False,
             }
 
+    def _unlink_sync(self, key: str) -> bool:
+        """Lookup, then DELETE. The tacticus_user_id never leaves this frame."""
+        lookup = self.client.lookup_api_key(key)
+        if lookup.status == 404 and lookup.code == "not_linked":
+            return True
+        tacticus_user_id = _linked_user_id(lookup)
+        if tacticus_user_id is None:
+            return False
+        return self.client.delete_api_key(tacticus_user_id).status == 204
+
     async def _profile_for(self, user_id: str, known_players: dict) -> dict:
         """The Chronicler profile for a member of the current roster.
 
@@ -271,6 +300,24 @@ class PlayerService:
             reason=reason,
             known_players=len(players),
         )
+
+
+def _without_identity(result: KeyCallResult) -> KeyCallResult:
+    """Reduce the profile to its validity flag; name and tacticus_user_id stop here."""
+    if result.profile is None:
+        return result
+    valid = result.profile.get("has_valid_api_key") is True
+    return dataclasses.replace(result, profile={"has_valid_api_key": valid})
+
+
+def _linked_user_id(lookup: KeyCallResult) -> str | None:
+    """The tacticus_user_id a successful lookup names, or None if it names none usable."""
+    if lookup.status != 200 or lookup.profile is None:
+        return None
+    tacticus_user_id = lookup.profile.get("tacticus_user_id")
+    if isinstance(tacticus_user_id, str) and tacticus_user_id:
+        return tacticus_user_id
+    return None
 
 
 def _mark_departed(players: dict, current_ids: frozenset[str]) -> None:
