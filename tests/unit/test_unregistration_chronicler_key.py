@@ -66,7 +66,7 @@ SERVER_ID = 535353
 GUILD_ID = "guild-bravo"
 INVOKER_ID = 4004
 TARGET_ID = 5005
-RAW_ID = "6006"
+RAW_ID = "600600600600600600"  # a real snowflake shape: `user_id` is validated
 OTHER_ID = "7007"
 
 BASE = "https://www.chronicl3r.com/tacticus-guild-raid/api/v1/"
@@ -411,9 +411,10 @@ def _one_success_reply(line_kind):
 
 
 def _expected_delta(seeded, capped_seed, target, is_capped, unlink, calls=None, line="auto"):
-    logs = []
+    # The audit record; written right after the save, before any Chronicl3r call.
+    logs = [("registration.unregister", {"server_id": SERVER_ID, "discord_id": target})]
     if unlink is not None and unlink.log_code is not None:
-        logs = [("chronicler.key.unlink",
+        logs += [("chronicler.key.unlink",
                  {"server_id": SERVER_ID, "discord_id": target, "code": unlink.log_code})]
     delta = {
         "replies": _one_success_reply(unlink.line if line == "auto" else line),

@@ -298,7 +298,7 @@ def _patched(world):
             patch("bot.cogs.registration_cog.httpx.AsyncClient",
                   return_value=_tacticus_accepts()), \
             patch("bot.cogs.registration_cog.load_guilds",
-                  lambda server_id: {GUILD_ID: {"name": GUILD_NAME}}), \
+                  lambda server_id: {GUILD_ID: {"name": GUILD_NAME, "member_role_ids": [1]}}), \
             patch("bot.cogs.registration_cog.load_player_registrations",
                   world.storage.load), \
             patch("bot.cogs.registration_cog.save_player_registrations",
@@ -356,6 +356,11 @@ def _saved_table(seeded, registrant, key):
     table = copy.deepcopy(seeded)
     table[registrant] = {"api_key": key, "guild_id": GUILD_ID}
     return table
+
+
+def _register_log(registrant):
+    # The audit record; written right after the save, before any Chronicl3r call.
+    return ("registration.register", {"server_id": SERVER_ID, "discord_id": registrant})
 
 
 def _link_log(registrant, answer):
@@ -434,7 +439,7 @@ def test_registering_links_the_key_and_says_so(key, other, variant, data):
         "replies": _one_success_reply(LINKED),
         "registrations.saved": appended_with(_saved_table(seeded, registrant, key)),
         "chronicler.calls": appended_with(_link_call(key)),
-        "log.records": appended_with(_link_log(registrant, answer)),
+        "log.records": appended_with(_register_log(registrant), _link_log(registrant, answer)),
     })
 
 
@@ -450,7 +455,7 @@ def test_a_link_failure_never_fails_the_registration(key, other, variant, data):
         "replies": _one_success_reply(answer.line),
         "registrations.saved": appended_with(_saved_table(seeded, registrant, key)),
         "chronicler.calls": appended_with(_link_call(key)),
-        "log.records": appended_with(_link_log(registrant, answer)),
+        "log.records": appended_with(_register_log(registrant), _link_log(registrant, answer)),
     })
 
 
@@ -466,7 +471,7 @@ def test_each_link_outcome_gets_one_reply_line_in_our_own_words(key, other, vari
         "replies": _one_success_reply(answer.line),
         "registrations.saved": appended_with(_saved_table(seeded, registrant, key)),
         "chronicler.calls": appended_with(_link_call(key)),
-        "log.records": appended_with(_link_log(registrant, answer)),
+        "log.records": appended_with(_register_log(registrant), _link_log(registrant, answer)),
     })
     if answer.line == INSUFFICIENT:
         line = cog_module.CHRONICLER_INSUFFICIENT_DATA_LINE
@@ -486,7 +491,7 @@ def test_every_successful_registration_reply_carries_the_storage_notice(key, oth
             len(a) == len(b) + 1 and a[-1].endswith("\n" + NOTICE) and a[-1].count(NOTICE) == 1)),
         "registrations.saved": appended_with(_saved_table(seeded, registrant, key)),
         "chronicler.calls": appended_with(_link_call(key)),
-        "log.records": appended_with(_link_log(registrant, answer)),
+        "log.records": appended_with(_register_log(registrant), _link_log(registrant, answer)),
     })
 
 
@@ -553,7 +558,8 @@ def test_only_a_changed_key_unlinks_the_old_one_and_before_the_new_link(
         "replies": _one_success_reply(link.line),
         "registrations.saved": appended_with(_saved_table(seeded, registrant, key)),
         "chronicler.calls": appended_with(*unlink_calls, _link_call(key)),
-        "log.records": appended_with(*unlink_logs, _link_log(registrant, link)),
+        "log.records": appended_with(_register_log(registrant), *unlink_logs,
+                                     _link_log(registrant, link)),
     })
 
 
