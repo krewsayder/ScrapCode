@@ -20,7 +20,7 @@ gates compose.
 | Tier | Scope | Configured by | Config stored |
 |------|-------|---------------|---------------|
 | **admin** | Cluster-wide: register/deregister guilds, set tier & member roles | `/set_cluster_role tier=admin` | `guilds.json` → `role_tiers["admin"]` |
-| **officer** | Cluster-wide: view/update leaderboards, set ping/live-leaderboard channels | `/set_cluster_role tier=officer` | `guilds.json` → `role_tiers["officer"]` |
+| **officer** | Cluster-wide: view/update leaderboards, set ping/live-leaderboard channels; register, unregister and move *another* player's registration | `/set_cluster_role tier=officer` | `guilds.json` → `role_tiers["officer"]` |
 | **guild member** | Per in-game guild: register, view tokens/bombs, submit/get/delete replays | `/set_guild_member_role guild_id=...` | `guilds.json` → `guilds[gid].member_role_ids` |
 
 There is no "member" cluster tier; member-ness is per-guild, keyed by the
@@ -59,10 +59,15 @@ the inline `if not await check_tier(...)` predicate (custom/conditional denials)
   bypass, tier cascade (officer ← admin), empty-config rejection, wrong-guild
   rejection, any-guild vs targeted-guild behavior. Changes to the model must keep
   these green.
-- **Admin-impersonation duplication (flagged, not fixed):** `registration_cog`
-  re-implements the "admin tier **or** Discord-admin" gate inline for
-  `target_user`/`user_id` rather than calling `check_tier("admin")`. Same logic,
-  two locations — a drift risk ADR-001 also calls out.
+- **Acting on another player's registration (resolved 2026-11-11):**
+  `registration_cog` used to re-implement an "admin tier **or** Discord-admin"
+  gate inline for `target_user`/`user_id`. It now calls
+  `check_tier("officer")` (constant `ON_BEHALF_TIER`), which also widened the
+  permission from admin to officer. The target must additionally hold the
+  chosen guild's member role for `register target_user:` and `move`; that is
+  a target check, not a caller check, so it lives in the cog, not in
+  `bot/permissions.py`. Each change is recorded as a `registration.register` /
+  `registration.unregister` / `registration.move` structured log record.
 - **Inline-vs-decorator drift:** `view_config` and `registration move` use inline
   `check_tier("officer")` with a custom ephemeral denial instead of
   `@require_tier("officer")`. Functionally identical; diverges from the decorator

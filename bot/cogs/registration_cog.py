@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime, timezone
 
 import httpx
@@ -185,6 +186,50 @@ def _key_sync_switched_off() -> bool:
     return os.getenv(KEY_SYNC_SWITCH_ENV, "").strip().lower() == "off"
 
 
+# Acting on ANOTHER player's registration (register, unregister, move) is an
+# officer-tier action. `check_tier("officer")` also admits the admin tier and
+# Discord Administrators (ADR-005). Acting on yourself stays a guild-member action.
+ON_BEHALF_TIER = "officer"
+
+REGISTRATION_REGISTER_EVENT = "registration.register"
+REGISTRATION_UNREGISTER_EVENT = "registration.unregister"
+REGISTRATION_MOVE_EVENT = "registration.move"
+
+# A Discord user ID as an officer would paste it: the bare snowflake, or a
+# mention (`<@id>` / `<@!id>`). Snowflakes are 17–20 digits.
+_DISCORD_ID_PATTERN = re.compile(r"<@!?(\d{17,20})>|(\d{17,20})")
+
+
+def _parse_discord_id(raw: str) -> str | None:
+    """The bare ID when `raw` is a Discord user ID or mention, else None."""
+    match = _DISCORD_ID_PATTERN.fullmatch(raw.strip())
+    return (match.group(1) or match.group(2)) if match else None
+
+
+def _holds_guild_member_role(member, guild_data: dict) -> bool:
+    """Whether `member` holds one of the guild's configured member roles."""
+    member_role_ids = set(guild_data.get("member_role_ids") or [])
+    return any(role.id in member_role_ids for role in member.roles)
+
+
+def _audit(event: str, interaction: discord.Interaction, discord_id: str, **fields) -> None:
+    """One record per registration change: who acted, on whose registration, where.
+
+    `discord_id` is the player whose registration changed — the same field the
+    `chronicler.key.*` records use, so one grep for an ID shows its whole
+    history. Identifiers and guild ids only: an API key never reaches here.
+    """
+    actor_id = str(interaction.user.id)
+    emit_structured(
+        logger, logging.INFO, event,
+        server_id=interaction.guild_id,
+        discord_id=discord_id,
+        actor_id=actor_id,
+        on_behalf=actor_id != discord_id,
+        **fields,
+    )
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -311,7 +356,7 @@ class RegistrationCog(commands.Cog):
     @app_commands.describe(
         api_key="Your personal Tacticus API key",
         guild_id="Your guild",
-        target_user="(Admin only) Register on behalf of another Discord user",
+        target_user="(Officer only) Register on behalf of another Discord user",
     )
     @app_commands.autocomplete(guild_id=guild_autocomplete)
     async def register(
@@ -325,16 +370,12 @@ class RegistrationCog(commands.Cog):
 
         server_id = interaction.guild_id
 
-        if target_user is not None:
-            cluster = repo.load(server_id)
-            user_role_ids = {r.id for r in interaction.user.roles}
-            admin_roles = set(cluster.role_tiers.get("admin", []))
-            if not interaction.user.guild_permissions.administrator and not (user_role_ids & admin_roles):
-                await interaction.followup.send(
-                    "❌ You don't have permission to register on behalf of another user.",
-                    ephemeral=True,
-                )
-                return
+        if target_user is not None and not await check_tier(interaction, ON_BEHALF_TIER):
+            await interaction.followup.send(
+                "❌ Only officers and admins can register on behalf of another user.",
+                ephemeral=True,
+            )
+            return
 
         guilds = load_guilds(server_id)
         if guild_id not in guilds:
@@ -345,6 +386,14 @@ class RegistrationCog(commands.Cog):
             return
 
         guild_name = guilds[guild_id]["name"]
+
+        if target_user is not None and not _holds_guild_member_role(target_user, guilds[guild_id]):
+            await interaction.followup.send(
+                f"❌ {target_user.mention} doesn't have the **{guild_name}** member role. "
+                "Pick the guild they belong to, or give them the role first.",
+                ephemeral=True,
+            )
+            return
 
         headers = {"accept": "application/json", "X-API-KEY": api_key}
         try:
@@ -385,8 +434,14 @@ class RegistrationCog(commands.Cog):
                 )
                 return
 
+        previous_guild_id = previous_entry.get("guild_id") if isinstance(previous_entry, dict) else None
         registrations[discord_id] = {"api_key": api_key, "guild_id": guild_id}
         save_player_registrations(server_id, registrations)
+        _audit(
+            REGISTRATION_REGISTER_EVENT, interaction, discord_id,
+            guild_id=guild_id, previous_guild_id=previous_guild_id,
+            updated=already_exist, key_changed=bool(previous_key) and previous_key != api_key,
+        )
 
         if target_user:
             action = "updated" if already_exist else "registered"
@@ -420,8 +475,8 @@ class RegistrationCog(commands.Cog):
     )
     @require_guild_member()
     @app_commands.describe(
-        target_user="(Admin only) Unregister on behalf of another Discord user",
-        user_id="(Admin only) Raw Discord ID — use when the player has left the server",
+        target_user="(Officer only) Unregister on behalf of another Discord user",
+        user_id="(Officer only) Raw Discord ID — use when the player has left the server",
     )
     async def unregister(
         self,
@@ -433,22 +488,25 @@ class RegistrationCog(commands.Cog):
 
         server_id = interaction.guild_id
 
-        # Require admin to use target_user or user_id
-        if target_user is not None or user_id is not None:
-            cluster = repo.load(server_id)
-            user_role_ids = {r.id for r in interaction.user.roles}
-            admin_roles = set(cluster.role_tiers.get("admin", []))
-            if not interaction.user.guild_permissions.administrator and not (user_role_ids & admin_roles):
-                await interaction.followup.send(
-                    "❌ You don't have permission to unregister another user.",
-                    ephemeral=True,
-                )
-                return
+        if (target_user is not None or user_id is not None) \
+                and not await check_tier(interaction, ON_BEHALF_TIER):
+            await interaction.followup.send(
+                "❌ Only officers and admins can unregister another user.",
+                ephemeral=True,
+            )
+            return
 
         if target_user is not None:
             discord_id = str(target_user.id)
         elif user_id is not None:
-            discord_id = user_id.strip()
+            discord_id = _parse_discord_id(user_id)
+            if discord_id is None:
+                await interaction.followup.send(
+                    "❌ `user_id` must be a Discord user ID (17–20 digits) or a mention. "
+                    "With Developer Mode on: right-click the user → Copy User ID.",
+                    ephemeral=True,
+                )
+                return
         else:
             discord_id = str(interaction.user.id)
 
@@ -472,6 +530,11 @@ class RegistrationCog(commands.Cog):
         if discord_id in capped_state:
             del capped_state[discord_id]
             save_capped_state(server_id, capped_state)
+
+        _audit(
+            REGISTRATION_UNREGISTER_EVENT, interaction, discord_id,
+            guild_id=entry.get("guild_id") if isinstance(entry, dict) else None,
+        )
 
         if target_user:
             message = f"✅ {target_user.mention} has been unregistered successfully."
@@ -514,7 +577,7 @@ class RegistrationCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True)
 
-        if not await check_tier(interaction, "officer"):
+        if not await check_tier(interaction, ON_BEHALF_TIER):
             await interaction.followup.send(
                 "❌ You don't have permission to use this command.",
                 ephemeral=True,
@@ -541,8 +604,21 @@ class RegistrationCog(commands.Cog):
             return
 
         guild_name = guilds[guild_id]["name"]
+        if not _holds_guild_member_role(target_user, guilds[guild_id]):
+            await interaction.followup.send(
+                f"❌ {target_user.mention} doesn't have the **{guild_name}** member role. "
+                "Give them the role first.",
+                ephemeral=True,
+            )
+            return
+
+        previous_guild_id = registrations[discord_id].get("guild_id")
         registrations[discord_id]["guild_id"] = guild_id
         save_player_registrations(server_id, registrations)
+        _audit(
+            REGISTRATION_MOVE_EVENT, interaction, discord_id,
+            guild_id=guild_id, previous_guild_id=previous_guild_id,
+        )
 
         await interaction.followup.send(
             f"✅ {target_user.mention} has been moved to **{guild_name}**.",
