@@ -59,12 +59,22 @@ from chronicler_key_fakes import (
     response as _response,
 )
 
-cog_module = importlib.import_module("bot.cogs.admin_cog")
 client_module = importlib.import_module("bot.services.chronicl3r.client")
 service_module = importlib.import_module("bot.services.chronicl3r.player_service")
 repository_module = importlib.import_module("bot.repository")
 
-AdminCog = cog_module.AdminCog
+
+def _admin_cog():
+    """`bot.cogs.admin_cog` as it is imported NOW, never cached at load.
+
+    `tests/acceptance/cluster-board-control/conftest.py` evicts
+    `bot.cogs.admin_cog` from `sys.modules` after its suite. A module captured
+    at collection would then be the evicted one, while the
+    `patch("bot.cogs.admin_cog....")` targets in `_patched` re-import a fresh
+    one — the command would run against unpatched globals. Resolving the module
+    at call time keeps the command and the patches on the same module.
+    """
+    return importlib.import_module("bot.cogs.admin_cog")
 
 SERVER_ID = 737373
 GUILD_TARGET = "guild-target"
@@ -377,7 +387,7 @@ def _patched(world):
 
 
 def _deregister_command():
-    for command in AdminCog.__cog_app_commands__:
+    for command in _admin_cog().AdminCog.__cog_app_commands__:
         if command.name == "deregister_guild":
             return command
     raise AssertionError("no `deregister_guild` command is registered on AdminCog")
@@ -386,7 +396,7 @@ def _deregister_command():
 def _cog():
     client = client_module.chronicl3rClient()
     client.token = TOKEN
-    return AdminCog(object(), service_module.PlayerService(client))
+    return _admin_cog().AdminCog(object(), service_module.PlayerService(client))
 
 
 def _run(scenario, *, press="confirm"):
@@ -432,7 +442,7 @@ def _assert_state_delta(before, after, expected):
 
 
 def _warning():
-    return cog_module._deregistration_warning(GUILD_TARGET, GUILD_NAME, COUNTS)
+    return _admin_cog()._deregistration_warning(GUILD_TARGET, GUILD_NAME, COUNTS)
 
 
 def _success():
