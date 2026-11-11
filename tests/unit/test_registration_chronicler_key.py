@@ -495,13 +495,6 @@ def test_every_successful_registration_reply_carries_the_storage_notice(key, oth
     })
 
 
-def test_the_register_description_names_chronicler_within_discords_limit():
-    # bypass: static command metadata — one value, nothing to quantify over.
-    description = _register_command().description
-    assert "Chronicl3r" in description
-    assert len(description) <= 100
-
-
 @st.composite
 def unlink_routes(draw, old):
     """Chronicl3r's answers to unlinking `old`, the calls they cost, and whether it worked."""

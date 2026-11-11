@@ -22,8 +22,8 @@ HELP_DATA = {
             "**https://api.tacticusgame.com/**"
         ),
         "commands": [
-            ("/registration register", "Link your Tacticus API key to your Discord account for token cap pings. The key is also stored in Chronicl3r."),
-            ("/registration unregister", "Remove your Tacticus API key registration, and its link in Chronicl3r."),
+            ("/registration register", "Link your Tacticus API key to your Discord account for token cap pings."),
+            ("/registration unregister", "Remove your Tacticus API key registration."),
             ("/token_availability", "See raid token status for all registered players in a guild."),
             ("/bomb_availability",  "See bomb token status for all registered players in a guild."),
             ("/upload_replay",      "Submit a raid replay link to the index for a boss/map."),
