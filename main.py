@@ -134,7 +134,7 @@ async def load_cogs():
     await setup_update(bot, player_service)
     await setup_view(bot)
     await setup_admin(bot, player_service)
-    await setup_registration(bot)
+    await setup_registration(bot, player_service)
     await setup_tasks(bot, player_service)
     await setup_fun(bot)
     await setup_bomb(bot)

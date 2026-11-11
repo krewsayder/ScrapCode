@@ -1,14 +1,24 @@
 import asyncio
+import logging
+import os
+from datetime import datetime, timezone
 
 import httpx
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from typing import Optional
 
 from bot.guilds import load_player_registrations, save_player_registrations, load_capped_state, save_capped_state, load_guilds, repo
 from bot.embeds import guild_autocomplete, resolve_members
+from bot.obs import emit_structured
 from bot.permissions import require_guild_member, require_tier, check_tier
+from bot.services.chronicl3r.key_sync import KeySyncAction, KeySyncSchedule
+from bot.cogs.chronicler_key_removal import RAISED_CODE, remove_key_from_chronicler
+
+# This module's OWN logger: `emit_structured` keeps records under the emitting
+# module's name, so registration records stay greppable by origin.
+logger = logging.getLogger(__name__)
 
 TACTICUS_PLAYER_URL = "https://api.tacticusgame.com/api/v1/player"
 
@@ -22,6 +32,40 @@ _VALIDATE_CONCURRENCY = 10
 # command checks only 401, but revoked/expired keys have been observed returning
 # 403 (verified on 2026-07-25) — treat both as "dead".
 _DEAD_KEY_STATUSES = (401, 403)
+
+# Chronicl3r reply lines. Always ScrapCode's own words: Chronicl3r's `detail`
+# and any identity it returns never reach a player.
+CHRONICLER_LINKED_LINE = "🔗 Your key is linked in Chronicl3r."
+CHRONICLER_RETRY_LINE = (
+    "⏳ Your key is not linked in Chronicl3r yet — the bot will retry automatically."
+)
+CHRONICLER_INSUFFICIENT_DATA_LINE = (
+    "⚠️ Your key was not linked in Chronicl3r: it needs at least 3 levelled "
+    "showcase units to match your key to a player."
+)
+CHRONICLER_STORAGE_NOTICE = (
+    "Your key is also stored in Chronicl3r, our backend data store, "
+    "which may allow roster analytics. Unregistering deletes it."
+)
+CHRONICLER_UNLINKED_LINE = "🗑️ The key was removed from Chronicl3r."
+CHRONICLER_UNLINK_UNCONFIRMED_LINE = (
+    "⚠️ Removal of the key from Chronicl3r could not be confirmed."
+)
+CHRONICLER_LINK_EVENT = "chronicler.key.link"
+
+# Background key sync: backfills keys registered before the Chronicl3r link
+# existed. One link per tick = 30/h, half of Chronicl3r's per-account link
+# throttle, leaving the rest for live registrations. Lookups have their own
+# far larger bucket.
+KEY_SYNC_SWITCH_ENV = "CHRONICL3R_KEY_SYNC"
+KEY_SYNC_LOOKUPS_PER_TICK = 20
+KEY_SYNC_LOOKUP_EVENT = "chronicler.key_sync.lookup"
+KEY_SYNC_LINK_EVENT = "chronicler.key_sync.link"
+KEY_SYNC_PAUSED_EVENT = "chronicler.key_sync.paused"
+KEY_SYNC_TICK_FAILED_EVENT = "chronicler.key_sync.tick_failed"
+
+# Outcomes that settle a player normally; anything else is logged as a warning.
+_SETTLED_OUTCOMES = frozenset({"linked", "not_linked"})
 
 
 async def _probe_api_keys(
@@ -109,9 +153,149 @@ def _format_key_validation(
     return "\n".join(lines)
 
 
+def _link_outcome(status: int | None, code: str | None) -> tuple[str, str]:
+    """The reply line and the log code for one link outcome. Reads no key."""
+    if status == 200:
+        return CHRONICLER_LINKED_LINE, "linked"
+    if code == "insufficient_data":
+        return CHRONICLER_INSUFFICIENT_DATA_LINE, code
+    return CHRONICLER_RETRY_LINE, code or "unexpected"
+
+
+def _log_chronicler(event: str, level: int, server_id, discord_id: str, code: str) -> None:
+    emit_structured(
+        logger, level, event,
+        server_id=server_id, discord_id=discord_id, code=code,
+    )
+
+
+def _lookup_sync_outcome(result) -> str | None:
+    """The schedule outcome for one lookup. A held but invalid key is re-linked."""
+    if result.status == 200:
+        valid = bool(result.profile) and result.profile.get("has_valid_api_key") is True
+        return "linked" if valid else "not_linked"
+    return result.code
+
+
+def _link_sync_outcome(result) -> str | None:
+    return "linked" if result.status == 200 else result.code
+
+
+def _key_sync_switched_off() -> bool:
+    return os.getenv(KEY_SYNC_SWITCH_ENV, "").strip().lower() == "off"
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 class RegistrationCog(commands.Cog):
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot: commands.Bot, player_service=None):
+        # `player_service` defaults to None so callers that predate the
+        # Chronicl3r link keep constructing the cog; `register` then skips
+        # Chronicl3r entirely (no link, no link line, no storage notice).
         self.bot = bot
+        self.player_service = player_service
+        # One schedule shared by the loop and `register`, so a key the
+        # command just linked (or saw refused) is not posted again.
+        self.key_sync = KeySyncSchedule()
+        self.clock = _utc_now
+
+    async def cog_load(self):
+        # Started on load rather than in __init__: discord.py's Loop.start
+        # needs a running event loop, which `add_cog` always provides.
+        if self.player_service is not None:
+            self.chronicler_key_sync.start()
+
+    def cog_unload(self):
+        self.chronicler_key_sync.cancel()
+
+    # ==========================================
+    # TASK: CHRONICL3R KEY SYNC (every 2 minutes)
+    # ==========================================
+
+    @tasks.loop(minutes=2)
+    async def chronicler_key_sync(self):
+        """Look up at most 20 due keys, then link at most one.
+
+        Every player key read stays inside this function (the architecture
+        chokepoint exempts it by name). A failing tick is logged by exception
+        type only and never ends the loop.
+        """
+        if self.player_service is None or _key_sync_switched_off():
+            return
+        try:
+            now = self.clock()
+            if self.key_sync.paused_until(now) is not None:
+                return
+            # The FULL list every tick: the schedule forgets anyone missing.
+            registrations = [
+                (server_id, discord_id, entry.get("api_key"))
+                for server_id in repo.list_server_ids()
+                for discord_id, entry in load_player_registrations(server_id).items()
+                if isinstance(entry, dict) and entry.get("api_key")
+            ]
+
+            due = self.key_sync.due(registrations, now)
+            lookups = [r for r, action in due if action is KeySyncAction.LOOKUP]
+            for registration in lookups[:KEY_SYNC_LOOKUPS_PER_TICK]:
+                if not await self._settle(registration, KeySyncAction.LOOKUP, now):
+                    return
+            # Re-asked, so a key this tick's lookups found unlinked is linked now.
+            links = [r for r, action in self.key_sync.due(registrations, now)
+                     if action is KeySyncAction.LINK]
+            if links:
+                await self._settle(links[0], KeySyncAction.LINK, now)
+        except Exception as exc:
+            emit_structured(logger, logging.ERROR, KEY_SYNC_TICK_FAILED_EVENT,
+                            error_type=type(exc).__name__)
+
+    async def _settle(self, registration, action: KeySyncAction, now: datetime) -> bool:
+        """Make one sync call and record it; False when the loop is now paused."""
+        server_id, discord_id, key = registration
+        if action is KeySyncAction.LOOKUP:
+            call, outcome_of, event = (self.player_service.lookup_key,
+                                       _lookup_sync_outcome, KEY_SYNC_LOOKUP_EVENT)
+        else:
+            call, outcome_of, event = (self.player_service.link_key,
+                                       _link_sync_outcome, KEY_SYNC_LINK_EVENT)
+        try:
+            result = await call(key)
+            outcome, retry_after = outcome_of(result), result.retry_after
+        except Exception:
+            outcome, retry_after = RAISED_CODE, None
+        self.key_sync.record(server_id, discord_id, key, outcome, now, retry_after)
+        code = outcome or "unexpected"
+        level = logging.INFO if code in _SETTLED_OUTCOMES else logging.WARNING
+        _log_chronicler(event, level, server_id, discord_id, code)
+        paused_until = self.key_sync.paused_until(now)
+        if paused_until is None:
+            return True
+        emit_structured(
+            logger, logging.WARNING, KEY_SYNC_PAUSED_EVENT,
+            code=code, pause_seconds=int((paused_until - now).total_seconds()),
+        )
+        return False
+
+    async def _link_registered_key(self, server_id, discord_id: str, key: str) -> str:
+        """Link a just-registered key and record it; the reply line. Never raises."""
+        try:
+            result = await self.player_service.link_key(key)
+            line, link_code = _link_outcome(result.status, result.code)
+            retry_after = result.retry_after
+        except Exception:
+            line, link_code = _link_outcome(None, RAISED_CODE)
+            retry_after = None
+        # Same mapping as the loop's link: "unexpected" pauses exactly as a
+        # code-less answer would.
+        self.key_sync.record(server_id, discord_id, key, link_code, self.clock(), retry_after)
+        level = logging.INFO if line == CHRONICLER_LINKED_LINE else logging.WARNING
+        _log_chronicler(CHRONICLER_LINK_EVENT, level, server_id, discord_id, link_code)
+        return line
+
+    @chronicler_key_sync.before_loop
+    async def _before_chronicler_key_sync(self):
+        await self.bot.wait_until_ready()
 
     reg = app_commands.Group(name="registration", description="Player registration commands")
 
@@ -121,7 +305,7 @@ class RegistrationCog(commands.Cog):
 
     @reg.command(
         name="register",
-        description="Register your Tacticus API key to enable token cap notifications.",
+        description="Register your Tacticus API key for token cap pings; it is also stored in Chronicl3r.",
     )
     @require_guild_member()
     @app_commands.describe(
@@ -189,6 +373,8 @@ class RegistrationCog(commands.Cog):
         discord_id    = str(target_user.id) if target_user else str(interaction.user.id)
         registrations = load_player_registrations(server_id)
         already_exist = discord_id in registrations
+        previous_entry = registrations.get(discord_id)
+        previous_key = previous_entry.get("api_key") if isinstance(previous_entry, dict) else None
 
         # Check if this api_key is already registered to a different Discord ID
         for existing_id, existing_data in registrations.items():
@@ -204,20 +390,25 @@ class RegistrationCog(commands.Cog):
 
         if target_user:
             action = "updated" if already_exist else "registered"
-            await interaction.followup.send(
-                f"✅ {target_user.mention} has been {action} successfully in **{guild_name}**!",
-                ephemeral=True,
-            )
+            message = f"✅ {target_user.mention} has been {action} successfully in **{guild_name}**!"
         elif already_exist:
-            await interaction.followup.send(
-                f"✅ Your registration has been updated! Guild: **{guild_name}**",
-                ephemeral=True,
-            )
+            message = f"✅ Your registration has been updated! Guild: **{guild_name}**"
         else:
-            await interaction.followup.send(
-                f"✅ You've been registered in **{guild_name}**! You'll now receive a ping when your raid tokens are capped.",
-                ephemeral=True,
-            )
+            message = f"✅ You've been registered in **{guild_name}**! You'll now receive a ping when your raid tokens are capped."
+
+        if self.player_service is not None:
+            # Best-effort: the registration above is already saved, and nothing
+            # Chronicl3r does (or raises) may fail the command. The old key is
+            # unlinked BEFORE the new one is linked.
+            if previous_key and previous_key != api_key:
+                await remove_key_from_chronicler(
+                    self.player_service, previous_key,
+                    logger=logger, server_id=server_id, discord_id=discord_id,
+                )
+            line = await self._link_registered_key(server_id, discord_id, api_key)
+            message = "\n".join((message, line, CHRONICLER_STORAGE_NOTICE))
+
+        await interaction.followup.send(message, ephemeral=True)
 
     # ==========================================
     # SLASH COMMAND: REGISTRATION UNREGISTER
@@ -271,6 +462,9 @@ class RegistrationCog(commands.Cog):
             )
             return
 
+        entry = registrations[discord_id]
+        key = entry.get("api_key") if isinstance(entry, dict) else None
+
         del registrations[discord_id]
         save_player_registrations(server_id, registrations)
 
@@ -280,20 +474,24 @@ class RegistrationCog(commands.Cog):
             save_capped_state(server_id, capped_state)
 
         if target_user:
-            await interaction.followup.send(
-                f"✅ {target_user.mention} has been unregistered successfully.",
-                ephemeral=True,
-            )
+            message = f"✅ {target_user.mention} has been unregistered successfully."
         elif user_id:
-            await interaction.followup.send(
-                f"✅ User `{discord_id}` has been unregistered successfully.",
-                ephemeral=True,
-            )
+            message = f"✅ User `{discord_id}` has been unregistered successfully."
         else:
-            await interaction.followup.send(
-                "✅ You've been unregistered and will no longer receive token cap pings.",
-                ephemeral=True,
+            message = "✅ You've been unregistered and will no longer receive token cap pings."
+
+        if key and self.player_service is not None:
+            # Best-effort: the unregistration above is already saved, and
+            # nothing Chronicl3r does (or raises) may fail the command. Removal
+            # is only claimed when Chronicl3r confirmed it.
+            removed = await remove_key_from_chronicler(
+                self.player_service, key,
+                logger=logger, server_id=server_id, discord_id=discord_id,
             )
+            line = CHRONICLER_UNLINKED_LINE if removed else CHRONICLER_UNLINK_UNCONFIRMED_LINE
+            message = "\n".join((message, line))
+
+        await interaction.followup.send(message, ephemeral=True)
 
     # ==========================================
     # SLASH COMMAND: REGISTRATION MOVE
@@ -485,5 +683,5 @@ class RegistrationCog(commands.Cog):
         await interaction.followup.send(msg, ephemeral=True)
 
 
-async def setup_registration(bot: commands.Bot):
-    await bot.add_cog(RegistrationCog(bot))
+async def setup_registration(bot: commands.Bot, player_service=None):
+    await bot.add_cog(RegistrationCog(bot, player_service))

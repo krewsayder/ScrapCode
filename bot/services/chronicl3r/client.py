@@ -1,7 +1,61 @@
+from dataclasses import dataclass, field
+
 import requests
 from dotenv import load_dotenv
 import os
 load_dotenv()
+
+LINK_TIMEOUT_SECONDS = 60
+KEY_CALL_TIMEOUT_SECONDS = 10
+
+_NOT_JSON = object()
+
+
+@dataclass(frozen=True)
+class KeyCallResult:
+    """Outcome of one key call. Holds no key; the profile is kept out of repr."""
+
+    status: int | None
+    code: str | None
+    retry_after: int | None
+    profile: dict | None = field(repr=False)
+
+
+TRANSPORT_FAILURE = KeyCallResult(status=None, code="transport", retry_after=None, profile=None)
+
+
+def _json_body(response: requests.Response) -> object:
+    if "json" not in response.headers.get("Content-Type", "").lower():
+        return _NOT_JSON
+    try:
+        return response.json()
+    except ValueError:
+        return _NOT_JSON
+
+
+def _contract_code(status: int, body: object) -> str | None:
+    if body is _NOT_JSON and status == 404:
+        return "not_deployed"
+    code = body.get("code") if isinstance(body, dict) else None
+    return code if isinstance(code, str) else None
+
+
+def _retry_after_seconds(response: requests.Response) -> int | None:
+    value = response.headers.get("Retry-After", "").strip()
+    if value.isascii() and value.isdigit():
+        return int(value)
+    return None
+
+
+def _key_call_result(response: requests.Response) -> KeyCallResult:
+    body = _json_body(response)
+    status = response.status_code
+    return KeyCallResult(
+        status=status,
+        code=_contract_code(status, body),
+        retry_after=_retry_after_seconds(response),
+        profile=body if status == 200 and isinstance(body, dict) else None,
+    )
 
 class chronicl3rClient():
 
@@ -63,20 +117,6 @@ class chronicl3rClient():
         r.raise_for_status()
         return r.json()["data"]
 
-    def get_player_profile(self, tacticus_user_id: str) -> dict:
-        """
-        Retrieve an existing player profile.
-        Raises HTTPError on failure (404 if not found).
-        """
-        self._ensure_authenticated()
-
-        r = requests.get(
-            self.chronicl3r_root_url + self.player_base_url + f"player-profiles/{tacticus_user_id}/api-key/",
-            headers=self._auth_headers(),
-        )
-        r.raise_for_status()
-        return r.json()
-
     def get_profile(self, tacticus_user_id: str) -> dict:
         """
         Retrieve a player profile by Tacticus user ID.
@@ -91,17 +131,38 @@ class chronicl3rClient():
         r.raise_for_status()
         return r.json()
 
-    def set_player_api_key(self, tacticus_user_id: str, api_key: str) -> dict:
-        """
-        Register a Tacticus API key for a player profile.
-        Raises HTTPError on failure (400 if key invalid/mismatched, 404 if profile not found).
-        """
-        self._ensure_authenticated()
-
-        r = requests.patch(
-            self.chronicl3r_root_url + self.player_base_url + f"player-profiles/{tacticus_user_id}/api-key/",
-            json={"tacticus_player_api_key": api_key},
-            headers=self._auth_headers(),
+    def link_api_key(self, key: str) -> KeyCallResult:
+        """Link a Tacticus player API key to its profile. Never raises."""
+        return self._key_call(
+            requests.post, "player-profiles/api-keys/", LINK_TIMEOUT_SECONDS,
+            body={"tacticus_player_api_key": key},
         )
-        r.raise_for_status()
-        return r.json()
+
+    def lookup_api_key(self, key: str) -> KeyCallResult:
+        """Look up the profile a Tacticus player API key belongs to. Never raises."""
+        return self._key_call(
+            requests.post, "player-profiles/lookup/", KEY_CALL_TIMEOUT_SECONDS,
+            body={"tacticus_player_api_key": key},
+        )
+
+    def delete_api_key(self, tacticus_user_id: str) -> KeyCallResult:
+        """Remove the API key linked to a profile. Never raises."""
+        return self._key_call(
+            requests.delete, f"player-profiles/{tacticus_user_id}/api-key/",
+            KEY_CALL_TIMEOUT_SECONDS,
+        )
+
+    def _key_call(self, send, route: str, timeout: int, body: dict | None = None) -> KeyCallResult:
+        """One key call: no raise_for_status, and no request body in any message."""
+        payload = {} if body is None else {"json": body}
+        try:
+            self._ensure_authenticated()
+            response = send(
+                self.chronicl3r_root_url + self.player_base_url + route,
+                headers=self._auth_headers(),
+                timeout=timeout,
+                **payload,
+            )
+        except requests.RequestException:
+            return TRANSPORT_FAILURE
+        return _key_call_result(response)
