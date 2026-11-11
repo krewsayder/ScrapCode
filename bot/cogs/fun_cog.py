@@ -22,7 +22,7 @@ HELP_DATA = {
             "**https://api.tacticusgame.com/**"
         ),
         "commands": [
-            ("/registration register", "Link your Tacticus API key to your Discord account for token notifications."),
+            ("/registration register", "Link your Tacticus API key to your Discord account for token cap pings."),
             ("/registration unregister", "Remove your Tacticus API key registration."),
             ("/token_availability", "See raid token status for all registered players in a guild."),
             ("/bomb_availability",  "See bomb token status for all registered players in a guild."),
@@ -39,7 +39,10 @@ HELP_DATA = {
         "commands": [
             ("/view_config",                  "View cluster configuration — guilds, roles, or leaderboards. Replaces the retired /list_guilds command."),
             ("/registration list",            "List all registered players, optionally filtered by guild. Replaces the retired /check_registered_members command."),
-            ("/registration move",           "Move a registered player to a different guild without needing their API key."),
+            ("/registration register target_user:", "Register another player's API key on their behalf. They must hold the chosen guild's member role."),
+            ("/registration unregister target_user: / user_id:", "Unregister another player. Use user_id (their Discord ID) if they have left the server."),
+            ("/registration move",           "Move a registered player to a different guild without needing their API key. They must hold that guild's member role."),
+            ("/registration validate_keys",  "Check every registered API key in a guild and list the dead ones to chase."),
             ("/set_ping_channel",            "Set the channel where token cap notifications are posted for a guild."),
             ("/set_live_leaderboard",        "Pin a Battle leaderboard in a channel — it auto-updates every hour."),
             ("/set_live_cluster_leaderboard","Pin a cluster-wide leaderboard in a channel — it auto-updates every hour."),

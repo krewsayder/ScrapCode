@@ -350,7 +350,7 @@ class RegistrationCog(commands.Cog):
 
     @reg.command(
         name="register",
-        description="Register your Tacticus API key for token cap pings; it is also stored in Chronicl3r.",
+        description="Register your Tacticus API key to enable token cap pings.",
     )
     @require_guild_member()
     @app_commands.describe(
